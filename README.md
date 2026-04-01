@@ -733,10 +733,10 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Author
 
-**Himanshu Palerwal** -- 18x Salesforce Certified | Senior Manager & Post Sales Technical Architect
+**Himanshu Palerwal** -- 18x Salesforce Certified | Post Sales Technical Architect
 
 - 15 years in the Salesforce ecosystem
-- Currently at **ServiceTitan** -- Senior Manager & Post Sales Technical Architect
+- Currently at **ServiceTitan** -- Post Sales Technical Architect
 - Previously at **JPMorgan Chase** and **Bank of America** -- App Owner & Technical Architect
 - Specializing in Apex, LWC, Enterprise Architecture, AI Agents, MCP, and Agentic Architecture at enterprise scale
 - LinkedIn: [linkedin.com/in/himanshupalerwal](https://linkedin.com/in/himanshupalerwal)
