@@ -62,7 +62,15 @@ At 80% usage (configurable), a Warning platform event is fired. At 90%, a Thrott
 
 ### Does AgentGov track actual Salesforce governor limits?
 
-No. AgentGov tracks a logical budget that you define -- it does not interact with Salesforce's built-in `Limits` class. The budget is a governance layer that you configure to stay safely within your org's actual limits.
+Yes — AgentGov provides three tiers of budget tracking:
+
+1. **Automatic (Apex agents):** `AgentGovContext` uses the Salesforce `Limits` class to measure actual SOQL queries, DML statements, and callouts consumed during execution. Budget is decremented by the real measured delta.
+2. **Proxy-based (External/MCP agents):** The Governed Proxy API (`/agentgov-proxy/*`) executes CRUD operations on behalf of agents. Budget is consumed by the actual number of records processed.
+3. **Self-reported (backward compatible):** The `/authorize` endpoint accepts an optional `amount` parameter. Agents can also call `/report` after execution to reconcile actual vs. pre-authorized consumption.
+
+### What is the Governed Proxy API?
+
+Instead of external agents calling Salesforce's standard REST API directly (which AgentGov cannot intercept), agents call the Proxy API endpoints (`/agentgov-proxy/query`, `/create`, `/update`, `/delete`, `/upsert`). The proxy runs the full governance pipeline and then executes the operation, so budget is consumed by the actual number of records — not a hardcoded 1.
 
 ---
 

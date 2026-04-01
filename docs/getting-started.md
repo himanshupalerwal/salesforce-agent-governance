@@ -177,14 +177,37 @@ System.debug('API calls remaining: ' + budget.apiCallsRemaining);
 AgentGov_Session__c session = AgentGovRegistryService.startSession(agent.Id);
 System.debug('Session started: ' + session.Id);
 
-// Simulate an action: consume budget
+// Option A: Use AgentGovContext for automatic tracking (Apex agents)
+AgentGovContext.startTracking(agent.Id);
+List<Account> accts = [SELECT Id, Name FROM Account LIMIT 10]; // 1 SOQL
+update accts; // 1 DML
+AgentGovBudgetManager.BudgetResult result = AgentGovContext.stopTracking();
+// Budget consumed by ACTUAL delta (1 SOQL + 1 DML), not hardcoded 1
+System.debug('Budget status after real tracking: ' + result.budgetStatus);
+
+// Option B: Manual budget consumption (self-reported)
 AgentGovBudgetManager.consumeBudget(agent.Id, 'SOQL_Queries', 1);
-System.debug('Budget consumed successfully');
 
 // End the session
 AgentGovRegistryService.endSession(session.Id);
 System.debug('Session ended');
 ```
+
+### For External/MCP Agents: Use the Proxy API
+
+Instead of calling Salesforce's standard REST API directly, external agents should use the **Governed Proxy API** which tracks actual operations:
+
+```bash
+# Create records through the proxy — budget consumed by actual record count
+curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov-proxy/create \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"apiKey":"your-key","objectName":"Lead","records":[
+    {"FirstName":"John","LastName":"Doe","Company":"Acme"}
+  ]}'
+```
+
+See the [REST API Reference](rest-api-reference.md) for all proxy endpoints.
 
 ---
 
