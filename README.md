@@ -152,7 +152,7 @@ Four invocable actions make AgentGov accessible from any Salesforce Flow -- no A
 ![AgentGov Dashboard](docs/images/Dashboard_1.png)
 
 ### Agent Health Monitor, Budget Allocation & Conflicts
-![Health Monitor & Budget Allocation](docs/images/Dashboard_2.png)
+![Health Monitor & Budget Allocation](docs/images/dashboard_2.png)
 
 ### Detailed Budget Breakdown per Agent & Conflict Log
 ![Budget Breakdown](docs/images/Dashboard_3.png)
