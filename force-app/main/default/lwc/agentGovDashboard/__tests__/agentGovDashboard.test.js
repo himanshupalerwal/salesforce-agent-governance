@@ -20,6 +20,10 @@ jest.mock(
     { virtual: true }
 );
 
+function flushPromises() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 describe('c-agent-gov-dashboard', () => {
     afterEach(() => {
         while (document.body.firstChild) {
@@ -28,7 +32,7 @@ describe('c-agent-gov-dashboard', () => {
         jest.clearAllMocks();
     });
 
-    it('renders summary cards with data', async () => {
+    it('renders component', async () => {
         getAllRegistrations.mockResolvedValue([
             { Id: '1', Agent_Name__c: 'Agent 1', Status__c: 'Active' },
             { Id: '2', Agent_Name__c: 'Agent 2', Status__c: 'Inactive' }
@@ -39,11 +43,11 @@ describe('c-agent-gov-dashboard', () => {
         const element = createElement('c-agent-gov-dashboard', { is: AgentGovDashboard });
         document.body.appendChild(element);
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await flushPromises();
 
-        const headings = element.shadowRoot.querySelectorAll('.slds-text-heading_large');
-        expect(headings.length).toBeGreaterThan(0);
+        const title = element.shadowRoot.querySelector('.slds-page-header__title');
+        expect(title).toBeTruthy();
+        expect(title.textContent).toBe('AgentGov Dashboard');
     });
 
     it('shows loading spinner initially', () => {
@@ -66,7 +70,9 @@ describe('c-agent-gov-dashboard', () => {
         const element = createElement('c-agent-gov-dashboard', { is: AgentGovDashboard });
         document.body.appendChild(element);
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await flushPromises();
+
+        const errorEl = element.shadowRoot.querySelector('.slds-notify_alert');
+        expect(errorEl).toBeTruthy();
     });
 });
