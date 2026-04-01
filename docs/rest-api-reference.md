@@ -285,6 +285,123 @@ The connected app user must have the **AgentGov_Admin** or **AgentGov_User** per
 
 ---
 
+## POST /report
+
+Reports actual resource consumption after an agent completes its work. Used for budget reconciliation when agents pre-authorize with `/authorize` and then report what they actually consumed.
+
+### Request
+
+```
+POST /services/apexrest/agentgov/report
+Content-Type: application/json
+Authorization: Bearer <access_token>
+```
+
+**Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `apiKey` | String | Yes | The agent's API key |
+| `actual` | Object | Yes | Actual consumption: `{ "apiCalls": 3, "soqlQueries": 12, "dmlOperations": 4 }` |
+| `preAuthorized` | Object | No | What was pre-authorized via `/authorize`. If provided, only the delta is consumed. If actual < preAuthorized, budget is credited back. |
+
+### Response (200)
+
+```json
+{
+  "success": true,
+  "budgetStatus": "Normal",
+  "remainingBudget": {
+    "apiCalls": 9997,
+    "soqlQueries": 4988,
+    "dmlOperations": 2996
+  }
+}
+```
+
+---
+
+## Governed Proxy API
+
+Instead of agents calling Salesforce's standard REST API directly (which AgentGov cannot track), the Proxy API executes CRUD operations on behalf of agents. Budget is consumed by the **actual number of records** processed.
+
+**Base URL:** `https://<your-instance>.salesforce.com/services/apexrest/agentgov-proxy`
+
+### POST /agentgov-proxy/query
+
+Executes a SOQL query. Consumes 1 SOQL query from budget.
+
+```json
+{
+  "apiKey": "your-api-key",
+  "query": "SELECT Id, Name FROM Account WHERE Industry = 'Technology' LIMIT 10"
+}
+```
+
+**Response:** `{ "success": true, "totalSize": 10, "records": [...], "budgetStatus": "Normal", "remainingBudget": {...} }`
+
+### POST /agentgov-proxy/create
+
+Creates records. Budget consumed = number of records.
+
+```json
+{
+  "apiKey": "your-api-key",
+  "objectName": "Lead",
+  "records": [
+    { "FirstName": "John", "LastName": "Doe", "Company": "Acme" },
+    { "FirstName": "Jane", "LastName": "Smith", "Company": "Globex" }
+  ]
+}
+```
+
+**Response:** `{ "success": true, "recordsProcessed": 2, "recordsSucceeded": 2, "results": [...], "budgetStatus": "Normal", "remainingBudget": {...} }`
+
+### POST /agentgov-proxy/update
+
+Updates records (each record must include `Id`). Budget consumed = number of records.
+
+```json
+{
+  "apiKey": "your-api-key",
+  "objectName": "Lead",
+  "records": [
+    { "Id": "00Q...", "Status": "Qualified" }
+  ]
+}
+```
+
+### POST /agentgov-proxy/delete
+
+Deletes records by ID. Budget consumed = number of IDs.
+
+```json
+{
+  "apiKey": "your-api-key",
+  "objectName": "Lead",
+  "ids": ["00Q...", "00Q..."]
+}
+```
+
+### POST /agentgov-proxy/upsert
+
+Upserts records. Optionally specify an external ID field.
+
+```json
+{
+  "apiKey": "your-api-key",
+  "objectName": "Lead",
+  "externalIdField": "External_Id__c",
+  "records": [
+    { "External_Id__c": "EXT-001", "FirstName": "John", "LastName": "Doe", "Company": "Acme" }
+  ]
+}
+```
+
+All proxy endpoints run the full governance pipeline (circuit breaker → policy → budget → conflict) before executing.
+
+---
+
 ## Rate Limiting
 
 AgentGov does not impose its own rate limiting on REST API calls. However, Salesforce platform limits apply:

@@ -14,6 +14,7 @@ All actions appear in Flow Builder under the **AgentGov** category when you add 
 | **Check Agent Budget** | `AgentGovCheckBudget` | Read-only budget status check |
 | **Get Agent Status** | `AgentGovGetStatus` | Health and circuit breaker state |
 | **Log Agent Action** | `AgentGovLogAction` | Records an action for audit logging |
+| **Report Agent Usage** | `AgentGovReportUsage` | Reports actual resource consumption for accurate budget tracking |
 
 ---
 
@@ -188,6 +189,35 @@ When a Flow needs to choose between multiple agents:
    - Only A healthy: Use Agent A
    - Only B healthy: Use Agent B
    - Neither healthy: Escalate to human
+
+---
+
+## Report Agent Usage (Dynamic Budget Tracking)
+
+Use this action after your Flow performs operations to report **actual** resource consumption. This enables accurate budget tracking instead of the default 1-unit-per-action estimate.
+
+```
+Flow Element: Action — "Report Agent Usage"
+Input:
+  - Agent Registration ID: {!varAgentId}
+  - API Calls Used: 3           (Number — actual API calls made)
+  - SOQL Queries Used: 5        (Number — actual queries executed)
+  - DML Statements Used: 2      (Number — actual DML operations)
+
+Output:
+  - Budget Status → {!varBudgetStatus}          (Text)
+  - API Calls Remaining → {!varApiRemaining}    (Number)
+  - SOQL Queries Remaining → {!varSoqlRemaining} (Number)
+  - DML Operations Remaining → {!varDmlRemaining} (Number)
+```
+
+**Pattern: Post-Operation Reporting**
+```
+1. Register Agent Action (pre-authorize with budget=1)
+2. Flow performs actual operations (creates 10 records, queries 5 times)
+3. Report Agent Usage (reports actual: dmlStatementsUsed=10, soqlQueriesUsed=5)
+4. Budget reconciled to reflect true consumption
+```
 
 ---
 

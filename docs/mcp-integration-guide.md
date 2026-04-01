@@ -295,6 +295,48 @@ if (budget.remaining.dmlOperations < recordsToProcess) {
 
 ---
 
+## Using the Governed Proxy API (Recommended)
+
+Instead of calling `/authorize` and then Salesforce's standard REST API separately, MCP servers can use the **Proxy API** which performs CRUD operations directly with real budget tracking:
+
+```javascript
+// Instead of this (self-reported, budget = 1 per call):
+await agentGov.authorize('Lead', 'Create');
+await salesforceApi.create('Lead', records); // AgentGov doesn't know how many records
+
+// Do this (actual tracking, budget = record count):
+const result = await fetch(`${instanceUrl}/services/apexrest/agentgov-proxy/create`, {
+  method: 'POST',
+  headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    apiKey: 'your-mcp-agent-key',
+    objectName: 'Lead',
+    records: [
+      { FirstName: 'John', LastName: 'Doe', Company: 'Acme' },
+      { FirstName: 'Jane', LastName: 'Smith', Company: 'Globex' }
+    ]
+  })
+});
+// Budget consumed by 2 (actual record count), not 1
+```
+
+Available proxy endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`.
+
+For post-execution reconciliation, use the `/report` endpoint:
+
+```javascript
+await fetch(`${instanceUrl}/services/apexrest/agentgov/report`, {
+  method: 'POST',
+  headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    apiKey: 'your-mcp-agent-key',
+    actual: { apiCalls: 3, soqlQueries: 12, dmlOperations: 4 }
+  })
+});
+```
+
+---
+
 ## Security Considerations
 
 1. **API Key Storage:** Store the AgentGov API key securely (environment variables, secrets manager). Never hardcode it.

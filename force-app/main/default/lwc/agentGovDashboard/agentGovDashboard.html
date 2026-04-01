@@ -30,9 +30,9 @@
     </template>
 
     <template if:false={isLoading}>
-        <!-- Summary Cards -->
-        <div class="slds-grid slds-gutters slds-m-bottom_medium">
-            <div class="slds-col slds-size_1-of-4">
+        <!-- Summary Cards - Row 1 -->
+        <div class="slds-grid slds-gutters slds-m-bottom_small">
+            <div class="slds-col slds-size_1-of-3">
                 <lightning-card>
                     <div class="slds-p-around_medium slds-text-align_center">
                         <p class="slds-text-title_caps">Total Agents</p>
@@ -40,7 +40,7 @@
                     </div>
                 </lightning-card>
             </div>
-            <div class="slds-col slds-size_1-of-4">
+            <div class="slds-col slds-size_1-of-3">
                 <lightning-card>
                     <div class="slds-p-around_medium slds-text-align_center">
                         <p class="slds-text-title_caps">Active Agents</p>
@@ -48,7 +48,27 @@
                     </div>
                 </lightning-card>
             </div>
-            <div class="slds-col slds-size_1-of-4">
+            <div class="slds-col slds-size_1-of-3">
+                <lightning-card>
+                    <div class="slds-p-around_medium slds-text-align_center">
+                        <p class="slds-text-title_caps">Actions Today</p>
+                        <p class="slds-text-heading_large">{actionsToday}</p>
+                    </div>
+                </lightning-card>
+            </div>
+        </div>
+
+        <!-- Summary Cards - Row 2 -->
+        <div class="slds-grid slds-gutters slds-m-bottom_medium">
+            <div class="slds-col slds-size_1-of-3">
+                <lightning-card>
+                    <div class="slds-p-around_medium slds-text-align_center">
+                        <p class="slds-text-title_caps">Active Sessions</p>
+                        <p class="slds-text-heading_large">{activeSessions}</p>
+                    </div>
+                </lightning-card>
+            </div>
+            <div class="slds-col slds-size_1-of-3">
                 <lightning-card>
                     <div class="slds-p-around_medium slds-text-align_center">
                         <p class="slds-text-title_caps">Avg Budget Used</p>
@@ -56,11 +76,11 @@
                     </div>
                 </lightning-card>
             </div>
-            <div class="slds-col slds-size_1-of-4">
+            <div class="slds-col slds-size_1-of-3">
                 <lightning-card>
                     <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Conflicts</p>
-                        <p class="slds-text-heading_large slds-text-color_error">{conflictsDetected}</p>
+                        <p class="slds-text-title_caps">Circuit Breakers Tripped</p>
+                        <p class={trippedBreakersClass}>{trippedBreakers}</p>
                     </div>
                 </lightning-card>
             </div>
@@ -96,6 +116,38 @@
                 </template>
             </div>
         </lightning-card>
+
+        <!-- Active Sessions -->
+        <template if:true={hasSessions}>
+            <lightning-card title="Active Sessions" icon-name="standard:live_chat" class="slds-m-top_medium">
+                <div class="slds-p-around_medium">
+                    <table class="slds-table slds-table_cell-buffer slds-table_bordered">
+                        <thead>
+                            <tr class="slds-line-height_reset">
+                                <th scope="col"><div class="slds-truncate">Agent</div></th>
+                                <th scope="col"><div class="slds-truncate">Started</div></th>
+                                <th scope="col"><div class="slds-truncate">API Calls</div></th>
+                                <th scope="col"><div class="slds-truncate">SOQL Queries</div></th>
+                                <th scope="col"><div class="slds-truncate">DML Ops</div></th>
+                                <th scope="col"><div class="slds-truncate">Actions</div></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template for:each={sessions} for:item="session">
+                                <tr key={session.Id}>
+                                    <td><div class="slds-truncate">{session.Agent_Registration__r.Agent_Name__c}</div></td>
+                                    <td><div class="slds-truncate">{session.Session_Start__c}</div></td>
+                                    <td><div class="slds-truncate">{session.API_Calls_Used__c}</div></td>
+                                    <td><div class="slds-truncate">{session.SOQL_Queries_Used__c}</div></td>
+                                    <td><div class="slds-truncate">{session.DML_Statements_Used__c}</div></td>
+                                    <td><div class="slds-truncate">{session.Actions_Count__c}</div></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </lightning-card>
+        </template>
 
         <!-- Recent Conflicts -->
         <lightning-card title="Recent Conflicts" icon-name="standard:case" class="slds-m-top_medium">

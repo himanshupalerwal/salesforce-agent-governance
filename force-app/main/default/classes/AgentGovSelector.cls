@@ -300,6 +300,40 @@ public with sharing class AgentGovSelector {
         ];
     }
 
+    /** @description Gets count of actions logged today (used by dashboard). */
+    @AuraEnabled(cacheable=true)
+    public static Integer getTodaysActionCount() {
+        Date today = Date.today();
+        return [
+            SELECT COUNT()
+            FROM AgentGov_Action_Log__c
+            WHERE Timestamp__c = TODAY
+        ];
+    }
+
+    /** @description Gets active sessions with resource usage (used by dashboard). */
+    @AuraEnabled(cacheable=true)
+    public static List<AgentGov_Session__c> getActiveSessions() {
+        return [
+            SELECT Id, Agent_Registration__c, Agent_Registration__r.Agent_Name__c,
+                   Session_Start__c, Status__c, API_Calls_Used__c,
+                   SOQL_Queries_Used__c, DML_Statements_Used__c, Actions_Count__c
+            FROM AgentGov_Session__c
+            WHERE Status__c = :AgentGovConstants.SESSION_ACTIVE
+            ORDER BY Session_Start__c DESC
+        ];
+    }
+
+    /** @description Gets count of agents with OPEN circuit breaker (used by dashboard). */
+    @AuraEnabled(cacheable=true)
+    public static Integer getTrippedCircuitBreakerCount() {
+        return [
+            SELECT COUNT()
+            FROM AgentGov_Registration__c
+            WHERE Circuit_Breaker_State__c = :AgentGovConstants.CB_OPEN
+        ];
+    }
+
     /** @description Clears all static caches. Useful in test context. */
     @TestVisible
     public static void clearCache() {

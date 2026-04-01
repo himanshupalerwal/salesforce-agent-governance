@@ -24,6 +24,8 @@ global with sharing class AgentGovRestApi {
                 handleRegister(body, res);
             } else if (path == '/authorize') {
                 handleAuthorize(body, res);
+            } else if (path == '/report') {
+                handleReport(body, res);
             } else {
                 res.statusCode = 404;
                 res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
@@ -154,10 +156,12 @@ global with sharing class AgentGovRestApi {
             );
         }
 
-        // 3. Check and consume budget
+        // 3. Check and consume budget (supports parameterized amount, default 1)
         String limitType = getLimitTypeForOperation(operation);
+        Integer amount = body.containsKey('amount') && body.get('amount') != null
+            ? Integer.valueOf(String.valueOf(body.get('amount'))) : 1;
         AgentGovBudgetManager.BudgetResult budgetResult = AgentGovBudgetManager.consumeBudget(
-            reg.Id, limitType, 1
+            reg.Id, limitType, amount
         );
 
         // 4. Check for conflicts (if record-specific)
@@ -193,6 +197,91 @@ global with sharing class AgentGovRestApi {
 
         res.statusCode = 200;
         res.responseBody = Blob.valueOf(JSON.serialize(responseMap));
+    }
+
+    /**
+     * @description Handles POST /report — agents report actual resource consumption after execution.
+     *              Reconciles against pre-authorized amounts and adjusts budget accordingly.
+     */
+    private static void handleReport(Map<String, Object> body, RestResponse res) {
+        String apiKey = (String) body.get('apiKey');
+        if (String.isBlank(apiKey)) {
+            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'apiKey is required.');
+        }
+
+        AgentGov_Registration__c reg = AgentGovSelector.getRegistrationByApiKey(apiKey);
+        if (reg == null) {
+            throw new AgentGovException(AgentGovException.ErrorCode.AGENT_NOT_FOUND, AgentGovConstants.ERR_AGENT_NOT_REGISTERED);
+        }
+
+        Map<String, Object> actual = (Map<String, Object>) body.get('actual');
+        if (actual == null) {
+            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'actual usage data is required.');
+        }
+
+        Map<String, Integer> consumption = new Map<String, Integer>();
+        if (actual.containsKey('apiCalls') && actual.get('apiCalls') != null) {
+            consumption.put(AgentGovConstants.LIMIT_API_CALLS, Integer.valueOf(String.valueOf(actual.get('apiCalls'))));
+        }
+        if (actual.containsKey('soqlQueries') && actual.get('soqlQueries') != null) {
+            consumption.put(AgentGovConstants.LIMIT_SOQL_QUERIES, Integer.valueOf(String.valueOf(actual.get('soqlQueries'))));
+        }
+        if (actual.containsKey('dmlOperations') && actual.get('dmlOperations') != null) {
+            consumption.put(AgentGovConstants.LIMIT_DML_OPERATIONS, Integer.valueOf(String.valueOf(actual.get('dmlOperations'))));
+        }
+
+        // If preAuthorized is provided, reconcile (only consume the delta)
+        Map<String, Object> preAuth = (Map<String, Object>) body.get('preAuthorized');
+        if (preAuth != null) {
+            if (preAuth.containsKey('apiCalls') && preAuth.get('apiCalls') != null) {
+                Integer preAmt = Integer.valueOf(String.valueOf(preAuth.get('apiCalls')));
+                Integer actualAmt = consumption.containsKey(AgentGovConstants.LIMIT_API_CALLS) ? consumption.get(AgentGovConstants.LIMIT_API_CALLS) : 0;
+                Integer delta = actualAmt - preAmt;
+                if (delta > 0) {
+                    consumption.put(AgentGovConstants.LIMIT_API_CALLS, delta);
+                } else if (delta < 0) {
+                    AgentGovBudgetManager.creditBudget(reg.Id, AgentGovConstants.LIMIT_API_CALLS, Math.abs(delta));
+                    consumption.remove(AgentGovConstants.LIMIT_API_CALLS);
+                } else {
+                    consumption.remove(AgentGovConstants.LIMIT_API_CALLS);
+                }
+            }
+            if (preAuth.containsKey('dmlOperations') && preAuth.get('dmlOperations') != null) {
+                Integer preAmt = Integer.valueOf(String.valueOf(preAuth.get('dmlOperations')));
+                Integer actualAmt = consumption.containsKey(AgentGovConstants.LIMIT_DML_OPERATIONS) ? consumption.get(AgentGovConstants.LIMIT_DML_OPERATIONS) : 0;
+                Integer delta = actualAmt - preAmt;
+                if (delta > 0) {
+                    consumption.put(AgentGovConstants.LIMIT_DML_OPERATIONS, delta);
+                } else if (delta < 0) {
+                    AgentGovBudgetManager.creditBudget(reg.Id, AgentGovConstants.LIMIT_DML_OPERATIONS, Math.abs(delta));
+                    consumption.remove(AgentGovConstants.LIMIT_DML_OPERATIONS);
+                } else {
+                    consumption.remove(AgentGovConstants.LIMIT_DML_OPERATIONS);
+                }
+            }
+        }
+
+        // Consume remaining delta
+        AgentGovBudgetManager.BudgetResult budgetResult;
+        if (!consumption.isEmpty()) {
+            budgetResult = AgentGovBudgetManager.consumeBudget(reg.Id, consumption);
+        } else {
+            budgetResult = AgentGovBudgetManager.checkBudget(reg.Id);
+        }
+
+        // Log the report
+        publishActionEvent(reg, AgentGovConstants.ACTION_REPORT, null, null, AgentGovConstants.ACTION_SUCCESS);
+
+        res.statusCode = 200;
+        res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
+            'success' => true,
+            'budgetStatus' => budgetResult.budgetStatus,
+            'remainingBudget' => new Map<String, Object>{
+                'apiCalls' => budgetResult.apiCallsRemaining,
+                'soqlQueries' => budgetResult.soqlQueriesRemaining,
+                'dmlOperations' => budgetResult.dmlOperationsRemaining
+            }
+        }));
     }
 
     private static void handleGetBudget(String agentId, RestResponse res) {

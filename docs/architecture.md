@@ -34,6 +34,8 @@ C4Context
 flowchart TB
     subgraph EntryPoints["Entry Points"]
         REST["AgentGovRestApi\n(REST Resource)"]
+        PROXY["AgentGovProxyApi\n(Governed CRUD Proxy)"]
+        CTX["AgentGovContext\n(Apex Limits Measurement)"]
         INV["Invocable Actions\n(Flow Integration)"]
         APEX["Direct Apex\n(Custom Code)"]
     end
@@ -67,6 +69,13 @@ flowchart TB
     REST --> CB
     REST --> PE
     REST --> CR
+
+    PROXY --> CB
+    PROXY --> PE
+    PROXY --> BM
+    PROXY --> CR
+
+    CTX --> BM
 
     INV --> REG
     INV --> BM
@@ -106,7 +115,10 @@ flowchart TB
 | **AgentGovPolicyEngine** | Metadata-driven policy evaluation, wildcard matching, field restrictions |
 | **AgentGovConflictResolver** | In-memory record locking, priority-based conflict resolution, conflict logging |
 | **AgentGovSelector** | All SOQL queries, per-transaction caching, `WITH SECURITY_ENFORCED` |
-| **AgentGovRestApi** | REST endpoints for external agent integration |
+| **AgentGovRestApi** | REST endpoints for external agent integration (`/register`, `/authorize`, `/report`) |
+| **AgentGovProxyApi** | Governed CRUD proxy — executes DML/SOQL on behalf of agents with real budget tracking |
+| **AgentGovContext** | Transaction-level measurement for Apex agents using `Limits` class |
+| **AgentGovReportUsage** | Invocable action for Flows to report actual resource consumption |
 | **AgentGovConstants** | Centralized string literals, default values, valid type sets |
 | **AgentGovException** | Typed exceptions with error codes mapped to HTTP status codes |
 
@@ -274,7 +286,7 @@ sequenceDiagram
 
     PE-->>REST: {allowed: true}
 
-    REST->>BM: consumeBudget(agentId, limitType, 1)
+    REST->>BM: consumeBudget(agentId, limitType, amount)
     BM->>SEL: getTodaysBudgetForUpdate(agentId)
     SEL-->>BM: Budget record (locked)
     BM->>BM: Calculate usage percentage
@@ -300,6 +312,53 @@ sequenceDiagram
 
     REST->>EVT: Publish Action Event (SUCCESS)
     REST-->>Agent: 200 {authorized: true, budget: {...}}
+```
+
+---
+
+## Proxy API Flow (Dynamic Budget Tracking)
+
+When agents use the Proxy API instead of `/authorize`, the flow includes **actual DML execution** and budget is consumed by **record count**:
+
+```mermaid
+sequenceDiagram
+    participant Agent as MCP Agent
+    participant PROXY as AgentGovProxyApi
+    participant CB as CircuitBreaker
+    participant PE as PolicyEngine
+    participant BM as BudgetManager
+    participant SF as Salesforce DML
+
+    Agent->>PROXY: POST /agentgov-proxy/create (apiKey, objectName, 5 records)
+    PROXY->>PROXY: Authenticate via apiKey
+    PROXY->>CB: allowRequest(agentId)
+    CB-->>PROXY: true (CLOSED)
+    PROXY->>PE: evaluatePolicy(agentId, "Lead", "Create")
+    PE-->>PROXY: {allowed: true}
+    PROXY->>BM: consumeBudget(agentId, "DML_Operations", 5)
+    Note over BM: Budget consumed by ACTUAL<br/>record count (5), not hardcoded 1
+    BM-->>PROXY: BudgetResult
+    PROXY->>SF: Database.insert(5 Lead records)
+    SF-->>PROXY: SaveResult[] (3 success, 2 failed)
+    PROXY->>CB: recordSuccess(agentId)
+    PROXY-->>Agent: {recordsProcessed: 5, recordsSucceeded: 3, budgetStatus: "Normal"}
+```
+
+For **Apex agents**, `AgentGovContext` measures actual `Limits` class delta:
+
+```mermaid
+sequenceDiagram
+    participant Code as Apex Agent Code
+    participant CTX as AgentGovContext
+    participant BM as BudgetManager
+
+    Code->>CTX: startTracking(agentId)
+    Note over CTX: Captures Limits.getQueries()=5<br/>Limits.getDMLStatements()=2
+    Code->>Code: Execute 3 SOQL queries + 4 DML statements
+    Code->>CTX: stopTracking()
+    Note over CTX: Captures Limits.getQueries()=8<br/>Limits.getDMLStatements()=6<br/>Delta: SOQL=3, DML=4
+    CTX->>BM: consumeBudget(agentId, {SOQL: 3, DML: 4})
+    BM-->>CTX: BudgetResult (actual consumption recorded)
 ```
 
 ---

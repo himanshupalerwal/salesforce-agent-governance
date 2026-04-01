@@ -40,6 +40,8 @@ flowchart TB
     end
 
     subgraph AgentGov["AgentGov Framework"]
+        PROXY["Proxy API\n/query /create /update\n/delete /upsert"]
+        CTX["AgentGov Context\n(Limits measurement)"]
         REG["Registry Service"]
         CB["Circuit Breaker"]
         PE["Policy Engine"]
@@ -53,19 +55,23 @@ flowchart TB
         CS["Custom Settings\n(Configuration)"]
         CO["Custom Objects\n(Registrations, Budgets,\nSessions, Logs)"]
         EVT["Platform Events\n(Alerts & Actions)"]
+        SF["Salesforce DML/SOQL\n(Actual Operations)"]
     end
 
+    A2 -->|"REST API"| PROXY
     A1 -->|"REST API / Apex"| REG
-    A2 -->|"REST API"| REG
-    A3 -->|"Apex Direct"| REG
+    A3 -->|"Apex via Context"| CTX
     A4 -->|"Invocable Actions"| REG
 
+    PROXY -->|"Auth + Governance"| CB
+    CTX -->|"Measures Limits"| BM
     REG --> CB
     CB -->|"CLOSED?"| PE
     PE -->|"Allowed?"| BM
     BM -->|"Has Budget?"| CR
     CR -->|"No Conflict?"| AL
 
+    PROXY -->|"Executes DML"| SF
     CB -.-> MD
     PE -.-> MD
     BM -.-> CS
@@ -105,7 +111,33 @@ Detect and resolve conflicts when multiple agents attempt to modify the same rec
 ### 5. Real-Time Monitoring
 Platform Events (`AgentGov_Alert__e` and `AgentGov_Action_Event__e`) provide real-time visibility into agent activity. Subscribe from LWC dashboards, Streaming API clients, or trigger follow-up automations. Every budget threshold crossing, circuit breaker trip, and policy violation fires an event.
 
-### 6. Flow-Native Integration
+### 6. Governed Proxy API (Dynamic Tracking)
+Instead of agents calling Salesforce REST API directly (which AgentGov can't track), agents go through the **Proxy API** which performs CRUD operations on their behalf. Budget is consumed by the **actual number of records** affected — not a hardcoded 1.
+
+```bash
+# Create 5 Lead records through the proxy → budget consumed by 5 DML operations
+curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov-proxy/create \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"apiKey":"your-key","objectName":"Lead","records":[
+    {"FirstName":"John","LastName":"Doe","Company":"Acme"},
+    {"FirstName":"Jane","LastName":"Smith","Company":"Globex"},
+    {"FirstName":"Bob","LastName":"Jones","Company":"Initech"},
+    {"FirstName":"Alice","LastName":"Lee","Company":"Umbrella"},
+    {"FirstName":"Charlie","LastName":"Brown","Company":"Stark"}
+  ]}'
+```
+
+Proxy endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`. Each runs the full governance pipeline (circuit breaker → policy → budget → conflict) before executing.
+
+For Apex agents, use `AgentGovContext` to automatically measure actual resource consumption via the `Limits` class:
+```apex
+AgentGovContext.startTracking(agentId);
+// ... agent performs SOQL queries, DML operations, callouts ...
+AgentGovBudgetManager.BudgetResult result = AgentGovContext.stopTracking();
+// Budget consumed by ACTUAL measured delta, not self-reported
+```
+
+### 7. Flow-Native Integration
 Four invocable actions make AgentGov accessible from any Salesforce Flow -- no Apex required:
 - **Register Agent Action** -- Check policy + consume budget + log action in one call
 - **Check Agent Budget** -- Read-only budget status check
@@ -116,11 +148,14 @@ Four invocable actions make AgentGov accessible from any Salesforce Flow -- no A
 
 ## Screenshots
 
-### AgentGov Dashboard
-![AgentGov Dashboard](docs/images/dashboard.png)
+### AgentGov Dashboard — Summary Cards, Budget Usage & Active Sessions
+![AgentGov Dashboard](docs/images/Dashboard_1.png)
 
-### Agent Health Monitor & Budget Allocation
-![Health Monitor & Budget Allocation](docs/images/dashboard_2.png)
+### Agent Health Monitor, Budget Allocation & Conflicts
+![Health Monitor & Budget Allocation](docs/images/Dashboard_2.png)
+
+### Detailed Budget Breakdown per Agent & Conflict Log
+![Budget Breakdown](docs/images/Dashboard_3.png)
 
 ### Agent Registrations
 ![Agent Registrations](docs/images/registrations.png)
@@ -486,9 +521,15 @@ Output:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/services/apexrest/agentgov/register` | Register a new agent |
-| `POST` | `/services/apexrest/agentgov/authorize` | Authorize an agent action (full pipeline) |
+| `POST` | `/services/apexrest/agentgov/authorize` | Authorize an agent action (supports `amount` parameter) |
+| `POST` | `/services/apexrest/agentgov/report` | Report actual resource consumption post-execution |
 | `GET` | `/services/apexrest/agentgov/budget/{agentId}` | Get current budget status |
 | `GET` | `/services/apexrest/agentgov/health/{agentId}` | Get agent health and circuit breaker state |
+| `POST` | `/services/apexrest/agentgov-proxy/query` | Execute SOQL query (counts as 1 SOQL budget) |
+| `POST` | `/services/apexrest/agentgov-proxy/create` | Insert records (budget = record count) |
+| `POST` | `/services/apexrest/agentgov-proxy/update` | Update records (budget = record count) |
+| `POST` | `/services/apexrest/agentgov-proxy/delete` | Delete records (budget = record count) |
+| `POST` | `/services/apexrest/agentgov-proxy/upsert` | Upsert records (budget = record count) |
 
 All endpoints require a valid Salesforce OAuth bearer token in the `Authorization` header.
 

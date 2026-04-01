@@ -445,3 +445,82 @@ public static Id getLockHolder(String recordId, String objectName)
 ```
 
 **Returns:** The agent registration ID holding the lock, or `null`.
+
+---
+
+## AgentGovContext
+
+Transaction-level measurement wrapper for Apex agents. Uses the `Limits` class to automatically measure actual SOQL, DML, and callout consumption.
+
+### startTracking
+
+Begins tracking resource consumption for an agent.
+
+```apex
+public static AgentGovContext startTracking(Id registrationId)
+public static AgentGovContext startTracking(Id registrationId, Id sessionId)
+```
+
+### stopTracking
+
+Stops tracking, calculates the delta, and consumes budget by actual measured amounts.
+
+```apex
+public static AgentGovBudgetManager.BudgetResult stopTracking()
+```
+
+### executeGoverned
+
+Convenience method that wraps an action in start/stop tracking with proper try/finally.
+
+```apex
+public static AgentGovBudgetManager.BudgetResult executeGoverned(Id registrationId, AgentGovAction action)
+```
+
+**Example:**
+```apex
+AgentGovBudgetManager.BudgetResult result = AgentGovContext.executeGoverned(agentId, new MyAction());
+
+private class MyAction implements AgentGovContext.AgentGovAction {
+    public void execute() {
+        List<Lead> leads = [SELECT Id FROM Lead WHERE Status = 'Open' LIMIT 100];
+        for (Lead l : leads) { l.Status = 'Working'; }
+        update leads;
+    }
+}
+// Budget consumed by actual delta: 1 SOQL + 1 DML (not hardcoded 1)
+```
+
+### getCurrentContext
+
+Returns the active tracking context (for trigger-based agent identification).
+
+```apex
+public static AgentGovContext getCurrentContext()
+```
+
+---
+
+## AgentGovProxyApi
+
+REST API that executes CRUD operations on behalf of agents with real budget tracking.
+
+**URL Mapping:** `/agentgov-proxy/*`
+
+Endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`
+
+Each endpoint authenticates via `apiKey`, runs the full governance pipeline, performs the operation, and consumes budget by **actual record count**. See [REST API Reference](rest-api-reference.md) for request/response formats.
+
+---
+
+## AgentGovReportUsage
+
+Invocable action for Flows to report actual resource consumption.
+
+```apex
+@InvocableMethod(label='Report Agent Usage')
+public static List<Result> reportUsage(List<Request> requests)
+```
+
+**Input:** `registrationId`, `apiCallsUsed`, `soqlQueriesUsed`, `dmlStatementsUsed`
+**Output:** `budgetStatus`, `apiCallsRemaining`, `soqlQueriesRemaining`, `dmlOperationsRemaining`

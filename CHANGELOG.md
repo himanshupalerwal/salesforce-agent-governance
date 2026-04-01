@@ -5,6 +5,21 @@ All notable changes to AgentGov will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-04-01
+
+### Added
+- **Governed Proxy API** (`AgentGovProxyApi.cls`) — 5 new REST endpoints (`/query`, `/create`, `/update`, `/delete`, `/upsert`) that execute CRUD operations on behalf of agents. Budget consumed by **actual record count**, not hardcoded 1.
+- **AgentGovContext** — Transaction-level measurement wrapper for Apex agents. Uses `Limits.getQueries()`, `Limits.getDMLStatements()`, and `Limits.getCallouts()` to measure actual resource consumption automatically.
+- **POST /agentgov/report** — Post-execution reporting endpoint. Agents report actual consumption after execution. Supports reconciliation against pre-authorized amounts with automatic credit-back.
+- **Multi-limit budget consumption** — New `consumeBudget(Id, Map<String, Integer>)` method consumes multiple limit types in a single DML operation.
+- **Budget credit** — New `creditBudget()` method reduces consumed amounts for reconciliation.
+- **Session counter updates** — Session fields (`API_Calls_Used__c`, `SOQL_Queries_Used__c`, `DML_Statements_Used__c`) are now updated during budget consumption.
+- **Report Agent Usage** invocable action (`AgentGovReportUsage.cls`) for Flows to report actual usage.
+
+### Changed
+- **POST /agentgov/authorize** now accepts optional `amount` parameter (default 1, backward compatible).
+- Dynamic field type conversion in proxy API handles DateTime, Date, Boolean, Decimal, and Integer fields from JSON.
+
 ## [1.0.0] - 2026-04-01
 
 ### Added

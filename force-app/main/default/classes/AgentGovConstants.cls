@@ -94,8 +94,12 @@ public class AgentGovConstants {
     public static final String POLICY_ALL = 'All';
     public static final String POLICY_WILDCARD = '*';
 
+    // Action Types (continued)
+    public static final String ACTION_REPORT = 'Report';
+
     // REST API
     public static final String REST_BASE_PATH = '/agentgov/';
+    public static final String REST_PROXY_BASE_PATH = '/agentgov-proxy/';
     public static final String REST_HEADER_API_KEY = 'X-AgentGov-API-Key';
 
     // Error Messages
@@ -114,6 +118,9 @@ public class AgentGovConstants {
     public static final String ERR_INVALID_AGENT_TYPE = 'Invalid agent type specified.';
     public static final String ERR_SESSION_NOT_ACTIVE = 'No active session found for this agent.';
     public static final String ERR_NULL_AGENT_ID = 'Agent registration ID cannot be null.';
+    public static final String ERR_INVALID_OBJECT_NAME = 'Object name is required.';
+    public static final String ERR_NO_RECORDS = 'At least one record is required.';
+    public static final String ERR_INVALID_SOQL = 'Invalid or disallowed SOQL query.';
 
     // Valid Agent Types Set (for validation)
     public static final Set<String> VALID_AGENT_TYPES = new Set<String>{
