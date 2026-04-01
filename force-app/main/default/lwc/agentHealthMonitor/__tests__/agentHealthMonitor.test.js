@@ -26,7 +26,7 @@ describe('c-agent-health-monitor', () => {
         jest.clearAllMocks();
     });
 
-    it('renders component', async () => {
+    it('renders component without errors', async () => {
         getAllRegistrations.mockResolvedValue([
             {
                 Id: '1',
@@ -45,19 +45,18 @@ describe('c-agent-health-monitor', () => {
 
         await flushPromises();
 
-        const header = element.shadowRoot.querySelector('.slds-page-header__title');
-        expect(header).toBeTruthy();
+        const card = element.shadowRoot.querySelector('lightning-card');
+        expect(card).toBeTruthy();
     });
 
-    it('shows empty state when no agents', async () => {
+    it('shows loading spinner initially', () => {
         getAllRegistrations.mockResolvedValue([]);
         getAllTodaysBudgets.mockResolvedValue([]);
 
         const element = createElement('c-agent-health-monitor', { is: AgentHealthMonitor });
         document.body.appendChild(element);
 
-        await flushPromises();
-
-        expect(element.shadowRoot.querySelector('.slds-page-header__title')).toBeTruthy();
+        const spinner = element.shadowRoot.querySelector('lightning-spinner');
+        expect(spinner).toBeTruthy();
     });
 });
