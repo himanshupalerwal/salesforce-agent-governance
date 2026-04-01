@@ -146,6 +146,91 @@ Four invocable actions make AgentGov accessible from any Salesforce Flow -- no A
 
 ---
 
+## How Budget Tracking Works
+
+AgentGov provides **three ways** to track agent resource consumption. Choose the right one based on your agent type:
+
+| Option | Best For | Accuracy | How It Works |
+|--------|----------|----------|--------------|
+| **Proxy API** | External / MCP agents | **Exact** — counts actual records | AgentGov executes the DML/SOQL on behalf of the agent and counts the records processed |
+| **AgentGovContext** | Apex agents (same org) | **Transaction-level** — measures Limits delta | Captures `Limits.getQueries()` and `Limits.getDMLStatements()` before and after your agent code runs |
+| **/authorize + /report** | Any agent type | **Agent-reported** with reconciliation | Agent pre-declares expected cost, then optionally reports actual consumption afterward |
+
+### Option 1: Proxy API (Recommended for External Agents)
+
+The agent calls AgentGov's proxy endpoints instead of Salesforce's standard REST API. AgentGov performs the operation and knows exactly how many records were affected.
+
+```bash
+# Agent wants to create 3 Leads
+curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov-proxy/create \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"apiKey":"your-key","objectName":"Lead","records":[
+    {"FirstName":"John","LastName":"Doe","Company":"Acme"},
+    {"FirstName":"Jane","LastName":"Smith","Company":"Globex"},
+    {"FirstName":"Bob","LastName":"Jones","Company":"Initech"}
+  ]}'
+# Budget consumed: DML_Operations = 3 (exact record count)
+# Full governance pipeline runs: circuit breaker → policy → budget → conflict → execute
+```
+
+**Endpoints:** `/agentgov-proxy/query`, `/create`, `/update`, `/delete`, `/upsert`
+
+**Why it's the most accurate:** AgentGov controls the DML. There's no way for the agent to do more or fewer operations than what's tracked.
+
+### Option 2: AgentGovContext (Recommended for Apex Agents)
+
+Wrap your agent's Apex code between `startTracking()` and `stopTracking()`. AgentGov measures the actual SOQL queries, DML statements, and callouts consumed using Salesforce's `Limits` class.
+
+```apex
+// Start measuring
+AgentGovContext.startTracking(agentId);
+
+// Agent does its work — any SOQL, DML, callouts here are measured
+List<Lead> leads = [SELECT Id, Status FROM Lead WHERE Status = 'Open'];  // 1 SOQL
+for (Lead l : leads) { l.Status = 'Working'; }
+update leads;                                                             // 1 DML
+insert new Task(Subject = 'Follow up on leads');                          // 1 DML
+
+// Stop measuring — budget consumed by actual delta
+AgentGovBudgetManager.BudgetResult result = AgentGovContext.stopTracking();
+// Measured: 1 SOQL query + 2 DML operations consumed from budget
+```
+
+**Or use the convenience wrapper:**
+```apex
+AgentGovContext.executeGoverned(agentId, new MyAgentAction());
+// Automatically calls startTracking/stopTracking with try/finally
+```
+
+**Important:** This measures everything between start and stop — including triggers and automations that fire as a result of the agent's DML. This is by design: if an agent's insert triggers 3 workflow rules, that's the agent's true cost to the org. The developer controls what goes inside the tracking block.
+
+### Option 3: /authorize + /report (Flexible, Any Agent Type)
+
+The traditional approach: agent asks permission before acting, then optionally reports what it actually did.
+
+```bash
+# Step 1: Pre-authorize (agent declares expected cost)
+curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/authorize \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"apiKey":"your-key","objectName":"Lead","operation":"Update","amount":10}'
+# Budget consumed: 10 DML operations (pre-authorized)
+
+# Step 2: Agent does its actual work (via standard Salesforce API or any method)
+# ... agent updates 7 leads ...
+
+# Step 3: Report actual usage (reconciliation)
+curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/report \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"apiKey":"your-key",
+    "actual":{"dmlOperations":7},
+    "preAuthorized":{"dmlOperations":10}}'
+# Delta: 7 - 10 = -3 → 3 DML operations credited back to budget
+```
+
+**Note:** If `amount` is omitted from `/authorize`, it defaults to `1` for backward compatibility. The `/report` step is optional but recommended for accurate tracking. Without it, the pre-authorized amount is the final consumption.
+
+---
+
 ## Screenshots
 
 ### AgentGov Dashboard — Summary Cards, Budget Usage & Active Sessions
