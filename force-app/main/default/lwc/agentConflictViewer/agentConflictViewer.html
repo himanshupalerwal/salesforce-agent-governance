@@ -1,0 +1,33 @@
+<template>
+    <lightning-card title="Agent Conflicts" icon-name="standard:case">
+        <span slot="actions">
+            <lightning-badge label={conflictCount} class="slds-m-right_small"></lightning-badge>
+            <lightning-button label="Refresh" icon-name="utility:refresh" onclick={handleRefresh}></lightning-button>
+        </span>
+
+        <template if:true={isLoading}>
+            <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+        </template>
+
+        <template if:true={error}>
+            <div class="slds-p-around_medium slds-text-color_error">{error}</div>
+        </template>
+
+        <template if:false={isLoading}>
+            <template if:true={hasConflicts}>
+                <lightning-datatable
+                    key-field="Id"
+                    data={conflicts}
+                    columns={columns}
+                    hide-checkbox-column
+                    show-row-number-column>
+                </lightning-datatable>
+            </template>
+            <template if:false={hasConflicts}>
+                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large">
+                    No conflicts detected. All agents are operating without contention.
+                </div>
+            </template>
+        </template>
+    </lightning-card>
+</template>

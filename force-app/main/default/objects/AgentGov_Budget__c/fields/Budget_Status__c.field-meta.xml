@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Budget_Status__c</fullName>
+    <label>Budget Status</label>
+    <type>Picklist</type>
+    <required>true</required>
+    <externalId>false</externalId>
+    <trackTrending>false</trackTrending>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>Normal</fullName>
+                <default>true</default>
+                <label>Normal</label>
+            </value>
+            <value>
+                <fullName>Warning</fullName>
+                <default>false</default>
+                <label>Warning</label>
+            </value>
+            <value>
+                <fullName>Throttled</fullName>
+                <default>false</default>
+                <label>Throttled</label>
+            </value>
+            <value>
+                <fullName>Blocked</fullName>
+                <default>false</default>
+                <label>Blocked</label>
+            </value>
+            <value>
+                <fullName>Exhausted</fullName>
+                <default>false</default>
+                <label>Exhausted</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

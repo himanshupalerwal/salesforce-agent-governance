@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Resolution__c</fullName>
+    <label>Resolution</label>
+    <type>Picklist</type>
+    <required>true</required>
+    <externalId>false</externalId>
+    <description>How the conflict was resolved</description>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>Agent1_Won</fullName>
+                <default>false</default>
+                <label>Agent1 Won</label>
+            </value>
+            <value>
+                <fullName>Agent2_Won</fullName>
+                <default>false</default>
+                <label>Agent2 Won</label>
+            </value>
+            <value>
+                <fullName>Queued</fullName>
+                <default>false</default>
+                <label>Queued</label>
+            </value>
+            <value>
+                <fullName>Failed</fullName>
+                <default>false</default>
+                <label>Failed</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

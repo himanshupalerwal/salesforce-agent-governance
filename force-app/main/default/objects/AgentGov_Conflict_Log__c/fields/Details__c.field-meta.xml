@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Details__c</fullName>
+    <label>Details</label>
+    <type>LongTextArea</type>
+    <length>32768</length>
+    <visibleLines>5</visibleLines>
+    <externalId>false</externalId>
+    <description>Additional context about the conflict and resolution</description>
+</CustomField>

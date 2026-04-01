@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Enable_Real_Time_Events__c</fullName>
+    <defaultValue>true</defaultValue>
+    <description>Enable Platform Event publishing for real-time monitoring</description>
+    <externalId>false</externalId>
+    <label>Enable Real Time Events</label>
+    <trackTrending>false</trackTrending>
+    <type>Checkbox</type>
+</CustomField>

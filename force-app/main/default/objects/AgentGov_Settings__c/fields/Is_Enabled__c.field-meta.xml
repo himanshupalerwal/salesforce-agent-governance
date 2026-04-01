@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Is_Enabled__c</fullName>
+    <defaultValue>true</defaultValue>
+    <description>Global kill switch for AgentGov governance</description>
+    <externalId>false</externalId>
+    <label>Is Enabled</label>
+    <trackTrending>false</trackTrending>
+    <type>Checkbox</type>
+</CustomField>

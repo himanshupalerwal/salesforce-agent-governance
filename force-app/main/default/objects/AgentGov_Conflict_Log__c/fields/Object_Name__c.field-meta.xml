@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Object_Name__c</fullName>
+    <label>Object Name</label>
+    <type>Text</type>
+    <length>255</length>
+    <externalId>false</externalId>
+    <description>API name of the Salesforce object that was contested</description>
+    <required>false</required>
+    <unique>false</unique>
+</CustomField>

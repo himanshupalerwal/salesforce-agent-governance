@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Conflict_Type__c</fullName>
+    <label>Conflict Type</label>
+    <type>Picklist</type>
+    <required>true</required>
+    <externalId>false</externalId>
+    <description>The type of conflict detected</description>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>Concurrent_Write</fullName>
+                <default>false</default>
+                <label>Concurrent Write</label>
+            </value>
+            <value>
+                <fullName>Lock_Contention</fullName>
+                <default>false</default>
+                <label>Lock Contention</label>
+            </value>
+            <value>
+                <fullName>Priority_Override</fullName>
+                <default>false</default>
+                <label>Priority Override</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

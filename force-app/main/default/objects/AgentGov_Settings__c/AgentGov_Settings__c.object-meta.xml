@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <customSettingsType>Hierarchy</customSettingsType>
+    <description>Global and user-level settings for the AgentGov framework. Controls feature flags, default values, and notification preferences.</description>
+    <enableFeeds>false</enableFeeds>
+    <label>AgentGov Settings</label>
+    <visibility>Public</visibility>
+</CustomObject>

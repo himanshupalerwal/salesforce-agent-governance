@@ -1,0 +1,69 @@
+<template>
+    <lightning-card title="Agent Health Monitor" icon-name="standard:service_report">
+        <lightning-button slot="actions" label="Refresh" icon-name="utility:refresh" onclick={handleRefresh}></lightning-button>
+
+        <template if:true={isLoading}>
+            <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+        </template>
+
+        <template if:true={error}>
+            <div class="slds-p-around_medium slds-text-color_error">{error}</div>
+        </template>
+
+        <template if:false={isLoading}>
+            <template if:true={hasAgents}>
+                <div class="slds-grid slds-wrap slds-gutters slds-p-around_medium">
+                    <template for:each={agents} for:item="agent">
+                        <div key={agent.Id} class="slds-col slds-size_1-of-2 slds-large-size_1-of-3 slds-m-bottom_medium">
+                            <div class="slds-card agent-card">
+                                <div class="slds-card__header slds-grid">
+                                    <div class="slds-media slds-media_center slds-has-flexi-truncate">
+                                        <div class="slds-media__figure">
+                                            <lightning-icon icon-name={agent.cbIcon} size="small" class={agent.cbClass}></lightning-icon>
+                                        </div>
+                                        <div class="slds-media__body">
+                                            <h2 class="slds-card__header-title slds-truncate">{agent.Agent_Name__c}</h2>
+                                            <p class="slds-text-body_small">{agent.Agent_Type__c}</p>
+                                        </div>
+                                    </div>
+                                    <span class={agent.statusBadgeClass}>{agent.Status__c}</span>
+                                </div>
+                                <div class="slds-card__body slds-card__body_inner">
+                                    <div class="slds-grid slds-m-bottom_x-small">
+                                        <span class="slds-text-body_small slds-text-color_weak">Circuit Breaker:</span>
+                                        <span class="slds-text-body_small slds-m-left_xx-small"><strong>{agent.cbState}</strong></span>
+                                    </div>
+                                    <div class="slds-grid slds-m-bottom_x-small">
+                                        <span class="slds-text-body_small slds-text-color_weak">Priority:</span>
+                                        <span class="slds-text-body_small slds-m-left_xx-small">{agent.Priority__c}</span>
+                                    </div>
+                                    <div class="slds-m-bottom_x-small">
+                                        <span class="slds-text-body_small slds-text-color_weak">Budget Today: {agent.budgetPercent}%</span>
+                                        <div class="slds-progress-bar slds-progress-bar_small slds-m-top_xx-small">
+                                            <span class={agent.budgetBarClass} style={agent.budgetBarStyle}>
+                                                <span class="slds-assistive-text">{agent.budgetPercent}%</span>
+                                            </span>
+                                        </div>
+                                    </div>
+                                    <div class="slds-text-body_small slds-text-color_weak">
+                                        Last Active: {agent.lastActiveFormatted}
+                                    </div>
+                                    <template if:true={agent.Failure_Count__c}>
+                                        <div class="slds-text-body_small slds-text-color_error slds-m-top_xx-small">
+                                            Failures: {agent.Failure_Count__c}
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </template>
+            <template if:false={hasAgents}>
+                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large">
+                    No agents registered. Register agents to see health status.
+                </div>
+            </template>
+        </template>
+    </lightning-card>
+</template>

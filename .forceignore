@@ -1,0 +1,2 @@
+# LWC Jest test files should not be deployed
+**/__tests__/**

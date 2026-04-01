@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Agent_1__c</fullName>
+    <label>Agent 1</label>
+    <type>Lookup</type>
+    <externalId>false</externalId>
+    <description>The first agent involved in the conflict</description>
+    <referenceTo>AgentGov_Registration__c</referenceTo>
+    <relationshipLabel>Conflicts as Agent 1</relationshipLabel>
+    <relationshipName>Conflicts_as_Agent_1</relationshipName>
+    <deleteConstraint>SetNull</deleteConstraint>
+</CustomField>

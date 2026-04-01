@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Agent_Registration__c</fullName>
+    <label>Agent Registration</label>
+    <type>MasterDetail</type>
+    <externalId>false</externalId>
+    <description>The agent registration this budget is allocated to</description>
+    <referenceTo>AgentGov_Registration__c</referenceTo>
+    <relationshipLabel>Governor Budgets</relationshipLabel>
+    <relationshipName>Governor_Budgets</relationshipName>
+    <relationshipOrder>0</relationshipOrder>
+    <reparentableMasterDetail>false</reparentableMasterDetail>
+    <trackTrending>false</trackTrending>
+    <writeRequiresMasterRead>false</writeRequiresMasterRead>
+</CustomField>

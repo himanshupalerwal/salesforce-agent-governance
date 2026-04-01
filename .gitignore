@@ -1,0 +1,35 @@
+# Salesforce
+.sf/
+.sfdx/
+.localdevserver/
+
+# IDE
+.vscode/
+.idea/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log
+yarn.lock
+
+# Build & Test
+temp/
+test-coverage/
+coverage/
+.nyc_output/
+
+# LWC
+**/lwc/jsconfig.json
+
+# Logs
+*.log
+
+# Misc
+.config
+retrieve-temp/

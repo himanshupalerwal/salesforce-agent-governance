@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>API_Calls_Allocated__c</fullName>
+    <label>API Calls Allocated</label>
+    <type>Number</type>
+    <precision>10</precision>
+    <scale>0</scale>
+    <defaultValue>10000</defaultValue>
+    <required>false</required>
+    <unique>false</unique>
+    <externalId>false</externalId>
+    <description>Total API calls allocated for this budget period</description>
+    <trackTrending>false</trackTrending>
+</CustomField>

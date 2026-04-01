@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Budget_Date__c</fullName>
+    <label>Budget Date</label>
+    <type>Date</type>
+    <required>true</required>
+    <externalId>false</externalId>
+    <description>The date this budget allocation applies to</description>
+    <trackTrending>false</trackTrending>
+</CustomField>

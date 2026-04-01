@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Max_Concurrent_Agents__c</fullName>
+    <defaultValue>10</defaultValue>
+    <description>Maximum number of agents that can be active simultaneously</description>
+    <externalId>false</externalId>
+    <label>Max Concurrent Agents</label>
+    <precision>3</precision>
+    <required>false</required>
+    <scale>0</scale>
+    <trackTrending>false</trackTrending>
+    <type>Number</type>
+    <unique>false</unique>
+</CustomField>

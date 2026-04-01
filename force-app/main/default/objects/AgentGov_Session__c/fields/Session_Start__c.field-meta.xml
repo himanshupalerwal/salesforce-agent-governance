@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Session_Start__c</fullName>
+    <label>Session Start</label>
+    <type>DateTime</type>
+    <required>true</required>
+    <externalId>false</externalId>
+    <description>Timestamp when the agent session started</description>
+</CustomField>

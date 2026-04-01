@@ -1,0 +1,21 @@
+.bar-danger {
+    background-color: #c23934;
+}
+.bar-warning {
+    background-color: #ff9a3c;
+}
+.bar-normal {
+    background-color: #04844b;
+}
+.badge-high {
+    background-color: #c23934;
+    color: white;
+}
+.badge-medium {
+    background-color: #ff9a3c;
+    color: white;
+}
+.badge-low {
+    background-color: #706e6b;
+    color: white;
+}

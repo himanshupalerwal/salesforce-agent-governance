@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <apiVersion>62.0</apiVersion>
+    <isExposed>true</isExposed>
+    <targets>
+        <target>lightning__AppPage</target>
+        <target>lightning__HomePage</target>
+        <target>lightning__Tab</target>
+    </targets>
+    <masterLabel>AgentGov Dashboard</masterLabel>
+    <description>Real-time dashboard for monitoring AI agent activity, budgets, and conflicts.</description>
+</LightningComponentBundle>

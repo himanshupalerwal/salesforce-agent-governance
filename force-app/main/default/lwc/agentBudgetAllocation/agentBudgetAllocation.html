@@ -1,0 +1,80 @@
+<template>
+    <lightning-card title="Budget Allocation" icon-name="standard:calibration">
+        <lightning-button slot="actions" label="Refresh" icon-name="utility:refresh" onclick={handleRefresh}></lightning-button>
+
+        <template if:true={isLoading}>
+            <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+        </template>
+
+        <template if:true={error}>
+            <div class="slds-p-around_medium slds-text-color_error">{error}</div>
+        </template>
+
+        <template if:false={isLoading}>
+            <template if:true={hasBudgets}>
+                <div class="slds-p-around_medium">
+                    <!-- Summary -->
+                    <div class="slds-grid slds-gutters slds-m-bottom_medium">
+                        <div class="slds-col slds-size_1-of-3 slds-text-align_center">
+                            <p class="slds-text-title_caps">Total API Budget</p>
+                            <p class="slds-text-heading_medium">{totalApiAllocated}</p>
+                        </div>
+                        <div class="slds-col slds-size_1-of-3 slds-text-align_center">
+                            <p class="slds-text-title_caps">Total SOQL Budget</p>
+                            <p class="slds-text-heading_medium">{totalSoqlAllocated}</p>
+                        </div>
+                        <div class="slds-col slds-size_1-of-3 slds-text-align_center">
+                            <p class="slds-text-title_caps">Total DML Budget</p>
+                            <p class="slds-text-heading_medium">{totalDmlAllocated}</p>
+                        </div>
+                    </div>
+
+                    <!-- Per-agent breakdown -->
+                    <template for:each={budgets} for:item="budget">
+                        <div key={budget.Id} class="budget-card slds-m-bottom_small slds-p-around_small">
+                            <div class="slds-grid slds-grid_align-spread slds-m-bottom_x-small">
+                                <span class="slds-text-heading_small">{budget.agentName}</span>
+                                <lightning-icon icon-name={budget.statusIcon} size="x-small"></lightning-icon>
+                            </div>
+
+                            <div class="slds-m-bottom_xx-small">
+                                <div class="slds-grid slds-grid_align-spread">
+                                    <span class="slds-text-body_small">API Calls</span>
+                                    <span class="slds-text-body_small">{budget.apiConsumed} / {budget.apiAllocated} ({budget.apiPercent}%)</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class={budget.apiBarClass} style={budget.apiBarStyle}></div>
+                                </div>
+                            </div>
+
+                            <div class="slds-m-bottom_xx-small">
+                                <div class="slds-grid slds-grid_align-spread">
+                                    <span class="slds-text-body_small">SOQL Queries</span>
+                                    <span class="slds-text-body_small">{budget.soqlConsumed} / {budget.soqlAllocated} ({budget.soqlPercent}%)</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class={budget.soqlBarClass} style={budget.soqlBarStyle}></div>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="slds-grid slds-grid_align-spread">
+                                    <span class="slds-text-body_small">DML Operations</span>
+                                    <span class="slds-text-body_small">{budget.dmlConsumed} / {budget.dmlAllocated} ({budget.dmlPercent}%)</span>
+                                </div>
+                                <div class="progress-track">
+                                    <div class={budget.dmlBarClass} style={budget.dmlBarStyle}></div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+                </div>
+            </template>
+            <template if:false={hasBudgets}>
+                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large">
+                    No budget allocations found for today.
+                </div>
+            </template>
+        </template>
+    </lightning-card>
+</template>

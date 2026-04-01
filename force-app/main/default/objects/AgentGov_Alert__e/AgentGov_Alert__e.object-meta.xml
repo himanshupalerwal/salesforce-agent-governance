@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>Fires when an agent crosses a governor limit threshold (warning, throttle, or block).</description>
+    <eventType>HighVolume</eventType>
+    <label>AgentGov Alert</label>
+    <pluralLabel>AgentGov Alerts</pluralLabel>
+    <publishBehavior>PublishAfterCommit</publishBehavior>
+</CustomObject>

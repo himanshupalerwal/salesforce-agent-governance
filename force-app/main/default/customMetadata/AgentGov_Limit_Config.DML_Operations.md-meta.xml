@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/metadataAPI" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <label>DML Operations</label>
+    <protected>false</protected>
+    <values>
+        <field>Limit_Type__c</field>
+        <value xsi:type="xsd:string">DML_Operations</value>
+    </values>
+    <values>
+        <field>Warning_Threshold__c</field>
+        <value xsi:type="xsd:double">80.0</value>
+    </values>
+    <values>
+        <field>Throttle_Threshold__c</field>
+        <value xsi:type="xsd:double">90.0</value>
+    </values>
+    <values>
+        <field>Block_Threshold__c</field>
+        <value xsi:type="xsd:double">95.0</value>
+    </values>
+    <values>
+        <field>Default_Daily_Budget__c</field>
+        <value xsi:type="xsd:double">3000.0</value>
+    </values>
+    <values>
+        <field>Is_Active__c</field>
+        <value xsi:type="xsd:boolean">true</value>
+    </values>
+</CustomMetadata>

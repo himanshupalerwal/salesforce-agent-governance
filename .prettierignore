@@ -1,0 +1,15 @@
+# Salesforce
+.localdevserver
+.sf
+.sfdx
+
+# LWC
+**/lwc/jsconfig.json
+
+# Test coverage
+coverage/
+test-coverage/
+
+# Build artifacts
+node_modules/
+.nyc_output/

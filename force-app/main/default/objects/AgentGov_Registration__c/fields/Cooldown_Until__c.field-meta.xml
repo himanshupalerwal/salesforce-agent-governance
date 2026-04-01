@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Cooldown_Until__c</fullName>
+    <label>Cooldown Until</label>
+    <type>DateTime</type>
+    <required>false</required>
+    <externalId>false</externalId>
+    <description>Timestamp until which the agent is in cooldown after circuit breaker activation</description>
+</CustomField>

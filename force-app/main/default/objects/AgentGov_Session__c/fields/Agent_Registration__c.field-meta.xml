@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Agent_Registration__c</fullName>
+    <label>Agent Registration</label>
+    <type>MasterDetail</type>
+    <externalId>false</externalId>
+    <description>Parent agent registration for this session</description>
+    <referenceTo>AgentGov_Registration__c</referenceTo>
+    <relationshipLabel>Agent Sessions</relationshipLabel>
+    <relationshipName>Agent_Sessions</relationshipName>
+    <relationshipOrder>0</relationshipOrder>
+    <reparentableMasterDetail>false</reparentableMasterDetail>
+    <writeRequiresMasterRead>false</writeRequiresMasterRead>
+</CustomField>

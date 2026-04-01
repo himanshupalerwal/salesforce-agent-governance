@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Timestamp__c</fullName>
+    <label>Timestamp</label>
+    <type>DateTime</type>
+    <externalId>false</externalId>
+    <description>When the conflict occurred</description>
+    <required>true</required>
+</CustomField>

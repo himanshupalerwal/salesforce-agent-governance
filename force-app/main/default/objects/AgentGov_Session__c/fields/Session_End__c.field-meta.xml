@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Session_End__c</fullName>
+    <label>Session End</label>
+    <type>DateTime</type>
+    <required>false</required>
+    <externalId>false</externalId>
+    <description>Timestamp when the agent session ended</description>
+</CustomField>

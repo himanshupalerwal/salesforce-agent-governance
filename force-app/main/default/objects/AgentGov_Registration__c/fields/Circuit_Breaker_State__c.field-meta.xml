@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Circuit_Breaker_State__c</fullName>
+    <label>Circuit Breaker State</label>
+    <type>Picklist</type>
+    <required>false</required>
+    <externalId>false</externalId>
+    <description>Circuit breaker pattern state for fault tolerance</description>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>CLOSED</fullName>
+                <default>true</default>
+                <label>CLOSED</label>
+            </value>
+            <value>
+                <fullName>OPEN</fullName>
+                <default>false</default>
+                <label>OPEN</label>
+            </value>
+            <value>
+                <fullName>HALF_OPEN</fullName>
+                <default>false</default>
+                <label>HALF_OPEN</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

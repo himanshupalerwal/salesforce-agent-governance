@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <description>Real-time streaming event for agent activity monitoring and async logging.</description>
+    <eventType>HighVolume</eventType>
+    <label>AgentGov Action Event</label>
+    <pluralLabel>AgentGov Action Events</pluralLabel>
+    <publishBehavior>PublishAfterCommit</publishBehavior>
+</CustomObject>

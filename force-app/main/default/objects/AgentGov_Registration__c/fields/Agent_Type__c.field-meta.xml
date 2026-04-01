@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Agent_Type__c</fullName>
+    <label>Agent Type</label>
+    <type>Picklist</type>
+    <required>true</required>
+    <externalId>false</externalId>
+    <description>Type of AI agent</description>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>Agentforce</fullName>
+                <default>false</default>
+                <label>Agentforce</label>
+            </value>
+            <value>
+                <fullName>MCP_External</fullName>
+                <default>false</default>
+                <label>MCP_External</label>
+            </value>
+            <value>
+                <fullName>Custom_Apex</fullName>
+                <default>false</default>
+                <label>Custom_Apex</label>
+            </value>
+            <value>
+                <fullName>Flow_Based</fullName>
+                <default>false</default>
+                <label>Flow_Based</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

@@ -1,0 +1,27 @@
+.agent-card {
+    border: 1px solid #e5e5e5;
+    border-radius: 0.25rem;
+}
+.cb-closed {
+    --sds-c-icon-color-foreground-default: #04844b;
+}
+.cb-open {
+    --sds-c-icon-color-foreground-default: #c23934;
+}
+.cb-half-open {
+    --sds-c-icon-color-foreground-default: #ff9a3c;
+}
+.progress-bar {
+    height: 100%;
+    border-radius: 0.25rem;
+    transition: width 0.3s ease;
+}
+.bar-danger {
+    background-color: #c23934;
+}
+.bar-warning {
+    background-color: #ff9a3c;
+}
+.bar-normal {
+    background-color: #04844b;
+}

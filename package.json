@@ -1,0 +1,22 @@
+{
+  "name": "salesforce-agent-governance",
+  "version": "1.0.0",
+  "description": "Salesforce-native Agent Governance Framework for AI agents",
+  "author": "Himanshu Palerwal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/himanshupalerwal/salesforce-agent-governance.git"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint force-app/main/default/lwc/**/*.js",
+    "prettier": "prettier --write \"force-app/**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml}\""
+  },
+  "devDependencies": {
+    "@lwc/jest-preset": "^17.0.0",
+    "@salesforce/sfdx-lwc-jest": "^5.1.0",
+    "jest": "^29.7.0"
+  }
+}

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+    <fullName>Owner_Email__c</fullName>
+    <label>Owner Email</label>
+    <type>Email</type>
+    <required>false</required>
+    <unique>false</unique>
+    <externalId>false</externalId>
+    <description>Email address of the agent owner or responsible party</description>
+</CustomField>
