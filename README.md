@@ -114,6 +114,31 @@ Four invocable actions make AgentGov accessible from any Salesforce Flow -- no A
 
 ---
 
+## Screenshots
+
+### AgentGov Dashboard
+![AgentGov Dashboard](docs/images/dashboard.png)
+
+### Agent Health Monitor & Budget Allocation
+![Health Monitor & Budget Allocation](docs/images/dashboard_2.png)
+
+### Agent Registrations
+![Agent Registrations](docs/images/registrations.png)
+
+### Agent Registration Detail
+![Registration Detail](docs/images/registration-detail.png)
+
+### Governor Budgets
+![Governor Budgets](docs/images/budgets.png)
+
+### Agent Action Logs
+![Action Logs](docs/images/action-logs.png)
+
+### Agent Conflict Logs
+![Conflict Logs](docs/images/conflict-logs.png)
+
+---
+
 ## Quick Start
 
 ### Step 1: Deploy to your org
