@@ -644,6 +644,8 @@ stateDiagram-v2
 - Cooldown period: **30** minutes
 - Retry backoff: **2x** multiplier on each re-trip
 
+Circuit breaker transitions are triggered by `recordSuccess()` / `recordFailure()` calls. The Proxy API calls these automatically based on DML results. For `/authorize` agents, the caller is responsible for reporting outcomes.
+
 ---
 
 ## Governor Budget Lifecycle
@@ -690,6 +692,12 @@ stateDiagram-v2
         New requests denied.
     end note
 ```
+
+**Budget consumption sources:**
+- **Proxy API:** Budget consumed by actual record count (e.g., create 5 records = 5 DML consumed)
+- **AgentGovContext:** Budget consumed by measured `Limits` class delta
+- **`/authorize`:** Budget consumed by `amount` parameter (default 1)
+- **`/report`:** Post-execution reconciliation — adjusts budget based on actual vs. pre-authorized
 
 **Default Budgets per Agent:**
 - API Calls: **10,000** / day

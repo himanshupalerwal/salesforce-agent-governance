@@ -409,6 +409,8 @@ stateDiagram-v2
 | HALF_OPEN | CLOSED | `recordSuccess()` | Failure count reset to 0, Status set to Active |
 | HALF_OPEN | OPEN | `recordFailure()` | Cooldown doubled (exponential backoff) |
 
+> **Note:** The Governed Proxy API (`AgentGovProxyApi`) automatically calls `recordSuccess()` or `recordFailure()` based on DML results. Agents using `/authorize` must call these methods themselves.
+
 ---
 
 ## Design Principles
