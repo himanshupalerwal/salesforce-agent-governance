@@ -255,6 +255,12 @@ curl -X POST "$INSTANCE/services/apexrest/agentgov/report" \
 
 ## Screenshots
 
+> Captured against a v1.1 scratch org. Two of them show an **API Key** column holding a
+> readable key, which is what v1.1 stored. From v1.2 that field is cleared on first use and
+> only a SHA-256 hash and a short identifying prefix are kept, so the same page now shows
+> `API Key Prefix` instead. The sample keys pictured are the fictional ones in
+> `AgentGovSampleData`, not credentials for any real org.
+
 ### AgentGov Dashboard — Summary Cards, Budget Usage & Active Sessions
 
 ![AgentGov Dashboard](docs/images/dashboard-1.png)
