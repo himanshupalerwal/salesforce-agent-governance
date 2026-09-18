@@ -1,2 +1,5 @@
 # LWC Jest test files should not be deployed
 **/__tests__/**
+
+# Created by the local LWC dev server; never part of the deployable source.
+**/lwc/jsconfig.json

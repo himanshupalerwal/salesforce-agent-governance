@@ -1,7 +1,9 @@
 ## Description
-Brief description of the changes.
 
-## Type of Change
+What this change does and why.
+
+## Type of change
+
 - [ ] Bug fix
 - [ ] New feature
 - [ ] Enhancement
@@ -10,16 +12,18 @@ Brief description of the changes.
 - [ ] Test coverage
 
 ## Testing
-Describe the tests you ran to verify your changes.
+
+How you verified the change (Apex tests, Jest, manual steps in a scratch org).
 
 ## Checklist
-- [ ] My code follows the project's style guidelines
-- [ ] All Apex classes use `with sharing`
-- [ ] All SOQL queries go through `AgentGovSelector`
-- [ ] All string literals use `AgentGovConstants`
-- [ ] No SOQL or DML inside loops
-- [ ] No hardcoded Record IDs
-- [ ] Test coverage is 90%+ on modified classes
-- [ ] I have added meaningful test assertions
-- [ ] All existing tests pass
-- [ ] I have updated documentation if needed
+
+- [ ] Every class states its sharing keyword and access mode; framework bookkeeping goes through `AgentGovSelector` and `AgentGovDml`, and nothing reads customer data in system mode
+- [ ] No bare SOQL or DML in service classes; no SOQL text accepted from callers
+- [ ] Strings and defaults live in `AgentGovConstants`; errors are `AgentGovException` with an `ErrorCode`
+- [ ] No SOQL or DML inside loops; invocable actions stay bulk-safe
+- [ ] No hardcoded record Ids, org usernames, instance URLs, or email addresses
+- [ ] ApexDoc on every new or changed class and public method
+- [ ] Tests use the `Assert` class and `AgentGovTestDataFactory`, and assert behavior
+- [ ] `npm run lint`, `npm run prettier:verify`, and `npm run test:unit:coverage` pass
+- [ ] Apex tests pass in a scratch org with coverage at or above 85%
+- [ ] `CHANGELOG.md` and the relevant docs are updated
