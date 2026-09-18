@@ -21,7 +21,7 @@
     "test:unit:watch": "sfdx-lwc-jest --watch"
   },
   "devDependencies": {
-    "@eslint/js": "^9.0.0",
+    "@eslint/js": "^10.0.1",
     "@lwc/eslint-plugin-lwc": "^3.5.0",
     "@salesforce/eslint-config-lwc": "^4.1.2",
     "@salesforce/eslint-plugin-lightning": "^2.0.0",
