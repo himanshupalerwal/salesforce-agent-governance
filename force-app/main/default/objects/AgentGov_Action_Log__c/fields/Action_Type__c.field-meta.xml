@@ -45,6 +45,16 @@
                 <default>false</default>
                 <label>Flow_Trigger</label>
             </value>
+            <value>
+                <fullName>Report</fullName>
+                <default>false</default>
+                <label>Report</label>
+            </value>
+            <value>
+                <fullName>System</fullName>
+                <default>false</default>
+                <label>System</label>
+            </value>
         </valueSetDefinition>
     </valueSet>
 </CustomField>
