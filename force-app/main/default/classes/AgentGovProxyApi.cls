@@ -1,448 +1,630 @@
 /**
- * @description Proxy REST API that executes CRUD operations on behalf of agents.
- *              Instead of agents calling Salesforce REST API directly, they go through
- *              this proxy which counts actual operations and enforces governance.
- *              Budget is consumed by the REAL number of records affected.
- * @author Himanshu Palerwal
+ * @description Governed CRUD proxy for external and MCP agents.
+ *
+ *              Agents call these endpoints instead of the standard REST API. Each request is
+ *              authenticated, run through the circuit breaker and policy engine, checked for
+ *              record conflicts, charged to the agent's budget by the number of records it
+ *              touches, executed, and logged. Budget is therefore consumed by the real record
+ *              count, not by a self-reported estimate.
+ *
+ *              Endpoints (POST): /query, /create, /update, /delete, /upsert.
+ *
+ *              Security posture: with sharing, and every query and DML statement issued on
+ *              the agent's behalf runs with AccessLevel.USER_MODE. The calling user's object
+ *              permissions, field-level security, and sharing rules apply to customer data.
+ *              /query accepts a structured request compiled by AgentGovQueryBuilder rather
+ *              than SOQL text, so injection and policy bypass through relationship paths or
+ *              subqueries are impossible by construction. Framework bookkeeping (budgets,
+ *              logs, breaker state) runs in system mode through the service classes.
  */
 @RestResource(urlMapping='/agentgov-proxy/*')
 global with sharing class AgentGovProxyApi {
+    private static final String PATH_QUERY = '/query';
+    private static final String PATH_CREATE = '/create';
+    private static final String PATH_UPDATE = '/update';
+    private static final String PATH_DELETE = '/delete';
+    private static final String PATH_UPSERT = '/upsert';
+    private static final Set<String> KNOWN_PATHS = new Set<String>{
+        PATH_QUERY,
+        PATH_CREATE,
+        PATH_UPDATE,
+        PATH_DELETE,
+        PATH_UPSERT
+    };
+    private static final Set<AgentGovException.ErrorCode> DENIAL_CODES = new Set<AgentGovException.ErrorCode>{
+        AgentGovException.ErrorCode.CIRCUIT_BREAKER_OPEN,
+        AgentGovException.ErrorCode.POLICY_VIOLATION,
+        AgentGovException.ErrorCode.BUDGET_EXCEEDED,
+        AgentGovException.ErrorCode.RECORD_LOCKED,
+        AgentGovException.ErrorCode.ACCESS_DENIED
+    };
+    private static final String JSON_ATTRIBUTES_KEY = 'attributes';
 
+    // Set by the handler in progress so that a denial can be logged with its context.
+    private static String currentOperation;
+    private static String currentObject;
+
+    /** Per-record outcome of a write. */
+    private class WriteSummary {
+        private Integer successCount = 0;
+        private List<Map<String, Object>> results = new List<Map<String, Object>>();
+    }
+
+    /** @description Routes POST requests to the proxy handlers. */
     @HttpPost
     global static void doPost() {
-        RestRequest req = RestContext.request;
-        RestResponse res = RestContext.response;
-        res.addHeader('Content-Type', 'application/json');
+        RestRequest request = RestContext.request;
+        RestResponse response = RestContext.response;
+        String correlationId = AgentGovRestResponder.correlationId(request);
+        AgentGov_Registration__c registration;
+        currentOperation = null;
+        currentObject = null;
 
         try {
-            String path = req.requestURI.substringAfter('/agentgov-proxy');
-            Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(req.requestBody.toString());
-
-            if (path == '/query') {
-                handleQuery(body, res);
-            } else if (path == '/create') {
-                handleCreate(body, res);
-            } else if (path == '/update') {
-                handleUpdate(body, res);
-            } else if (path == '/delete') {
-                handleDelete(body, res);
-            } else if (path == '/upsert') {
-                handleUpsert(body, res);
-            } else {
-                res.statusCode = 404;
-                res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-                    'error' => 'Unknown proxy endpoint: ' + path,
-                    'errorCode' => 'NOT_FOUND'
-                }));
+            String path = request.requestURI.substringAfter(AgentGovConstants.REST_PROXY_BASE_PATH.removeEnd('/'));
+            if (!KNOWN_PATHS.contains(path)) {
+                AgentGovRestResponder.notFound(response, path, correlationId);
+                return;
             }
+            Map<String, Object> body = parseBody(request);
+            registration = AgentGovRestAuth.resolveRegistration(request, body);
+            // A Blocked agent whose cooldown has elapsed is admitted past the status check so
+            // the breaker can readmit it; tripping leaves the agent Blocked, and refusing here
+            // would lock a REST-only agent out for good. Nothing is written at this point: the
+            // transition and the probe claim happen together under the row lock taken by
+            // runGovernancePipeline's allowRequest call.
+            registration = AgentGovRestAuth.requireActive(
+                registration,
+                true,
+                AgentGovCircuitBreaker.mayProbe(registration)
+            );
+
+            Map<String, Object> payload;
+            switch on path {
+                when '/query' {
+                    payload = handleQuery(registration, body);
+                }
+                when '/create' {
+                    payload = handleCreate(registration, body);
+                }
+                when '/update' {
+                    payload = handleUpdate(registration, body);
+                }
+                when '/delete' {
+                    payload = handleDelete(registration, body);
+                }
+                when else {
+                    payload = handleUpsert(registration, body);
+                }
+            }
+            AgentGovRestResponder.success(response, 200, payload, correlationId);
         } catch (AgentGovException e) {
-            res.statusCode = e.getHttpStatusCode();
-            res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-                'error' => e.getMessage(),
-                'errorCode' => String.valueOf(e.getErrorCode())
-            }));
+            logDenial(registration, e);
+            AgentGovRestResponder.error(response, e, correlationId);
         } catch (Exception e) {
-            res.statusCode = 500;
-            res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-                'error' => e.getMessage(),
-                'errorCode' => 'INTERNAL_ERROR'
-            }));
+            AgentGovRestResponder.internalError(response, e, correlationId, registration?.Id);
         }
     }
 
-    /**
-     * @description Executes a SOQL query on behalf of an agent. Counts as 1 SOQL query.
-     */
-    private static void handleQuery(Map<String, Object> body, RestResponse res) {
-        AgentGov_Registration__c reg = authenticateAgent(body);
-        String soqlQuery = (String) body.get('query');
-        if (String.isBlank(soqlQuery)) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_INVALID_SOQL);
-        }
+    // --- Handlers ---
 
-        // Validate SOQL — prevent injection by checking for dangerous keywords
-        String upperQuery = soqlQuery.toUpperCase().trim();
-        if (!upperQuery.startsWith('SELECT')) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_INVALID_SOQL);
-        }
-
-        // Extract object name from query for policy check
-        String objectName = extractObjectFromSoql(soqlQuery);
-
-        // Run governance pipeline
-        runGovernancePipeline(reg, objectName, AgentGovConstants.ACTION_QUERY, null);
-
-        // Consume 1 SOQL query budget
-        AgentGovBudgetManager.BudgetResult budgetResult = AgentGovBudgetManager.consumeBudget(
-            reg.Id, AgentGovConstants.LIMIT_SOQL_QUERIES, 1
+    private static Map<String, Object> handleQuery(AgentGov_Registration__c registration, Map<String, Object> body) {
+        AgentGovQueryBuilder.QueryRequest queryRequest = AgentGovQueryBuilder.parse(body);
+        Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(queryRequest.objectName);
+        AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
+            registration,
+            describe.getName(),
+            AgentGovConstants.ACTION_QUERY
         );
+        AgentGovQueryBuilder.BuiltQuery built = AgentGovQueryBuilder.build(queryRequest, describe, policy.maxRecords);
+        AgentGovPolicyEngine.assertFieldsAllowed(policy, built.referencedFields);
 
-        // Execute the query
-        List<SObject> results = Database.query(soqlQuery);
+        AgentGovBudgetManager.BudgetResult budget = charge(registration, AgentGovConstants.LIMIT_SOQL_QUERIES, 1);
+        List<SObject> results = AgentGovQueryBuilder.execute(built);
 
-        // Log the action
-        logAction(reg.Id, AgentGovConstants.ACTION_QUERY, objectName, null, AgentGovConstants.ACTION_SUCCESS, results.size() + ' records returned');
+        AgentGovTriggerHandler.logAction(
+            registration.Id,
+            AgentGovConstants.ACTION_QUERY,
+            describe.getName(),
+            null,
+            AgentGovConstants.ACTION_SUCCESS,
+            results.size() + ' records returned'
+        );
+        recordOutcome(registration, true);
 
-        // Record success for circuit breaker
-        AgentGovCircuitBreaker.recordSuccess(reg.Id);
-
-        res.statusCode = 200;
-        res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-            'success' => true,
+        return new Map<String, Object>{
             'totalSize' => results.size(),
             'records' => results,
-            'budgetStatus' => budgetResult.budgetStatus,
-            'remainingBudget' => new Map<String, Object>{
-                'apiCalls' => budgetResult.apiCallsRemaining,
-                'soqlQueries' => budgetResult.soqlQueriesRemaining,
-                'dmlOperations' => budgetResult.dmlOperationsRemaining
-            }
-        }));
+            'budgetStatus' => budget.budgetStatus,
+            'remainingBudget' => AgentGovRestResponder.remainingBudget(budget)
+        };
     }
 
-    /**
-     * @description Creates records on behalf of an agent. Budget consumed = number of records.
-     */
-    private static void handleCreate(Map<String, Object> body, RestResponse res) {
-        AgentGov_Registration__c reg = authenticateAgent(body);
-        String objectName = (String) body.get('objectName');
-        List<Object> recordsRaw = (List<Object>) body.get('records');
-        validateCrudInput(objectName, recordsRaw);
-
-        // Run governance pipeline
-        runGovernancePipeline(reg, objectName, AgentGovConstants.ACTION_CREATE, null);
-
-        // Consume budget by actual record count
-        Integer recordCount = recordsRaw.size();
-        AgentGovBudgetManager.BudgetResult budgetResult = AgentGovBudgetManager.consumeBudget(
-            reg.Id, AgentGovConstants.LIMIT_DML_OPERATIONS, recordCount
+    private static Map<String, Object> handleCreate(AgentGov_Registration__c registration, Map<String, Object> body) {
+        List<Object> rawRecords = requireRecords(body);
+        Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
+            registration,
+            describe.getName(),
+            AgentGovConstants.ACTION_CREATE
         );
+        AgentGovPolicyEngine.assertRecordCount(policy, rawRecords.size());
 
-        // Build SObjects from JSON
-        List<SObject> records = buildSObjects(objectName, recordsRaw);
+        Set<String> fieldsUsed = new Set<String>();
+        List<SObject> records = buildSObjects(describe, rawRecords, fieldsUsed, false);
+        AgentGovPolicyEngine.assertFieldsAllowed(policy, fieldsUsed);
+        assertFieldAccess(AccessType.CREATABLE, records, describe.getName(), 'create');
 
-        // Perform insert
-        Database.SaveResult[] results = Database.insert(records, false);
-
-        // Build response with per-record results
-        List<Map<String, Object>> resultList = new List<Map<String, Object>>();
-        Integer successCount = 0;
-        for (Integer i = 0; i < results.size(); i++) {
-            Map<String, Object> r = new Map<String, Object>();
-            r.put('success', results[i].isSuccess());
-            if (results[i].isSuccess()) {
-                r.put('id', results[i].getId());
-                successCount++;
-            } else {
-                r.put('errors', getErrorMessages(results[i].getErrors()));
-            }
-            resultList.add(r);
-        }
-
-        logAction(reg.Id, AgentGovConstants.ACTION_CREATE, objectName, null,
-            successCount > 0 ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE,
-            successCount + '/' + recordCount + ' records created');
-
-        if (successCount > 0) {
-            AgentGovCircuitBreaker.recordSuccess(reg.Id);
-        } else {
-            AgentGovCircuitBreaker.recordFailure(reg.Id);
-        }
-
-        res.statusCode = 200;
-        res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-            'success' => successCount > 0,
-            'recordsProcessed' => recordCount,
-            'recordsSucceeded' => successCount,
-            'results' => resultList,
-            'budgetStatus' => budgetResult.budgetStatus,
-            'remainingBudget' => buildRemainingBudgetMap(budgetResult)
-        }));
-    }
-
-    /**
-     * @description Updates records on behalf of an agent. Budget consumed = number of records.
-     */
-    private static void handleUpdate(Map<String, Object> body, RestResponse res) {
-        AgentGov_Registration__c reg = authenticateAgent(body);
-        String objectName = (String) body.get('objectName');
-        List<Object> recordsRaw = (List<Object>) body.get('records');
-        validateCrudInput(objectName, recordsRaw);
-
-        runGovernancePipeline(reg, objectName, AgentGovConstants.ACTION_UPDATE, null);
-
-        Integer recordCount = recordsRaw.size();
-        AgentGovBudgetManager.BudgetResult budgetResult = AgentGovBudgetManager.consumeBudget(
-            reg.Id, AgentGovConstants.LIMIT_DML_OPERATIONS, recordCount
+        AgentGovBudgetManager.BudgetResult budget = consumeDml(registration, records.size());
+        WriteSummary summary = summarizeSaveResults(Database.insert(records, false, AccessLevel.USER_MODE));
+        return finishWrite(
+            registration,
+            AgentGovConstants.ACTION_CREATE,
+            describe.getName(),
+            summary,
+            records.size(),
+            budget,
+            'created'
         );
-
-        List<SObject> records = buildSObjects(objectName, recordsRaw);
-        Database.SaveResult[] results = Database.update(records, false);
-
-        Integer successCount = 0;
-        List<Map<String, Object>> resultList = new List<Map<String, Object>>();
-        for (Integer i = 0; i < results.size(); i++) {
-            Map<String, Object> r = new Map<String, Object>();
-            r.put('success', results[i].isSuccess());
-            if (results[i].isSuccess()) {
-                r.put('id', results[i].getId());
-                successCount++;
-            } else {
-                r.put('errors', getErrorMessages(results[i].getErrors()));
-            }
-            resultList.add(r);
-        }
-
-        logAction(reg.Id, AgentGovConstants.ACTION_UPDATE, objectName, null,
-            successCount > 0 ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE,
-            successCount + '/' + recordCount + ' records updated');
-
-        if (successCount > 0) { AgentGovCircuitBreaker.recordSuccess(reg.Id); }
-        else { AgentGovCircuitBreaker.recordFailure(reg.Id); }
-
-        res.statusCode = 200;
-        res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-            'success' => successCount > 0,
-            'recordsProcessed' => recordCount,
-            'recordsSucceeded' => successCount,
-            'results' => resultList,
-            'budgetStatus' => budgetResult.budgetStatus,
-            'remainingBudget' => buildRemainingBudgetMap(budgetResult)
-        }));
     }
 
-    /**
-     * @description Deletes records on behalf of an agent. Budget consumed = number of records.
-     */
-    private static void handleDelete(Map<String, Object> body, RestResponse res) {
-        AgentGov_Registration__c reg = authenticateAgent(body);
-        String objectName = (String) body.get('objectName');
-        List<Object> idsRaw = (List<Object>) body.get('ids');
-        if (String.isBlank(objectName) || idsRaw == null || idsRaw.isEmpty()) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NO_RECORDS);
-        }
-
-        runGovernancePipeline(reg, objectName, AgentGovConstants.ACTION_DELETE, null);
-
-        Integer recordCount = idsRaw.size();
-        AgentGovBudgetManager.BudgetResult budgetResult = AgentGovBudgetManager.consumeBudget(
-            reg.Id, AgentGovConstants.LIMIT_DML_OPERATIONS, recordCount
+    private static Map<String, Object> handleUpdate(AgentGov_Registration__c registration, Map<String, Object> body) {
+        List<Object> rawRecords = requireRecords(body);
+        Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
+            registration,
+            describe.getName(),
+            AgentGovConstants.ACTION_UPDATE
         );
+        AgentGovPolicyEngine.assertRecordCount(policy, rawRecords.size());
 
-        List<Id> idsToDelete = new List<Id>();
-        for (Object idObj : idsRaw) {
-            idsToDelete.add((Id) String.valueOf(idObj));
-        }
+        Set<String> fieldsUsed = new Set<String>();
+        List<SObject> records = buildSObjects(describe, rawRecords, fieldsUsed, true);
+        AgentGovPolicyEngine.assertFieldsAllowed(policy, fieldsUsed);
+        assertNoConflicts(registration, records, describe.getName());
+        assertFieldAccess(AccessType.UPDATABLE, records, describe.getName(), 'update');
 
-        Database.DeleteResult[] results = Database.delete(idsToDelete, false);
-
-        Integer successCount = 0;
-        List<Map<String, Object>> resultList = new List<Map<String, Object>>();
-        for (Integer i = 0; i < results.size(); i++) {
-            Map<String, Object> r = new Map<String, Object>();
-            r.put('success', results[i].isSuccess());
-            r.put('id', idsToDelete[i]);
-            if (!results[i].isSuccess()) {
-                r.put('errors', getErrorMessages(results[i].getErrors()));
-            } else {
-                successCount++;
-            }
-            resultList.add(r);
-        }
-
-        logAction(reg.Id, AgentGovConstants.ACTION_DELETE, objectName, null,
-            successCount > 0 ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE,
-            successCount + '/' + recordCount + ' records deleted');
-
-        if (successCount > 0) { AgentGovCircuitBreaker.recordSuccess(reg.Id); }
-        else { AgentGovCircuitBreaker.recordFailure(reg.Id); }
-
-        res.statusCode = 200;
-        res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-            'success' => successCount > 0,
-            'recordsProcessed' => recordCount,
-            'recordsSucceeded' => successCount,
-            'results' => resultList,
-            'budgetStatus' => budgetResult.budgetStatus,
-            'remainingBudget' => buildRemainingBudgetMap(budgetResult)
-        }));
-    }
-
-    /**
-     * @description Upserts records on behalf of an agent. Budget consumed = number of records.
-     */
-    private static void handleUpsert(Map<String, Object> body, RestResponse res) {
-        AgentGov_Registration__c reg = authenticateAgent(body);
-        String objectName = (String) body.get('objectName');
-        String externalIdField = (String) body.get('externalIdField');
-        List<Object> recordsRaw = (List<Object>) body.get('records');
-        validateCrudInput(objectName, recordsRaw);
-
-        runGovernancePipeline(reg, objectName, AgentGovConstants.ACTION_UPSERT, null);
-
-        Integer recordCount = recordsRaw.size();
-        AgentGovBudgetManager.BudgetResult budgetResult = AgentGovBudgetManager.consumeBudget(
-            reg.Id, AgentGovConstants.LIMIT_DML_OPERATIONS, recordCount
+        AgentGovBudgetManager.BudgetResult budget = consumeDml(registration, records.size());
+        WriteSummary summary = summarizeSaveResults(Database.update(records, false, AccessLevel.USER_MODE));
+        return finishWrite(
+            registration,
+            AgentGovConstants.ACTION_UPDATE,
+            describe.getName(),
+            summary,
+            records.size(),
+            budget,
+            'updated'
         );
+    }
 
-        List<SObject> records = buildSObjects(objectName, recordsRaw);
-        Schema.SObjectField extField = null;
-        if (String.isNotBlank(externalIdField)) {
-            extField = Schema.getGlobalDescribe().get(objectName).getDescribe().fields.getMap().get(externalIdField);
+    private static Map<String, Object> handleDelete(AgentGov_Registration__c registration, Map<String, Object> body) {
+        Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        Object rawIds = body.get('ids');
+        if (!(rawIds instanceof List<Object>) || ((List<Object>) rawIds).isEmpty()) {
+            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NO_IDS);
         }
-
-        Database.UpsertResult[] results;
-        if (extField != null) {
-            results = Database.upsert(records, extField, false);
-        } else {
-            results = Database.upsert(records, false);
+        AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
+            registration,
+            describe.getName(),
+            AgentGovConstants.ACTION_DELETE
+        );
+        List<Id> ids = new List<Id>();
+        for (Object rawId : (List<Object>) rawIds) {
+            ids.add(parseId(rawId, describe));
         }
+        AgentGovPolicyEngine.assertRecordCount(policy, ids.size());
+        assertNoConflictsForIds(registration, ids, describe.getName());
 
-        Integer successCount = 0;
-        List<Map<String, Object>> resultList = new List<Map<String, Object>>();
-        for (Integer i = 0; i < results.size(); i++) {
-            Map<String, Object> r = new Map<String, Object>();
-            r.put('success', results[i].isSuccess());
-            r.put('created', results[i].isCreated());
-            if (results[i].isSuccess()) {
-                r.put('id', results[i].getId());
-                successCount++;
-            } else {
-                r.put('errors', getErrorMessages(results[i].getErrors()));
+        AgentGovBudgetManager.BudgetResult budget = consumeDml(registration, ids.size());
+        WriteSummary summary = summarizeDeleteResults(Database.delete(ids, false, AccessLevel.USER_MODE), ids);
+        return finishWrite(
+            registration,
+            AgentGovConstants.ACTION_DELETE,
+            describe.getName(),
+            summary,
+            ids.size(),
+            budget,
+            'deleted'
+        );
+    }
+
+    private static Map<String, Object> handleUpsert(AgentGov_Registration__c registration, Map<String, Object> body) {
+        List<Object> rawRecords = requireRecords(body);
+        Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
+            registration,
+            describe.getName(),
+            AgentGovConstants.ACTION_UPSERT
+        );
+        AgentGovPolicyEngine.assertRecordCount(policy, rawRecords.size());
+
+        Schema.SObjectField externalIdField;
+        String externalIdFieldName = (String) body.get('externalIdField');
+        if (String.isNotBlank(externalIdFieldName)) {
+            String apiName = AgentGovQueryBuilder.resolveField(
+                externalIdFieldName,
+                describe.fields.getMap(),
+                describe.getName()
+            );
+            externalIdField = describe.fields.getMap().get(apiName.toLowerCase());
+            if (!externalIdField.getDescribe().isExternalId() && !externalIdField.getDescribe().isIdLookup()) {
+                throw new AgentGovException(
+                    AgentGovException.ErrorCode.INVALID_INPUT,
+                    'externalIdField must be an External ID field: ' + apiName
+                );
             }
-            resultList.add(r);
         }
 
-        logAction(reg.Id, AgentGovConstants.ACTION_UPSERT, objectName, null,
-            successCount > 0 ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE,
-            successCount + '/' + recordCount + ' records upserted');
+        Set<String> fieldsUsed = new Set<String>();
+        // Upsert requires a list of the concrete SObject type, not a generic SObject list.
+        List<SObject> records = (List<SObject>) Type.forName('List<' + describe.getName() + '>').newInstance();
+        records.addAll(buildSObjects(describe, rawRecords, fieldsUsed, false));
+        AgentGovPolicyEngine.assertFieldsAllowed(policy, fieldsUsed);
+        assertNoConflicts(registration, records, describe.getName());
+        assertFieldAccess(AccessType.UPSERTABLE, records, describe.getName(), 'upsert');
 
-        if (successCount > 0) { AgentGovCircuitBreaker.recordSuccess(reg.Id); }
-        else { AgentGovCircuitBreaker.recordFailure(reg.Id); }
-
-        res.statusCode = 200;
-        res.responseBody = Blob.valueOf(JSON.serialize(new Map<String, Object>{
-            'success' => successCount > 0,
-            'recordsProcessed' => recordCount,
-            'recordsSucceeded' => successCount,
-            'results' => resultList,
-            'budgetStatus' => budgetResult.budgetStatus,
-            'remainingBudget' => buildRemainingBudgetMap(budgetResult)
-        }));
+        AgentGovBudgetManager.BudgetResult budget = consumeDml(registration, records.size());
+        List<Database.UpsertResult> results = externalIdField != null
+            ? Database.upsert(records, externalIdField, false, AccessLevel.USER_MODE)
+            : Database.upsert(records, false, AccessLevel.USER_MODE);
+        return finishWrite(
+            registration,
+            AgentGovConstants.ACTION_UPSERT,
+            describe.getName(),
+            summarizeUpsertResults(results),
+            records.size(),
+            budget,
+            'upserted'
+        );
     }
 
-    // --- Private helpers ---
+    // --- Pipeline helpers ---
 
-    private static AgentGov_Registration__c authenticateAgent(Map<String, Object> body) {
-        String apiKey = (String) body.get('apiKey');
-        if (String.isBlank(apiKey)) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'apiKey is required.');
-        }
-        AgentGov_Registration__c reg = AgentGovSelector.getRegistrationByApiKey(apiKey);
-        if (reg == null) {
-            throw new AgentGovException(AgentGovException.ErrorCode.AGENT_NOT_FOUND, AgentGovConstants.ERR_AGENT_NOT_REGISTERED);
-        }
-        if (reg.Status__c != AgentGovConstants.STATUS_ACTIVE && reg.Status__c != AgentGovConstants.STATUS_THROTTLED) {
-            throw new AgentGovException(AgentGovException.ErrorCode.AGENT_NOT_ACTIVE, AgentGovConstants.ERR_AGENT_NOT_ACTIVE);
-        }
-        return reg;
-    }
+    private static AgentGovPolicyEngine.PolicyResult runGovernancePipeline(
+        AgentGov_Registration__c registration,
+        String objectName,
+        String operation
+    ) {
+        currentOperation = operation;
+        currentObject = objectName;
 
-    private static void runGovernancePipeline(AgentGov_Registration__c reg, String objectName, String operation, String recordId) {
-        // Circuit breaker check
-        if (!AgentGovCircuitBreaker.allowRequest(reg.Id)) {
-            throw new AgentGovException(AgentGovException.ErrorCode.CIRCUIT_BREAKER_OPEN, AgentGovConstants.ERR_CIRCUIT_BREAKER_OPEN);
+        // Is_Enabled__c is the documented emergency bypass: with governance off the breaker and
+        // the policy engine are skipped here, and charge() and assertNoConflicts() below skip
+        // the budget and conflict checks, so a migration is not blocked by a half-tripped
+        // framework. Auditing continues regardless.
+        if (!AgentGovSelector.isFrameworkEnabled()) {
+            return AgentGovPolicyEngine.allowAll();
         }
-        // Policy check
-        AgentGovPolicyEngine.PolicyResult policy = AgentGovPolicyEngine.evaluatePolicy(reg.Id, objectName, operation);
+
+        if (!AgentGovCircuitBreaker.allowRequest(registration.Id)) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.CIRCUIT_BREAKER_OPEN,
+                AgentGovConstants.ERR_CIRCUIT_BREAKER_OPEN
+            );
+        }
+        AgentGovPolicyEngine.PolicyResult policy = AgentGovPolicyEngine.evaluatePolicy(
+            registration.Id,
+            objectName,
+            operation
+        );
         if (!policy.allowed) {
             throw new AgentGovException(AgentGovException.ErrorCode.POLICY_VIOLATION, policy.denialReason);
         }
+        return policy;
     }
 
-    private static void validateCrudInput(String objectName, List<Object> records) {
-        if (String.isBlank(objectName)) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_INVALID_OBJECT_NAME);
+    /**
+     * Charges the agent for work the proxy is about to do. With governance switched off the
+     * budget is read rather than consumed, so the response still reports a truthful remaining
+     * balance while the emergency bypass keeps the request from being refused.
+     */
+    /**
+     * Records a breaker outcome unless governance is switched off. During an emergency bypass
+     * a failure must not trip the breaker: tripping sets Status__c to Blocked, and the status
+     * check runs before the bypass does, so the agent would be locked out by the very switch
+     * meant to unblock it.
+     */
+    private static void recordOutcome(AgentGov_Registration__c registration, Boolean succeeded) {
+        if (!AgentGovSelector.isFrameworkEnabled()) {
+            return;
         }
-        if (records == null || records.isEmpty()) {
+        AgentGovCircuitBreaker.recordOutcomes(new Map<Id, Boolean>{ registration.Id => succeeded });
+    }
+
+    private static AgentGovBudgetManager.BudgetResult charge(
+        AgentGov_Registration__c registration,
+        String limitType,
+        Integer amount
+    ) {
+        if (!AgentGovSelector.isFrameworkEnabled()) {
+            return AgentGovBudgetManager.checkBudget(registration.Id);
+        }
+        return AgentGovBudgetManager.consumeBudget(registration.Id, limitType, amount);
+    }
+
+    private static AgentGovBudgetManager.BudgetResult consumeDml(
+        AgentGov_Registration__c registration,
+        Integer recordCount
+    ) {
+        return charge(registration, AgentGovConstants.LIMIT_DML_OPERATIONS, recordCount);
+    }
+
+    private static void assertNoConflicts(
+        AgentGov_Registration__c registration,
+        List<SObject> records,
+        String objectName
+    ) {
+        List<Id> ids = new List<Id>();
+        for (SObject record : records) {
+            if (record.Id != null) {
+                ids.add(record.Id);
+            }
+        }
+        assertNoConflictsForIds(registration, ids, objectName);
+    }
+
+    /**
+     * Conflict check for a list of record Ids. Every handler routes through here so the
+     * Is_Enabled__c bypass is honoured uniformly; /delete used to call the resolver directly
+     * and kept enforcing conflicts during an emergency bypass.
+     */
+    private static void assertNoConflictsForIds(
+        AgentGov_Registration__c registration,
+        List<Id> recordIds,
+        String objectName
+    ) {
+        if (!AgentGovSelector.isFrameworkEnabled()) {
+            return;
+        }
+        for (Id recordId : recordIds) {
+            AgentGovConflictResolver.assertNoConflict(registration.Id, recordId, objectName);
+        }
+    }
+
+    /**
+     * Denies the whole request when the calling user lacks field-level access to any field
+     * it is writing. Denying is deliberate: silently dropping fields would let the agent
+     * believe a write succeeded in full.
+     */
+    private static void assertFieldAccess(
+        AccessType accessType,
+        List<SObject> records,
+        String objectName,
+        String verb
+    ) {
+        SObjectAccessDecision decision;
+        try {
+            decision = Security.stripInaccessible(accessType, records, true);
+        } catch (Exception e) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.ACCESS_DENIED,
+                String.format(
+                    AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
+                    new List<String>{ verb, objectName, e.getMessage() }
+                )
+            );
+        }
+        Map<String, Set<String>> removed = decision.getRemovedFields();
+        if (removed.isEmpty()) {
+            return;
+        }
+        List<String> fields = new List<String>();
+        for (Set<String> objectFields : removed.values()) {
+            fields.addAll(objectFields);
+        }
+        fields.sort();
+        throw new AgentGovException(
+            AgentGovException.ErrorCode.ACCESS_DENIED,
+            String.format(
+                AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
+                new List<String>{ verb, objectName, String.join(fields, ', ') }
+            )
+        );
+    }
+
+    private static Map<String, Object> finishWrite(
+        AgentGov_Registration__c registration,
+        String action,
+        String objectName,
+        WriteSummary summary,
+        Integer recordCount,
+        AgentGovBudgetManager.BudgetResult budget,
+        String verb
+    ) {
+        Boolean anySucceeded = summary.successCount > 0;
+        AgentGovTriggerHandler.logAction(
+            registration.Id,
+            action,
+            objectName,
+            null,
+            anySucceeded ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE,
+            summary.successCount + '/' + recordCount + ' records ' + verb
+        );
+        if (anySucceeded) {
+            recordOutcome(registration, true);
+        } else {
+            recordOutcome(registration, false);
+        }
+        return new Map<String, Object>{
+            'allSucceeded' => summary.successCount == recordCount,
+            'recordsProcessed' => recordCount,
+            'recordsSucceeded' => summary.successCount,
+            'results' => summary.results,
+            'budgetStatus' => budget.budgetStatus,
+            'remainingBudget' => AgentGovRestResponder.remainingBudget(budget)
+        };
+    }
+
+    private static void logDenial(AgentGov_Registration__c registration, AgentGovException e) {
+        if (registration == null || currentOperation == null || !DENIAL_CODES.contains(e.getErrorCode())) {
+            return;
+        }
+        AgentGovTriggerHandler.logAction(
+            registration.Id,
+            currentOperation,
+            currentObject,
+            null,
+            AgentGovConstants.ACTION_DENIED,
+            e.getMessage()
+        );
+    }
+
+    // --- Input helpers ---
+
+    private static Map<String, Object> parseBody(RestRequest request) {
+        if (request.requestBody == null || String.isBlank(request.requestBody.toString())) {
+            return new Map<String, Object>();
+        }
+        try {
+            Object parsed = JSON.deserializeUntyped(request.requestBody.toString());
+            if (parsed instanceof Map<String, Object>) {
+                return (Map<String, Object>) parsed;
+            }
+        } catch (JSONException e) {
+            // Fall through to the shared error below.
+        }
+        throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'Request body must be a JSON object.');
+    }
+
+    private static String requireObjectName(Map<String, Object> body) {
+        String objectName = (String) body.get('objectName');
+        if (String.isBlank(objectName)) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                AgentGovConstants.ERR_INVALID_OBJECT_NAME
+            );
+        }
+        return objectName;
+    }
+
+    private static List<Object> requireRecords(Map<String, Object> body) {
+        Object rawRecords = body.get('records');
+        if (!(rawRecords instanceof List<Object>) || ((List<Object>) rawRecords).isEmpty()) {
             throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NO_RECORDS);
         }
+        return (List<Object>) rawRecords;
     }
 
-    private static List<SObject> buildSObjects(String objectName, List<Object> recordsRaw) {
-        Schema.SObjectType sObjType = Schema.getGlobalDescribe().get(objectName);
-        if (sObjType == null) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'Unknown object: ' + objectName);
-        }
-        Map<String, Schema.SObjectField> fieldMap = sObjType.getDescribe().fields.getMap();
-
+    private static List<SObject> buildSObjects(
+        Schema.DescribeSObjectResult describe,
+        List<Object> rawRecords,
+        Set<String> fieldsUsed,
+        Boolean requireId
+    ) {
+        Map<String, Schema.SObjectField> fieldMap = describe.fields.getMap();
         List<SObject> records = new List<SObject>();
-        for (Object recObj : recordsRaw) {
-            Map<String, Object> fieldValues = (Map<String, Object>) recObj;
-            SObject rec = sObjType.newSObject();
-
-            for (String fieldName : fieldValues.keySet()) {
-                if (fieldName.equalsIgnoreCase('Id')) {
-                    rec.put('Id', (Id) String.valueOf(fieldValues.get(fieldName)));
-                } else if (fieldMap.containsKey(fieldName.toLowerCase())) {
-                    Schema.DisplayType fieldType = fieldMap.get(fieldName.toLowerCase()).getDescribe().getType();
-                    Object rawValue = fieldValues.get(fieldName);
-                    rec.put(fieldName, convertFieldValue(rawValue, fieldType));
-                }
+        for (Object rawRecord : rawRecords) {
+            if (!(rawRecord instanceof Map<String, Object>)) {
+                throw new AgentGovException(
+                    AgentGovException.ErrorCode.INVALID_INPUT,
+                    'Each record must be a JSON object.'
+                );
             }
-            records.add(rec);
+            Map<String, Object> values = (Map<String, Object>) rawRecord;
+            SObject record = describe.getSObjectType().newSObject();
+            Boolean hasId = false;
+            for (String fieldName : values.keySet()) {
+                if (fieldName.equalsIgnoreCase(JSON_ATTRIBUTES_KEY)) {
+                    continue;
+                }
+                if (fieldName.equalsIgnoreCase('Id')) {
+                    record.Id = parseId(values.get(fieldName), describe);
+                    hasId = true;
+                    continue;
+                }
+                String apiName = AgentGovQueryBuilder.resolveField(fieldName, fieldMap, describe.getName());
+                fieldsUsed.add(apiName);
+                Schema.DisplayType fieldType = fieldMap.get(apiName.toLowerCase()).getDescribe().getType();
+                record.put(apiName, AgentGovQueryBuilder.convertFieldValue(values.get(fieldName), fieldType));
+            }
+            if (requireId && !hasId) {
+                throw new AgentGovException(
+                    AgentGovException.ErrorCode.INVALID_INPUT,
+                    AgentGovConstants.ERR_RECORD_ID_REQUIRED
+                );
+            }
+            records.add(record);
         }
         return records;
     }
 
-    private static Object convertFieldValue(Object rawValue, Schema.DisplayType fieldType) {
-        if (rawValue == null) return null;
-        String strVal = String.valueOf(rawValue);
-        if (fieldType == Schema.DisplayType.DATETIME) {
-            return DateTime.valueOf(strVal.replace('T', ' ').replace('Z', ''));
-        } else if (fieldType == Schema.DisplayType.DATE) {
-            return Date.valueOf(strVal);
-        } else if (fieldType == Schema.DisplayType.BOOLEAN) {
-            return Boolean.valueOf(strVal);
-        } else if (fieldType == Schema.DisplayType.DOUBLE || fieldType == Schema.DisplayType.CURRENCY || fieldType == Schema.DisplayType.PERCENT) {
-            return Decimal.valueOf(strVal);
-        } else if (fieldType == Schema.DisplayType.INTEGER) {
-            return Integer.valueOf(strVal);
-        }
-        return rawValue;
-    }
-
-    private static String extractObjectFromSoql(String soql) {
-        // Simple extraction: get word after FROM
-        String upper = soql.toUpperCase();
-        Integer fromIdx = upper.indexOf(' FROM ');
-        if (fromIdx < 0) return 'Unknown';
-        String afterFrom = soql.substring(fromIdx + 6).trim();
-        Integer spaceIdx = afterFrom.indexOf(' ');
-        return spaceIdx > 0 ? afterFrom.substring(0, spaceIdx) : afterFrom;
-    }
-
-    private static List<String> getErrorMessages(List<Database.Error> errors) {
-        List<String> msgs = new List<String>();
-        for (Database.Error err : errors) {
-            msgs.add(err.getMessage());
-        }
-        return msgs;
-    }
-
-    private static void logAction(Id regId, String actionType, String objectName, String recordId, String status, String details) {
+    private static Id parseId(Object rawId, Schema.DescribeSObjectResult describe) {
+        Id recordId;
         try {
-            AgentGovTriggerHandler.logAction(regId, actionType, objectName, recordId, status, details);
+            recordId = Id.valueOf(String.valueOf(rawId));
         } catch (Exception e) {
-            System.debug(LoggingLevel.WARN, 'AgentGov: Failed to log proxy action: ' + e.getMessage());
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                AgentGovConstants.ERR_INVALID_RECORD_ID + String.valueOf(rawId)
+            );
         }
+        if (recordId.getSObjectType() != describe.getSObjectType()) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(
+                    AgentGovConstants.ERR_ID_TYPE_MISMATCH,
+                    new List<String>{ String.valueOf(recordId), describe.getName() }
+                )
+            );
+        }
+        return recordId;
     }
 
-    private static Map<String, Object> buildRemainingBudgetMap(AgentGovBudgetManager.BudgetResult br) {
-        return new Map<String, Object>{
-            'apiCalls' => br.apiCallsRemaining,
-            'soqlQueries' => br.soqlQueriesRemaining,
-            'dmlOperations' => br.dmlOperationsRemaining
-        };
+    // --- Result helpers ---
+
+    private static WriteSummary summarizeSaveResults(List<Database.SaveResult> results) {
+        WriteSummary summary = new WriteSummary();
+        for (Database.SaveResult result : results) {
+            Map<String, Object> entry = new Map<String, Object>{ 'success' => result.isSuccess() };
+            if (result.isSuccess()) {
+                entry.put('id', result.getId());
+                summary.successCount++;
+            } else {
+                entry.put('errors', errorMessages(result.getErrors()));
+            }
+            summary.results.add(entry);
+        }
+        return summary;
+    }
+
+    private static WriteSummary summarizeUpsertResults(List<Database.UpsertResult> results) {
+        WriteSummary summary = new WriteSummary();
+        for (Database.UpsertResult result : results) {
+            Map<String, Object> entry = new Map<String, Object>{
+                'success' => result.isSuccess(),
+                'created' => result.isCreated()
+            };
+            if (result.isSuccess()) {
+                entry.put('id', result.getId());
+                summary.successCount++;
+            } else {
+                entry.put('errors', errorMessages(result.getErrors()));
+            }
+            summary.results.add(entry);
+        }
+        return summary;
+    }
+
+    private static WriteSummary summarizeDeleteResults(List<Database.DeleteResult> results, List<Id> ids) {
+        WriteSummary summary = new WriteSummary();
+        for (Integer i = 0; i < results.size(); i++) {
+            Map<String, Object> entry = new Map<String, Object>{ 'success' => results[i].isSuccess(), 'id' => ids[i] };
+            if (results[i].isSuccess()) {
+                summary.successCount++;
+            } else {
+                entry.put('errors', errorMessages(results[i].getErrors()));
+            }
+            summary.results.add(entry);
+        }
+        return summary;
+    }
+
+    // Per-record database errors are the agent's own validation feedback and are safe to return.
+    private static List<String> errorMessages(List<Database.Error> errors) {
+        List<String> messages = new List<String>();
+        for (Database.Error error : errors) {
+            messages.add(error.getMessage());
+        }
+        return messages;
     }
 }
