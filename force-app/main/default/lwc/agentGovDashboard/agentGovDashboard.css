@@ -1,21 +1,26 @@
+/* Colors come from SLDS 2 global styling hooks so the component follows the org's theme,
+   including the Cosmos theme and dark mode. The fallbacks are the SLDS 1 palette. */
+.loading-region {
+    min-height: 6rem;
+}
 .bar-danger {
-    background-color: #c23934;
+    background-color: var(--slds-g-color-error-1, #c23934);
 }
 .bar-warning {
-    background-color: #ff9a3c;
+    background-color: var(--slds-g-color-warning-1, #ff9a3c);
 }
 .bar-normal {
-    background-color: #04844b;
+    background-color: var(--slds-g-color-success-1, #04844b);
 }
 .badge-high {
-    background-color: #c23934;
-    color: white;
+    background-color: var(--slds-g-color-error-1, #c23934);
+    color: var(--slds-g-color-on-error-1, #ffffff);
 }
 .badge-medium {
-    background-color: #ff9a3c;
-    color: white;
+    background-color: var(--slds-g-color-warning-1, #ff9a3c);
+    color: var(--slds-g-color-on-warning-1, #080707);
 }
 .badge-low {
-    background-color: #706e6b;
-    color: white;
+    background-color: var(--slds-g-color-neutral-base-50, #706e6b);
+    color: var(--slds-g-color-neutral-base-100, #ffffff);
 }

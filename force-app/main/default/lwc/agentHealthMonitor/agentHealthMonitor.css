@@ -1,27 +1,26 @@
+/* Colors come from SLDS 2 global styling hooks. The static fallbacks are the SLDS 1
+   palette, so the component still renders correctly if a hook is unavailable.
+   Circuit breaker icons are coloured with lightning-icon's own variant attribute rather
+   than a styling hook: SLDS 2 removed the icon colour hook and offers no replacement. */
+.loading-region {
+    min-height: 6rem;
+}
 .agent-card {
-    border: 1px solid #e5e5e5;
-    border-radius: 0.25rem;
-}
-.cb-closed {
-    --sds-c-icon-color-foreground-default: #04844b;
-}
-.cb-open {
-    --sds-c-icon-color-foreground-default: #c23934;
-}
-.cb-half-open {
-    --sds-c-icon-color-foreground-default: #ff9a3c;
+    border: 1px solid var(--slds-g-color-border-1, #e5e5e5);
+    border-radius: var(--slds-g-radius-border-2, 0.25rem);
 }
 .progress-bar {
+    display: block;
     height: 100%;
-    border-radius: 0.25rem;
+    border-radius: var(--slds-g-radius-border-2, 0.25rem);
     transition: width 0.3s ease;
 }
 .bar-danger {
-    background-color: #c23934;
+    background-color: var(--slds-g-color-error-1, #c23934);
 }
 .bar-warning {
-    background-color: #ff9a3c;
+    background-color: var(--slds-g-color-warning-1, #ff9a3c);
 }
 .bar-normal {
-    background-color: #04844b;
+    background-color: var(--slds-g-color-success-1, #04844b);
 }

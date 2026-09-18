@@ -1,27 +1,110 @@
 import { createElement } from 'lwc';
 import AgentGovDashboard from 'c/agentGovDashboard';
-import getAllRegistrations from '@salesforce/apex/AgentGovSelector.getAllRegistrations';
-import getAllTodaysBudgets from '@salesforce/apex/AgentGovSelector.getAllTodaysBudgets';
-import getRecentConflictLogs from '@salesforce/apex/AgentGovSelector.getRecentConflictLogs';
+import getAllRegistrations from '@salesforce/apex/AgentGovDashboardController.getAllRegistrations';
+import getAllTodaysBudgets from '@salesforce/apex/AgentGovDashboardController.getAllTodaysBudgets';
+import getRecentConflictLogs from '@salesforce/apex/AgentGovDashboardController.getRecentConflictLogs';
+import getTodaysActionCount from '@salesforce/apex/AgentGovDashboardController.getTodaysActionCount';
+import getActiveSessions from '@salesforce/apex/AgentGovDashboardController.getActiveSessions';
+import getTrippedCircuitBreakerCount from '@salesforce/apex/AgentGovDashboardController.getTrippedCircuitBreakerCount';
+import { refreshApex } from '@salesforce/apex';
+import { subscribe, unsubscribe } from 'lightning/empApi';
+import { ShowToastEventName } from 'lightning/platformShowToastEvent';
 
 jest.mock(
-    '@salesforce/apex/AgentGovSelector.getAllRegistrations',
-    () => ({ default: jest.fn() }),
+    '@salesforce/apex/AgentGovDashboardController.getAllRegistrations',
+    () => {
+        const { createApexTestWireAdapter } = require('@salesforce/sfdx-lwc-jest');
+        return { default: createApexTestWireAdapter(jest.fn()) };
+    },
     { virtual: true }
 );
 jest.mock(
-    '@salesforce/apex/AgentGovSelector.getAllTodaysBudgets',
-    () => ({ default: jest.fn() }),
+    '@salesforce/apex/AgentGovDashboardController.getAllTodaysBudgets',
+    () => {
+        const { createApexTestWireAdapter } = require('@salesforce/sfdx-lwc-jest');
+        return { default: createApexTestWireAdapter(jest.fn()) };
+    },
     { virtual: true }
 );
 jest.mock(
-    '@salesforce/apex/AgentGovSelector.getRecentConflictLogs',
-    () => ({ default: jest.fn() }),
+    '@salesforce/apex/AgentGovDashboardController.getRecentConflictLogs',
+    () => {
+        const { createApexTestWireAdapter } = require('@salesforce/sfdx-lwc-jest');
+        return { default: createApexTestWireAdapter(jest.fn()) };
+    },
+    { virtual: true }
+);
+jest.mock(
+    '@salesforce/apex/AgentGovDashboardController.getTodaysActionCount',
+    () => {
+        const { createApexTestWireAdapter } = require('@salesforce/sfdx-lwc-jest');
+        return { default: createApexTestWireAdapter(jest.fn()) };
+    },
+    { virtual: true }
+);
+jest.mock(
+    '@salesforce/apex/AgentGovDashboardController.getActiveSessions',
+    () => {
+        const { createApexTestWireAdapter } = require('@salesforce/sfdx-lwc-jest');
+        return { default: createApexTestWireAdapter(jest.fn()) };
+    },
+    { virtual: true }
+);
+jest.mock(
+    '@salesforce/apex/AgentGovDashboardController.getTrippedCircuitBreakerCount',
+    () => {
+        const { createApexTestWireAdapter } = require('@salesforce/sfdx-lwc-jest');
+        return { default: createApexTestWireAdapter(jest.fn()) };
+    },
     { virtual: true }
 );
 
-function flushPromises() {
-    return new Promise((resolve) => setTimeout(resolve, 0));
+const AGENTS = [
+    { Id: 'a1', Agent_Name__c: 'Agent 1', Status__c: 'Active' },
+    { Id: 'a2', Agent_Name__c: 'Agent 2', Status__c: 'Inactive' }
+];
+const BUDGETS = [
+    {
+        Id: 'b1',
+        Agent_Registration__r: { Agent_Name__c: 'Agent 1' },
+        Budget_Status__c: 'Warning',
+        API_Calls_Allocated__c: 100,
+        API_Calls_Consumed__c: 50,
+        SOQL_Queries_Allocated__c: 100,
+        SOQL_Queries_Consumed__c: 50,
+        DML_Operations_Allocated__c: 100,
+        DML_Operations_Consumed__c: 50
+    }
+];
+const CONFLICTS = [
+    {
+        Id: 'c1',
+        Agent_1__r: { Agent_Name__c: 'Agent 1' },
+        Agent_2__r: { Agent_Name__c: 'Agent 2' },
+        Object_Name__c: 'Account',
+        Conflict_Type__c: 'Concurrent_Write',
+        Resolution__c: 'Agent1_Won',
+        Severity__c: 'High',
+        Timestamp__c: '2026-09-15T10:00:00.000Z'
+    }
+];
+
+const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function emitAll({
+    agents = AGENTS,
+    budgets = BUDGETS,
+    conflicts = CONFLICTS,
+    sessions = [],
+    actions = 7,
+    tripped = 1
+} = {}) {
+    getAllRegistrations.emit(agents);
+    getAllTodaysBudgets.emit(budgets);
+    getRecentConflictLogs.emit(conflicts);
+    getTodaysActionCount.emit(actions);
+    getActiveSessions.emit(sessions);
+    getTrippedCircuitBreakerCount.emit(tripped);
 }
 
 describe('c-agent-gov-dashboard', () => {
@@ -32,46 +115,155 @@ describe('c-agent-gov-dashboard', () => {
         jest.clearAllMocks();
     });
 
-    it('renders dashboard component', async () => {
-        getAllRegistrations.mockResolvedValue([
-            { Id: '1', Agent_Name__c: 'Agent 1', Status__c: 'Active' },
-            { Id: '2', Agent_Name__c: 'Agent 2', Status__c: 'Inactive' }
+    function mount() {
+        const element = createElement('c-agent-gov-dashboard', { is: AgentGovDashboard });
+        document.body.appendChild(element);
+        return element;
+    }
+
+    it('shows a spinner until every wire has resolved', async () => {
+        const element = mount();
+        expect(element.shadowRoot.querySelector('lightning-spinner')).not.toBeNull();
+
+        getAllRegistrations.emit(AGENTS);
+        await flushPromises();
+        expect(element.shadowRoot.querySelector('lightning-spinner')).not.toBeNull();
+
+        emitAll();
+        await flushPromises();
+        expect(element.shadowRoot.querySelector('lightning-spinner')).toBeNull();
+    });
+
+    it('computes summary tiles and budget bars from wired data', async () => {
+        const element = mount();
+        emitAll();
+        await flushPromises();
+
+        const headings = Array.from(element.shadowRoot.querySelectorAll('.slds-text-heading_large')).map(
+            (el) => el.textContent
+        );
+        expect(headings).toEqual(['2', '1', '7', '0', '50%', '1']);
+
+        const bar = element.shadowRoot.querySelector('.slds-progress-bar');
+        expect(bar.getAttribute('aria-valuenow')).toBe('50');
+        expect(bar.getAttribute('aria-label')).toBe('Agent 1 average budget usage 50 percent');
+        const fill = bar.querySelector('.slds-progress-bar__value');
+        expect(fill.style.width).toBe('50%');
+        expect(fill.classList.contains('bar-normal')).toBe(true);
+        expect(element.shadowRoot.querySelector('.slds-theme_warning').textContent).toBe('Warning');
+        expect(element.shadowRoot.querySelector('.badge-high').textContent).toBe('High');
+    });
+
+    it('renders empty states when there is no data', async () => {
+        const element = mount();
+        emitAll({ agents: [], budgets: [], conflicts: [], actions: 0, tripped: 0 });
+        await flushPromises();
+
+        const emptyStates = Array.from(element.shadowRoot.querySelectorAll('.empty-state')).map((el) =>
+            el.textContent.trim()
+        );
+        expect(emptyStates).toEqual(['No budget data available for today.', 'No conflicts detected.']);
+    });
+
+    it('shows the error and toasts once when a wire fails', async () => {
+        const element = mount();
+        const toastHandler = jest.fn();
+        element.addEventListener(ShowToastEventName, toastHandler);
+
+        getAllRegistrations.error({ message: 'Boom' });
+        getAllTodaysBudgets.error({ message: 'Boom' });
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('[role="alert"] h2').textContent).toBe('Boom');
+        expect(toastHandler).toHaveBeenCalledTimes(1);
+        expect(toastHandler.mock.calls[0][0].detail.variant).toBe('error');
+    });
+
+    it('subscribes to both platform-event channels and refreshes on an event', async () => {
+        const element = mount();
+        emitAll();
+        await flushPromises();
+
+        expect(subscribe).toHaveBeenCalledTimes(2);
+        expect(subscribe.mock.calls.map((call) => call[0]).sort()).toEqual([
+            '/event/AgentGov_Action_Event__e',
+            '/event/AgentGov_Alert__e'
         ]);
-        getAllTodaysBudgets.mockResolvedValue([]);
-        getRecentConflictLogs.mockResolvedValue([]);
+        expect(element.shadowRoot.querySelector('[aria-live="polite"]').textContent).toBe('Live updates on');
 
-        const element = createElement('c-agent-gov-dashboard', { is: AgentGovDashboard });
-        document.body.appendChild(element);
-
+        const onEvent = subscribe.mock.calls[0][2];
+        onEvent({ data: { payload: {} } });
         await flushPromises();
+        expect(refreshApex).toHaveBeenCalledTimes(6);
 
-        const pageHeader = element.shadowRoot.querySelector('.slds-page-header');
-        expect(pageHeader).toBeTruthy();
+        document.body.removeChild(element);
+        expect(unsubscribe).toHaveBeenCalledTimes(2);
     });
 
-    it('shows loading spinner initially', () => {
-        getAllRegistrations.mockResolvedValue([]);
-        getAllTodaysBudgets.mockResolvedValue([]);
-        getRecentConflictLogs.mockResolvedValue([]);
-
-        const element = createElement('c-agent-gov-dashboard', { is: AgentGovDashboard });
-        document.body.appendChild(element);
-
-        const spinner = element.shadowRoot.querySelector('lightning-spinner');
-        expect(spinner).toBeTruthy();
-    });
-
-    it('handles error gracefully', async () => {
-        getAllRegistrations.mockRejectedValue(new Error('Test error'));
-        getAllTodaysBudgets.mockResolvedValue([]);
-        getRecentConflictLogs.mockResolvedValue([]);
-
-        const element = createElement('c-agent-gov-dashboard', { is: AgentGovDashboard });
-        document.body.appendChild(element);
-
+    it('refreshes every wire when the Refresh button is clicked', async () => {
+        const element = mount();
+        emitAll();
         await flushPromises();
 
-        // Component should not throw — error is handled internally
-        expect(element).toBeTruthy();
+        element.shadowRoot.querySelector('lightning-button').click();
+        await flushPromises();
+
+        expect(refreshApex).toHaveBeenCalledTimes(6);
+    });
+
+    it('coalesces refresh requests that arrive while one is running', async () => {
+        const element = mount();
+        emitAll();
+        await flushPromises();
+        let release;
+        const gate = new Promise((resolve) => {
+            release = resolve;
+        });
+        refreshApex.mockImplementation(() => gate);
+
+        const button = element.shadowRoot.querySelector('lightning-button');
+        button.click();
+        button.click();
+        button.click();
+        await flushPromises();
+        expect(refreshApex).toHaveBeenCalledTimes(6);
+
+        refreshApex.mockImplementation(() => Promise.resolve());
+        release();
+        await flushPromises();
+        await flushPromises();
+        expect(refreshApex).toHaveBeenCalledTimes(12);
+    });
+
+    it('stays live when only one channel fails to subscribe', async () => {
+        subscribe.mockRejectedValueOnce(new Error('streaming unavailable'));
+        const element = mount();
+        emitAll();
+        await flushPromises();
+
+        // One channel refusing must not discard the subscription that succeeded on the other,
+        // which Promise.all used to do, leaving it impossible to unsubscribe.
+        expect(element.shadowRoot.querySelector('[aria-live="polite"]').textContent).toBe('Live updates on');
+    });
+
+    it('reports live updates as off when every channel fails to subscribe', async () => {
+        subscribe.mockRejectedValue(new Error('streaming unavailable'));
+        const element = mount();
+        emitAll();
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('[aria-live="polite"]').textContent).toBe('Live updates off');
+    });
+
+    it('shows an error when a refresh fails', async () => {
+        const element = mount();
+        emitAll();
+        await flushPromises();
+        refreshApex.mockRejectedValueOnce({ body: { message: 'Refresh failed' } });
+
+        element.shadowRoot.querySelector('lightning-button').click();
+        await flushPromises();
+
+        expect(element.shadowRoot.querySelector('[role="alert"] h2').textContent).toBe('Refresh failed');
     });
 });
