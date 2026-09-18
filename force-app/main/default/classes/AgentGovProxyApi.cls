@@ -475,13 +475,17 @@ global with sharing class AgentGovProxyApi {
         if (request.requestBody == null || String.isBlank(request.requestBody.toString())) {
             return new Map<String, Object>();
         }
+        Object parsed;
         try {
-            Object parsed = JSON.deserializeUntyped(request.requestBody.toString());
-            if (parsed instanceof Map<String, Object>) {
-                return (Map<String, Object>) parsed;
-            }
+            parsed = JSON.deserializeUntyped(request.requestBody.toString());
         } catch (JSONException e) {
-            // Fall through to the shared error below.
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                'Request body must be a JSON object.'
+            );
+        }
+        if (parsed instanceof Map<String, Object>) {
+            return (Map<String, Object>) parsed;
         }
         throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'Request body must be a JSON object.');
     }

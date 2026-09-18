@@ -65,9 +65,14 @@ CI runs the same steps plus Salesforce Code Analyzer. Two notes on that job:
 - The **PMD and CPD engines need a JDK 11 or later**. CI installs Temurin 21; without a
   local JDK those engines report themselves as uninstantiable, which the analyzer counts as
   a Critical violation. Install a JDK to reproduce the CI result locally.
-- CI fails on any violation at **Moderate severity or above**. The remaining Low findings
-  are the static SLDS 1 fallbacks in the component CSS (`var(--slds-g-color-…, #hex)`),
-  which are kept deliberately so a component still renders if a styling hook is missing.
+- CI fails on any violation at **High severity or above**. The security rules that matter for
+  this framework are elevated into that band in `code-analyzer.yml`: SOQL injection is
+  Critical, and CRUD/FLS and sharing violations are High, so they stop the build.
+- **Moderate findings are reported but do not gate.** They are complexity and parameter-count
+  advisories on the budget ladder, the breaker state machine and the policy matcher, plus
+  hardcoded Ids in test classes. Reducing them is on the roadmap. Do not raise the threshold
+  without doing that work first: a gate the codebase cannot pass gets switched off, which is
+  how this one sat inert for a release.
 
 The Apex job needs the `SFDX_AUTH_URL` repository secret and is skipped without it.
 

@@ -155,7 +155,10 @@ public inherited sharing class AgentGovQueryBuilder {
             );
         }
         try {
-            return Schema.describeSObjects(new List<String>{ objectName })[0];
+            // DEFERRED so the describe does not eagerly load every child relationship. The
+            // builder needs the field map and the name, nothing else, and this runs on every
+            // proxied request.
+            return Schema.describeSObjects(new List<String>{ objectName }, SObjectDescribeOptions.DEFERRED)[0];
         } catch (Exception e) {
             throw new AgentGovException(
                 AgentGovException.ErrorCode.INVALID_INPUT,

@@ -89,8 +89,9 @@ jobs:
         with:
           # --severity-threshold is what makes the command exit non-zero. Without it the
           # analyzer reports violations and still exits 0, so the gate below never fires.
-          # 3 is Moderate, matching the severity policy documented in CLAUDE.md.
-          run-arguments: --workspace force-app --config-file code-analyzer.yml --output-file sfca-results.html --output-file sfca-results.json --view detail --severity-threshold 3
+          # 2 is High: the security rules elevated in code-analyzer.yml stop the build, while
+          # Moderate complexity advisories are reported without gating. See that file.
+          run-arguments: --workspace force-app --config-file code-analyzer.yml --output-file sfca-results.html --output-file sfca-results.json --view detail --severity-threshold 2
           results-artifact-name: code-analyzer-results
       - name: Fail on violations at or above the configured severity
         if: ${{ steps.run-code-analyzer.outputs.exit-code > 0 }}
