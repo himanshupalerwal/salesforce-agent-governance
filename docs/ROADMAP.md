@@ -47,6 +47,15 @@ Platform modernization and security hardening. See `CHANGELOG.md` for the full l
 
 ---
 
+## Engineering debt tracked for v1.3
+
+- **Reduce Code Analyzer Moderate findings.** Around 100 remain, chiefly cyclomatic and
+  cognitive complexity in `AgentGovBudgetManager`, `AgentGovQueryBuilder` and
+  `AgentGovProxyApi`, parameter counts on the builders, and hardcoded Ids in test classes.
+  CI gates at High today; the goal is to clear these and raise the gate to Moderate.
+
+---
+
 ## v1.3 — Agentforce-Native (Target: Q4 2026)
 
 - **Action and credit budgets.** A fourth limit type for agent actions, with an optional

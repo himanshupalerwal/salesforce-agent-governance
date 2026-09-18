@@ -162,6 +162,7 @@ public inherited sharing class AgentGovContext {
     // Charges the failed action's measured usage. A budget exception raised here is
     // deliberately not propagated: the action's own exception is the one the caller must
     // see, and the budget row has already been written by the time it is raised.
+    @SuppressWarnings('PMD.EmptyCatchBlock')
     private static void chargeAfterFailure() {
         // Catches everything, not just AgentGovException. The caller is on its way to
         // rethrowing the action's own exception, and anything escaping here would replace it
@@ -177,8 +178,10 @@ public inherited sharing class AgentGovContext {
                     null
                 );
             } catch (Exception unloggable) {
-                // Nothing further can be done. Losing the note is preferable to losing the
-                // agent's own exception, which the caller is about to rethrow.
+                // Deliberately empty. The note about a failed charge could not itself be
+                // written, and nothing useful remains to be done: the caller is about to
+                // rethrow the agent's own exception, which must not be replaced by this one.
+                // A System.debug is not used here because production paths carry none.
             }
         }
     }

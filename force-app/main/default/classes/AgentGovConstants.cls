@@ -230,7 +230,8 @@ public class AgentGovConstants {
         ACTION_FLOW_TRIGGER
     };
 
+    @SuppressWarnings('PMD.EmptyStatementBlock')
     private AgentGovConstants() {
-        // Prevent instantiation
+        // A constants holder is never instantiated; the private constructor is what enforces it.
     }
 }

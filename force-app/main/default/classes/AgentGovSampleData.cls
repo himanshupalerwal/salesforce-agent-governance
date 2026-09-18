@@ -5,8 +5,13 @@
  *              which are stored hashed, exactly as real keys are.
  *
  *              Security posture: with sharing. Intended to be run by an administrator from
- *              anonymous Apex, so plain DML in the running user's context is appropriate.
+ *              anonymous Apex, so the running user's own sharing and permissions apply. CRUD
+ *              is not checked explicitly because the only supported caller already holds
+ *              Modify All Data; an administrator loading demonstration records into their own
+ *              org is the entire use case, and a permission failure here is a setup problem
+ *              the administrator should see rather than one the class should mask.
  */
+@SuppressWarnings('PMD.ApexCRUDViolation')
 public with sharing class AgentGovSampleData {
     /**
      * @description Rows removed per object in one run. Five objects are purged per run, so

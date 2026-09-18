@@ -421,13 +421,17 @@ global with sharing class AgentGovRestApi {
     }
 
     private static Id parseRegistrationId(String rawId) {
+        Id registrationId;
         try {
-            Id registrationId = Id.valueOf(rawId);
-            if (registrationId.getSObjectType() == AgentGov_Registration__c.SObjectType) {
-                return registrationId;
-            }
+            registrationId = Id.valueOf(rawId);
         } catch (Exception e) {
-            // Fall through to the shared error below.
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                AgentGovConstants.ERR_INVALID_RECORD_ID + rawId
+            );
+        }
+        if (registrationId.getSObjectType() == AgentGov_Registration__c.SObjectType) {
+            return registrationId;
         }
         throw new AgentGovException(
             AgentGovException.ErrorCode.INVALID_INPUT,
@@ -439,13 +443,17 @@ global with sharing class AgentGovRestApi {
         if (request.requestBody == null || String.isBlank(request.requestBody.toString())) {
             return new Map<String, Object>();
         }
+        Object parsed;
         try {
-            Object parsed = JSON.deserializeUntyped(request.requestBody.toString());
-            if (parsed instanceof Map<String, Object>) {
-                return (Map<String, Object>) parsed;
-            }
+            parsed = JSON.deserializeUntyped(request.requestBody.toString());
         } catch (JSONException e) {
-            // Fall through to the shared error below.
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                'Request body must be a JSON object.'
+            );
+        }
+        if (parsed instanceof Map<String, Object>) {
+            return (Map<String, Object>) parsed;
         }
         throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'Request body must be a JSON object.');
     }
