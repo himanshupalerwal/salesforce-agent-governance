@@ -10,7 +10,7 @@ echo "============================================"
 # Create scratch org
 echo ""
 echo "1. Creating scratch org..."
-sf org create scratch -f config/project-scratch-def.json -a AgentGov -d 30 -w 10
+sf org create scratch -f config/project-scratch-def.json -a AgentGov -y 30 -w 10
 
 # Deploy source
 echo ""
