@@ -1,83 +1,479 @@
+/**
+ * @description Tests for AgentGovTriggerHandler: event-backed logging, fallbacks, rejected
+ *              entries, alert emails, and budget key population.
+ */
 @IsTest
 private class AgentGovTriggerHandlerTest {
-
     @TestSetup
     static void setup() {
         AgentGovTestDataFactory.createSettings();
     }
 
+    private static List<AgentGov_Action_Log__c> logsFor(Id registrationId) {
+        return [
+            SELECT Action_Type__c, Status__c, Details__c, Error_Message__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :registrationId
+        ];
+    }
+
     @IsTest
-    static void testLogAction() {
+    static void logActionPersistsThroughPlatformEvent() {
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
 
         Test.startTest();
         AgentGovTriggerHandler.logAction(
-            reg.Id, 'Query', 'Account', '001000000000001', 'Success', '{"test": true}'
+            reg.Id,
+            AgentGovConstants.ACTION_QUERY,
+            'Account',
+            '001000000000001',
+            AgentGovConstants.ACTION_SUCCESS,
+            '{"test": true}'
         );
+        Test.getEventBus().deliver();
         Test.stopTest();
 
-        // The action should be logged via platform event -> trigger -> action log
-        // In test context, we verify the event was published
+        List<AgentGov_Action_Log__c> logs = logsFor(reg.Id);
+        Assert.areEqual(1, logs.size());
+        Assert.areEqual(AgentGovConstants.ACTION_QUERY, logs[0].Action_Type__c);
+        Assert.areEqual('{"test": true}', logs[0].Details__c);
     }
 
     @IsTest
-    static void testLogActionFrameworkDisabled() {
+    static void auditingContinuesWhenTheFrameworkIsDisabled() {
         AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
         settings.Is_Enabled__c = false;
         update settings;
         AgentGovSelector.clearCache();
-
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
 
         Test.startTest();
-        // Should not throw even when disabled
-        AgentGovTriggerHandler.logAction(reg.Id, 'Query', 'Account', '001000000000001', 'Success', null);
+        AgentGovTriggerHandler.logAction(
+            reg.Id,
+            AgentGovConstants.ACTION_QUERY,
+            'Account',
+            null,
+            AgentGovConstants.ACTION_SUCCESS,
+            null
+        );
+        Test.getEventBus().deliver();
         Test.stopTest();
+
+        // Is_Enabled__c suspends enforcement, not the audit trail. Activity that happens while
+        // governance is switched off is precisely what an administrator needs recorded.
+        Assert.areEqual(1, logsFor(reg.Id).size(), 'Actions are still audited while governance is disabled');
     }
 
     @IsTest
-    static void testLogActionEventsDisabled() {
+    static void aRefusedPublishStillWritesTheAuditRows() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
+        AgentGovDml.simulatePublishRefusal = true;
+
+        Test.startTest();
+        AgentGovTriggerHandler.logAction(
+            reg.Id,
+            AgentGovConstants.ACTION_QUERY,
+            'Account',
+            null,
+            AgentGovConstants.ACTION_SUCCESS,
+            null
+        );
+        Test.stopTest();
+
+        // The user an agent runs as is deliberately not granted publish access, because on a
+        // platform event Create cannot be granted without Read and Read is subscribe access.
+        // The trail must survive that refusal rather than aborting the governed transaction.
+        Assert.areEqual(1, logsFor(reg.Id).size(), 'A refused publish falls back to a direct insert');
+    }
+
+    @IsTest
+    static void aRefusedAlertPublishIsRecordedNotThrown() {
+        AgentGovDml.simulatePublishRefusal = true;
+
+        Test.startTest();
+        AgentGovTriggerHandler.publishAlerts(
+            new List<AgentGov_Alert__e>{
+                new AgentGov_Alert__e(
+                    Alert_Type__c = AgentGovConstants.ALERT_WARNING,
+                    Limit_Type__c = AgentGovConstants.LIMIT_API_CALLS,
+                    Timestamp__c = DateTime.now()
+                )
+            }
+        );
+        Test.stopTest();
+
+        Assert.areEqual(
+            1,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM
+            ],
+            'The refusal is recorded as a framework event instead of aborting the transaction'
+        );
+    }
+
+    @IsTest
+    static void directInsertWhenEventsDisabled() {
         AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
         settings.Enable_Real_Time_Events__c = false;
         update settings;
         AgentGovSelector.clearCache();
-
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
 
-        Test.startTest();
-        AgentGovTriggerHandler.logAction(reg.Id, 'Create', 'Contact', '003000000000001', 'Success', null);
-        Test.stopTest();
+        AgentGovTriggerHandler.logAction(
+            reg.Id,
+            AgentGovConstants.ACTION_CREATE,
+            'Contact',
+            '003000000000001',
+            AgentGovConstants.ACTION_SUCCESS,
+            null
+        );
 
-        // Should fall back to direct insert
-        List<AgentGov_Action_Log__c> logs = [SELECT Id FROM AgentGov_Action_Log__c WHERE Agent_Registration__c = :reg.Id];
-        System.assertEquals(1, logs.size(), 'Should insert directly when events disabled');
+        Assert.areEqual(1, logsFor(reg.Id).size(), 'Rows are inserted directly without an event round trip');
     }
 
     @IsTest
-    static void testLogActions() {
+    static void bulkEventsBecomeRows() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
+        List<AgentGov_Action_Event__e> events = new List<AgentGov_Action_Event__e>();
+        for (Integer i = 0; i < 3; i++) {
+            events.add(
+                AgentGovTriggerHandler.buildEvent(
+                    reg.Id,
+                    'Handler Agent',
+                    AgentGovConstants.ACTION_UPDATE,
+                    'Account',
+                    null,
+                    AgentGovConstants.ACTION_SUCCESS,
+                    'row ' + i
+                )
+            );
+        }
+
+        Test.startTest();
+        AgentGovTriggerHandler.logActions(events);
+        AgentGovTriggerHandler.logActions(new List<AgentGov_Action_Event__e>());
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.areEqual(3, logsFor(reg.Id).size());
+    }
+
+    @IsTest
+    static void rejectedEntryIsKeptAsSystemRow() {
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
 
-        List<AgentGov_Action_Event__e> events = new List<AgentGov_Action_Event__e>{
-            new AgentGov_Action_Event__e(
-                Agent_Id__c = reg.Id,
-                Agent_Name__c = 'Handler Agent',
-                Action_Type__c = 'Query',
-                Object_Name__c = 'Account',
-                Status__c = 'Success',
+        Test.startTest();
+        AgentGovTriggerHandler.logAction(
+            reg.Id,
+            'NotAPicklistValue',
+            'Account',
+            null,
+            AgentGovConstants.ACTION_SUCCESS,
+            'original details'
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        List<AgentGov_Action_Log__c> logs = [
+            SELECT Agent_Registration__c, Action_Type__c, Status__c, Details__c, Error_Message__c
+            FROM AgentGov_Action_Log__c
+        ];
+        Assert.areEqual(1, logs.size(), 'The entry is not lost');
+        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, logs[0].Action_Type__c);
+        Assert.areEqual(AgentGovConstants.ACTION_FAILURE, logs[0].Status__c);
+        Assert.isNull(
+            logs[0].Agent_Registration__c,
+            'The replacement row keeps only values the framework controls; the original lookup may itself be the reason for the rejection'
+        );
+        Assert.isTrue(logs[0].Details__c.contains(reg.Id), 'The original agent is preserved in the details');
+        Assert.isTrue(logs[0].Details__c.contains('NotAPicklistValue'), 'The original action type is preserved');
+        Assert.isTrue(logs[0].Details__c.contains('original details'));
+        Assert.isTrue(logs[0].Error_Message__c.contains('Log entry rejected'));
+    }
+
+    @IsTest
+    static void unrecognisedAgentIdIsNotedOnTheRow() {
+        Test.startTest();
+        AgentGovTriggerHandler.logActions(
+            new List<AgentGov_Action_Event__e>{
+                AgentGovTriggerHandler.buildEvent(
+                    null,
+                    'Ghost',
+                    AgentGovConstants.ACTION_QUERY,
+                    'Account',
+                    null,
+                    AgentGovConstants.ACTION_SUCCESS,
+                    null
+                )
+            }
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.areEqual(1, [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Agent_Registration__c = NULL]);
+    }
+
+    @IsTest
+    static void alertsAreEmailedToAdministrator() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Admin_Notification_Email__c = 'ops@example.com';
+        update settings;
+        AgentGovSelector.clearCache();
+        List<AgentGov_Alert__e> alerts = new List<AgentGov_Alert__e>{
+            new AgentGov_Alert__e(
+                Agent_Name__c = 'Alert Agent',
+                Alert_Type__c = AgentGovConstants.ALERT_WARNING,
+                Limit_Type__c = AgentGovConstants.LIMIT_API_CALLS,
+                Current_Usage__c = 8000,
+                Budget_Allocated__c = 10000,
+                Usage_Percentage__c = 80,
                 Timestamp__c = DateTime.now()
             )
         };
 
+        // The event trigger runs in its own execution context, so the handler is exercised
+        // directly to observe the email invocation; publishing is asserted separately.
         Test.startTest();
-        AgentGovTriggerHandler.logActions(events);
+        List<Database.SaveResult> published = AgentGovDml.publishEvents(alerts);
+        AgentGovTriggerHandler.handleAlerts(alerts);
+        Integer emails = Limits.getEmailInvocations();
         Test.stopTest();
+
+        Assert.isTrue(published[0].isSuccess(), 'The alert is accepted by the event bus');
+        Assert.areEqual(1, emails, 'One email is sent per delivered batch');
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM],
+            'No delivery failure was recorded'
+        );
     }
 
     @IsTest
-    static void testLogActionsEmptyList() {
+    static void noEmailWithoutRecipient() {
         Test.startTest();
-        AgentGovTriggerHandler.logActions(new List<AgentGov_Action_Event__e>());
+        AgentGovTriggerHandler.handleAlerts(
+            new List<AgentGov_Alert__e>{
+                new AgentGov_Alert__e(Agent_Name__c = 'Alert Agent', Alert_Type__c = AgentGovConstants.ALERT_BLOCK)
+            }
+        );
+        Integer emails = Limits.getEmailInvocations();
         Test.stopTest();
-        // Should not throw
+
+        Assert.areEqual(0, emails);
+    }
+
+    @IsTest
+    static void budgetKeyIsPopulatedByTrigger() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Key Agent', 'Agentforce', true);
+        AgentGov_Budget__c budget = AgentGovTestDataFactory.createBudget(reg.Id, true);
+
+        AgentGov_Budget__c stored = [SELECT Budget_Key__c FROM AgentGov_Budget__c WHERE Id = :budget.Id];
+        Assert.areEqual(AgentGovBudgetManager.buildBudgetKey(reg.Id, Date.today()), stored.Budget_Key__c);
+    }
+
+    @IsTest
+    static void frameworkEventsAreRecordedAsSystemRows() {
+        AgentGovTriggerHandler.recordFrameworkEvent(
+            null,
+            AgentGovConstants.ACTION_FAILURE,
+            'something happened',
+            'detail'
+        );
+
+        List<AgentGov_Action_Log__c> rows = [SELECT Action_Type__c, Status__c, Details__c FROM AgentGov_Action_Log__c];
+        Assert.areEqual(1, rows.size());
+        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, rows[0].Action_Type__c);
+        Assert.areEqual('something happened', rows[0].Details__c);
+    }
+
+    @IsTest
+    static void agentIdOfAnotherObjectTypeIsNotUsedAsLookup() {
+        Account account = new Account(Name = 'Not an agent');
+        insert account;
+
+        Test.startTest();
+        AgentGovTriggerHandler.logActions(
+            new List<AgentGov_Action_Event__e>{
+                AgentGovTriggerHandler.buildEvent(
+                    account.Id,
+                    'Impostor',
+                    AgentGovConstants.ACTION_QUERY,
+                    'Account',
+                    null,
+                    AgentGovConstants.ACTION_SUCCESS,
+                    null
+                )
+            }
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        AgentGov_Action_Log__c entry = [SELECT Agent_Registration__c, Details__c FROM AgentGov_Action_Log__c LIMIT 1];
+        Assert.isNull(entry.Agent_Registration__c);
+        Assert.isTrue(entry.Details__c.contains('Unrecognised agent Id'));
+    }
+
+    @IsTest
+    static void unknownRegistrationIsLoggedWithPlaceholderName() {
+        Id unknownId = AgentGov_Registration__c.SObjectType.getDescribe().getKeyPrefix() + '000000000001AAA';
+
+        Test.startTest();
+        AgentGovTriggerHandler.logAction(
+            unknownId,
+            AgentGovConstants.ACTION_QUERY,
+            'Account',
+            null,
+            AgentGovConstants.ACTION_SUCCESS,
+            null
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.areEqual(1, [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Agent_Registration__c = NULL]);
+    }
+
+    @IsTest
+    static void alertEmailBodyListsEveryAlert() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Admin_Notification_Email__c = 'ops@example.com';
+        update settings;
+        AgentGovSelector.clearCache();
+        List<AgentGov_Alert__e> alerts = new List<AgentGov_Alert__e>();
+        for (Integer i = 0; i < 3; i++) {
+            alerts.add(
+                new AgentGov_Alert__e(
+                    Agent_Name__c = 'Agent ' + i,
+                    Alert_Type__c = AgentGovConstants.ALERT_BLOCK,
+                    Limit_Type__c = AgentGovConstants.LIMIT_DML_OPERATIONS,
+                    Current_Usage__c = 3000,
+                    Budget_Allocated__c = 3000,
+                    Usage_Percentage__c = 100,
+                    Timestamp__c = DateTime.now()
+                )
+            );
+        }
+
+        Test.startTest();
+        AgentGovTriggerHandler.handleAlerts(alerts);
+        Integer emails = Limits.getEmailInvocations();
+        AgentGovTriggerHandler.handleAlerts(new List<AgentGov_Alert__e>());
+        Test.stopTest();
+
+        Assert.areEqual(1, emails, 'A batch of alerts produces a single email');
+    }
+
+    @IsTest
+    static void alertEmailIsSkippedWhenTheEmailLimitIsReached() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Admin_Notification_Email__c = 'ops@example.com';
+        update settings;
+        AgentGovSelector.clearCache();
+        List<AgentGov_Alert__e> alerts = new List<AgentGov_Alert__e>{
+            new AgentGov_Alert__e(Agent_Name__c = 'Agent', Alert_Type__c = AgentGovConstants.ALERT_BLOCK)
+        };
+
+        Test.startTest();
+        // Exhaust the transaction's email allowance, then confirm the handler records the
+        // skip instead of throwing.
+        while (Limits.getEmailInvocations() < Limits.getLimitEmailInvocations()) {
+            Messaging.SingleEmailMessage filler = new Messaging.SingleEmailMessage();
+            filler.setToAddresses(new List<String>{ 'filler@example.com' });
+            filler.setSubject('filler');
+            filler.setPlainTextBody('filler');
+            Messaging.sendEmail(new List<Messaging.SingleEmailMessage>{ filler }, false);
+        }
+        AgentGovTriggerHandler.handleAlerts(alerts);
+        Test.stopTest();
+
+        AgentGov_Action_Log__c entry = [
+            SELECT Details__c
+            FROM AgentGov_Action_Log__c
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM
+            LIMIT 1
+        ];
+        Assert.isTrue(entry.Details__c.contains('email limit'), entry.Details__c);
+    }
+
+    @IsTest
+    static void alertsAreNotPublishedWhenEventsAreDisabled() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Enable_Real_Time_Events__c = false;
+        settings.Admin_Notification_Email__c = 'ops@example.com';
+        update settings;
+        AgentGovSelector.clearCache();
+
+        Test.startTest();
+        AgentGovTriggerHandler.publishAlerts(
+            new List<AgentGov_Alert__e>{
+                new AgentGov_Alert__e(Agent_Name__c = 'Agent', Alert_Type__c = AgentGovConstants.ALERT_WARNING)
+            }
+        );
+        AgentGovTriggerHandler.publishAlerts(null);
+        Integer publishes = Limits.getDmlStatements();
+        Test.getEventBus().deliver();
+        Integer emails = Limits.getEmailInvocations();
+        Test.stopTest();
+
+        Assert.areEqual(0, publishes, 'Nothing is published when real-time events are disabled');
+        Assert.areEqual(0, emails, 'And no alert email is sent');
+    }
+
+    @IsTest
+    static void budgetKeysAreOnlySetWhenBothPartsArePresent() {
+        AgentGov_Budget__c incomplete = new AgentGov_Budget__c(Budget_Date__c = Date.today());
+
+        AgentGovTriggerHandler.populateBudgetKeys(new List<AgentGov_Budget__c>{ incomplete });
+
+        Assert.isNull(incomplete.Budget_Key__c, 'A budget without an agent cannot have a key');
+    }
+
+    @IsTest
+    static void aRefusedAlertPublishStillEmailsTheAdministrator() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Admin_Notification_Email__c = 'agentgov-alerts@example.com';
+        update settings;
+        AgentGovSelector.clearCache();
+        AgentGovDml.simulatePublishRefusal = true;
+
+        Test.startTest();
+        AgentGovTriggerHandler.publishAlerts(
+            new List<AgentGov_Alert__e>{
+                new AgentGov_Alert__e(
+                    Alert_Type__c = AgentGovConstants.ALERT_BLOCK,
+                    Limit_Type__c = AgentGovConstants.LIMIT_API_CALLS,
+                    Agent_Name__c = 'Refused Publish Agent',
+                    Timestamp__c = DateTime.now()
+                )
+            }
+        );
+        Integer emails = Limits.getEmailInvocations();
+        Test.stopTest();
+
+        // The agent user cannot publish, so the alert trigger never fires. Without a direct
+        // send, a budget or breaker alert raised on a REST call would reach nobody.
+        Assert.areEqual(1, emails, 'The alert is emailed directly when the publish is refused');
+    }
+
+    @IsTest
+    static void frameworkEventsAreWrittenInOneStatement() {
+        List<AgentGov_Action_Log__c> notes = new List<AgentGov_Action_Log__c>();
+        for (Integer i = 0; i < 20; i++) {
+            notes.add(
+                AgentGovTriggerHandler.buildFrameworkEvent(null, AgentGovConstants.ACTION_FAILURE, 'note ' + i, null)
+            );
+        }
+
+        Test.startTest();
+        Integer before = Limits.getDmlStatements();
+        AgentGovTriggerHandler.recordFrameworkEvents(notes);
+        Integer used = Limits.getDmlStatements() - before;
+        Test.stopTest();
+
+        // Reporting each failure separately meant one DML per failure, which exhausted the
+        // statement limit when a whole batch of sessions failed at once.
+        Assert.areEqual(1, used, 'Twenty notes cost one DML statement');
+        Assert.areEqual(20, [SELECT COUNT() FROM AgentGov_Action_Log__c], 'All notes are written');
     }
 }

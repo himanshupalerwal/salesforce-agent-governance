@@ -1,3 +1,17 @@
+# Continuous integration for AgentGov.
+#
+# Five jobs run on every push to main and every pull request:
+#   lint            ESLint and Prettier over the LWC sources, tests, and Apex.
+#   lwc-tests       Jest unit tests for the Lightning Web Components, with coverage.
+#   code-analyzer   Salesforce Code Analyzer v5 (PMD, ESLint, regex engines) over force-app.
+#   check-secrets   Reports whether a Dev Hub credential is available, because a
+#                   job-level `if` cannot read secrets directly.
+#   apex-tests      Deploys to a disposable scratch org and runs the Apex test suite.
+#
+# The apex-tests job needs a Dev Hub. It authenticates with the SFDX_AUTH_URL
+# repository secret and is skipped automatically when that secret is absent, so
+# pull requests from forks still get lint, Jest, and static analysis without
+# failing on missing credentials.
 name: CI
 
 on:
@@ -5,61 +19,163 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    paths:
-      - 'force-app/**'
-      - 'sfdx-project.json'
-      - 'package.json'
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  validate:
-    name: Validate Project Structure
+  lint:
+    name: Lint and format check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Verify sfdx-project.json
-        run: |
-          if [ ! -f sfdx-project.json ]; then
-            echo "sfdx-project.json not found!"
-            exit 1
-          fi
-          echo "sfdx-project.json found"
-          cat sfdx-project.json | python3 -m json.tool > /dev/null
-
-      - name: Verify Apex classes have meta.xml
-        run: |
-          MISSING=0
-          for cls in force-app/main/default/classes/*.cls; do
-            if [ ! -f "${cls}-meta.xml" ]; then
-              echo "Missing meta.xml for: $cls"
-              MISSING=$((MISSING + 1))
-            fi
-          done
-          if [ $MISSING -gt 0 ]; then
-            echo "$MISSING classes are missing meta.xml files"
-            exit 1
-          fi
-          echo "All Apex classes have meta.xml files"
-
-  lwc-tests:
-    name: LWC Jest Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-
+          node-version: 22
+          cache: npm
       - name: Install dependencies
-        run: npm install
+        run: npm ci
+      - name: ESLint
+        run: npm run lint
+      - name: Prettier
+        run: npm run prettier:verify
 
-      - name: Run LWC tests
-        run: npm test -- --coverage
-
-      - name: Upload coverage
+  lwc-tests:
+    name: LWC unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Jest with coverage
+        run: npm run test:unit:coverage
+      - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lwc-coverage
           path: coverage/
+
+  code-analyzer:
+    name: Salesforce Code Analyzer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      # The PMD and CPD engines are Java programs; without a JDK the analyzer reports
+      # them as uninstantiable, which counts as a Critical violation.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # The ESLint engine resolves plugins from the repository's own config, so
+      # the dependencies must be installed before the analyzer runs.
+      - name: Install dependencies
+        run: npm ci
+      - name: Run Code Analyzer
+        id: run-code-analyzer
+        uses: forcedotcom/run-code-analyzer@v2
+        with:
+          # --severity-threshold is what makes the command exit non-zero. Without it the
+          # analyzer reports violations and still exits 0, so the gate below never fires.
+          # 2 is High: the security rules elevated in code-analyzer.yml stop the build, while
+          # Moderate complexity advisories are reported without gating. See that file.
+          run-arguments: --workspace force-app --config-file code-analyzer.yml --output-file sfca-results.html --output-file sfca-results.json --view detail --severity-threshold 2
+          results-artifact-name: code-analyzer-results
+      - name: Fail on violations at or above the configured severity
+        if: ${{ steps.run-code-analyzer.outputs.exit-code > 0 }}
+        run: |
+          echo "Code Analyzer reported ${{ steps.run-code-analyzer.outputs.num-violations }} violation(s)."
+          exit 1
+
+  check-secrets:
+    name: Check for Dev Hub credentials
+    runs-on: ubuntu-latest
+    outputs:
+      has-auth: ${{ steps.check.outputs.has-auth }}
+    steps:
+      # Job-level `if` conditions cannot read secrets, so a step exposes the
+      # presence of the secret as an output for the apex-tests job to consume.
+      - id: check
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+        run: |
+          if [ -n "$SFDX_AUTH_URL" ]; then
+            echo "has-auth=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-auth=false" >> "$GITHUB_OUTPUT"
+            echo "SFDX_AUTH_URL is not configured; the Apex test job will be skipped."
+          fi
+
+  apex-tests:
+    name: Apex tests in a scratch org
+    needs: check-secrets
+    if: needs.check-secrets.outputs.has-auth == 'true'
+    runs-on: ubuntu-latest
+    env:
+      SF_DISABLE_TELEMETRY: 'true'
+      SF_AUTOUPDATE_DISABLE: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+      - name: Authenticate Dev Hub
+        env:
+          SFDX_AUTH_URL: ${{ secrets.SFDX_AUTH_URL }}
+        run: |
+          echo "$SFDX_AUTH_URL" > ./devhub-auth-url.txt
+          sf org login sfdx-url --sfdx-url-file ./devhub-auth-url.txt --alias devhub --set-default-dev-hub
+          rm ./devhub-auth-url.txt
+      - name: Create scratch org
+        run: >
+          sf org create scratch --definition-file config/project-scratch-def.json
+          --alias ci --duration-days 1 --wait 30 --set-default
+      - name: Deploy source
+        run: sf project deploy start --source-dir force-app --wait 30
+      - name: Assign permission set
+        run: sf org assign permset --name AgentGov_Admin
+      - name: Run Apex tests
+        run: >
+          sf apex run test --test-level RunLocalTests --code-coverage
+          --result-format human --output-dir test-results --wait 30
+      - name: Enforce org-wide coverage threshold
+        run: |
+          node --input-type=module - <<'EOF'
+          import { readdirSync, readFileSync } from 'node:fs';
+          const threshold = 85;
+          const dir = 'test-results';
+          const summaryFile = readdirSync(dir).find((f) => f.endsWith('.json') && readFileSync(`${dir}/${f}`, 'utf8').includes('orgWideCoverage'));
+          if (!summaryFile) {
+            console.error('No test summary with orgWideCoverage was written.');
+            process.exit(1);
+          }
+          const summary = JSON.parse(readFileSync(`${dir}/${summaryFile}`, 'utf8')).summary;
+          const coverage = parseInt(String(summary.orgWideCoverage).replace('%', ''), 10);
+          console.log(`Outcome: ${summary.outcome}. Org-wide coverage: ${coverage}% (threshold ${threshold}%).`);
+          if (summary.outcome !== 'Passed' || Number.isNaN(coverage) || coverage < threshold) {
+            process.exit(1);
+          }
+          EOF
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-test-results
+          path: test-results/
+      - name: Delete scratch org
+        if: always()
+        run: sf org delete scratch --target-org ci --no-prompt

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>API_Key_Hash__c</fullName>
+    <label>API Key Hash</label>
+    <type>Text</type>
+    <length>64</length>
+    <required>false</required>
+    <unique>true</unique>
+    <externalId>true</externalId>
+    <caseSensitive>true</caseSensitive>
+    <description>SHA-256 hash of the agent's API key. The key itself is never stored; REST callers are matched by hashing the key they present.</description>
+</CustomField>

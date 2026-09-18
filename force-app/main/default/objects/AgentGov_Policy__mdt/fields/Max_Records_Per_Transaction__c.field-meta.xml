@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Max_Records_Per_Transaction__c</fullName>
     <description>Maximum records this agent type can process per transaction</description>
     <externalId>false</externalId>

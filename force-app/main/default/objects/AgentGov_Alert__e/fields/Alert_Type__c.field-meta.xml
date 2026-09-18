@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Alert_Type__c</fullName>
     <description>Warning, Throttle, or Block</description>
     <externalId>false</externalId>

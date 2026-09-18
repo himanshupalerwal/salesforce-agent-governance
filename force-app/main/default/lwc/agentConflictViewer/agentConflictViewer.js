@@ -1,48 +1,110 @@
-import { LightningElement } from 'lwc';
-import getRecentConflictLogs from '@salesforce/apex/AgentGovSelector.getRecentConflictLogs';
+/**
+ * Table of recent conflicts between agents. Refreshes on demand and on AgentGov platform events.
+ */
+import { LightningElement, wire } from 'lwc';
+import { refreshApex } from '@salesforce/apex';
+import { ShowToastEvent } from 'lightning/platformShowToastEvent';
+import getRecentConflictLogs from '@salesforce/apex/AgentGovDashboardController.getRecentConflictLogs';
+import {
+    reduceErrors,
+    formatDateTime,
+    subscribeToAgentGovEvents,
+    unsubscribeFromAgentGovEvents
+} from 'c/agentGovUtils';
 
+const ROWS = 50;
 const COLUMNS = [
-    { label: 'Time', fieldName: 'formattedTime', type: 'text', sortable: true },
+    { label: 'Time', fieldName: 'formattedTime', type: 'text', sortable: false },
     { label: 'Agent 1', fieldName: 'agent1Name', type: 'text' },
     { label: 'Agent 2', fieldName: 'agent2Name', type: 'text' },
     { label: 'Object', fieldName: 'Object_Name__c', type: 'text' },
     { label: 'Record', fieldName: 'Record_Id__c', type: 'text' },
     { label: 'Type', fieldName: 'Conflict_Type__c', type: 'text' },
     { label: 'Resolution', fieldName: 'Resolution__c', type: 'text' },
-    { label: 'Severity', fieldName: 'Severity__c', type: 'text', cellAttributes: { class: { fieldName: 'severityCellClass' } } }
+    {
+        label: 'Severity',
+        fieldName: 'Severity__c',
+        type: 'text',
+        cellAttributes: { class: { fieldName: 'severityCellClass' } }
+    }
 ];
 
 export default class AgentConflictViewer extends LightningElement {
     columns = COLUMNS;
+    rowLimit = ROWS;
     conflicts = [];
     error;
-    isLoading = true;
 
-    connectedCallback() {
-        this.loadData();
-    }
+    wiredConflicts;
+    subscriptions = [];
+    refreshInFlight = false;
+    refreshQueued = false;
+    lastToastedError;
 
-    async loadData() {
-        this.isLoading = true;
-        try {
-            const data = await getRecentConflictLogs({ limitCount: 50 });
-            this.conflicts = (data || []).map(c => ({
-                ...c,
-                agent1Name: c.Agent_1__r ? c.Agent_1__r.Agent_Name__c : 'Unknown',
-                agent2Name: c.Agent_2__r ? c.Agent_2__r.Agent_Name__c : 'Unknown',
-                formattedTime: c.Timestamp__c ? new Date(c.Timestamp__c).toLocaleString() : '',
-                severityCellClass: c.Severity__c === 'High' ? 'slds-text-color_error' : ''
-            }));
+    @wire(getRecentConflictLogs, { limitCount: '$rowLimit' })
+    handleConflicts(result) {
+        this.wiredConflicts = result;
+        if (result.error) {
+            this.reportError(result.error);
+            this.conflicts = [];
+        } else if (result.data !== undefined) {
             this.error = undefined;
-        } catch (err) {
-            this.error = err.body ? err.body.message : err.message;
-        } finally {
-            this.isLoading = false;
+            this.conflicts = (result.data || []).map((conflict) => ({
+                ...conflict,
+                agent1Name: conflict.Agent_1__r ? conflict.Agent_1__r.Agent_Name__c : 'Unknown',
+                agent2Name: conflict.Agent_2__r ? conflict.Agent_2__r.Agent_Name__c : 'Unknown',
+                formattedTime: formatDateTime(conflict.Timestamp__c),
+                severityCellClass: conflict.Severity__c === 'High' ? 'slds-text-color_error' : ''
+            }));
         }
     }
 
+    connectedCallback() {
+        this.connected = true;
+        subscribeToAgentGovEvents(() => this.refresh())
+            .then((subscriptions) => {
+                this.subscriptions = subscriptions;
+            })
+            .catch(() => {
+                this.subscriptions = [];
+            });
+    }
+
+    disconnectedCallback() {
+        this.connected = false;
+        unsubscribeFromAgentGovEvents(this.subscriptions);
+        this.subscriptions = [];
+    }
+
     handleRefresh() {
-        this.loadData();
+        this.refresh();
+    }
+
+    async refresh() {
+        if (this.refreshInFlight) {
+            this.refreshQueued = true;
+            return;
+        }
+        this.refreshInFlight = true;
+        try {
+            if (this.wiredConflicts) {
+                await refreshApex(this.wiredConflicts);
+            }
+        } catch (error) {
+            this.reportError(error);
+        } finally {
+            this.refreshInFlight = false;
+            if (this.refreshQueued) {
+                this.refreshQueued = false;
+                this.refresh();
+            }
+        }
+    }
+
+    get isLoading() {
+        return (
+            !this.wiredConflicts || (this.wiredConflicts.data === undefined && this.wiredConflicts.error === undefined)
+        );
     }
 
     get hasConflicts() {
@@ -51,5 +113,14 @@ export default class AgentConflictViewer extends LightningElement {
 
     get conflictCount() {
         return this.conflicts.length;
+    }
+
+    reportError(error) {
+        const message = reduceErrors(error).join('. ');
+        this.error = message;
+        if (message && message !== this.lastToastedError) {
+            this.lastToastedError = message;
+            this.dispatchEvent(new ShowToastEvent({ title: 'Conflicts could not load', message, variant: 'error' }));
+        }
     }
 }

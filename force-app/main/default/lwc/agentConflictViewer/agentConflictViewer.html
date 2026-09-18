@@ -5,26 +5,28 @@
             <lightning-button label="Refresh" icon-name="utility:refresh" onclick={handleRefresh}></lightning-button>
         </span>
 
-        <template if:true={isLoading}>
-            <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+        <template lwc:if={error}>
+            <div class="slds-p-around_medium slds-text-color_error" role="alert" aria-live="assertive">{error}</div>
         </template>
 
-        <template if:true={error}>
-            <div class="slds-p-around_medium slds-text-color_error">{error}</div>
+        <template lwc:if={isLoading}>
+            <div class="slds-is-relative loading-region" aria-busy="true">
+                <lightning-spinner alternative-text="Loading conflicts" size="medium"></lightning-spinner>
+            </div>
         </template>
-
-        <template if:false={isLoading}>
-            <template if:true={hasConflicts}>
+        <template lwc:else>
+            <template lwc:if={hasConflicts}>
                 <lightning-datatable
                     key-field="Id"
                     data={conflicts}
                     columns={columns}
                     hide-checkbox-column
-                    show-row-number-column>
+                    show-row-number-column
+                >
                 </lightning-datatable>
             </template>
-            <template if:false={hasConflicts}>
-                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large">
+            <template lwc:else>
+                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large empty-state">
                     No conflicts detected. All agents are operating without contention.
                 </div>
             </template>

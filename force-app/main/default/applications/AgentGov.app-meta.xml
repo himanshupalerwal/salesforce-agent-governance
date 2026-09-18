@@ -16,6 +16,7 @@
     <tabs>AgentGov_Dashboard</tabs>
     <tabs>AgentGov_Registration__c</tabs>
     <tabs>AgentGov_Budget__c</tabs>
+    <tabs>AgentGov_Session__c</tabs>
     <tabs>AgentGov_Action_Log__c</tabs>
     <tabs>AgentGov_Conflict_Log__c</tabs>
     <uiType>Lightning</uiType>
