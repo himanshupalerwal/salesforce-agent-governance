@@ -1,35 +1,36 @@
 /**
- * @description Scheduled job that performs periodic health checks on agents.
- *              Transitions OPEN circuit breakers to HALF_OPEN when cooldown expires,
- *              and auto-closes orphaned sessions.
+ * @description Scheduled job that keeps agent state moving when no requests arrive:
+ *              OPEN circuit breakers whose cooldown has elapsed become HALF_OPEN, and
+ *              sessions that have stayed active for too long are terminated.
  *              Schedule: System.schedule('AgentGov Health Check', '0 0 * * * ?', new AgentGovHealthCheck());
- * @author Himanshu Palerwal
+ *
+ *              Security posture: inherited sharing. Reads go through AgentGovSelector and
+ *              writes through AgentGovDml and AgentGovCircuitBreaker, all in system mode.
  */
-public with sharing class AgentGovHealthCheck implements Schedulable {
-
-    private static final Integer ORPHAN_SESSION_HOURS = 24;
-
+public inherited sharing class AgentGovHealthCheck implements Schedulable {
+    /**
+     * @description Runs one health-check pass.
+     * @param ctx Schedulable context, unused
+     */
     public void execute(SchedulableContext ctx) {
-        // 1. Transition OPEN circuit breakers past cooldown to HALF_OPEN
         List<AgentGov_Registration__c> openAgents = AgentGovSelector.getOpenAgentsPastCooldown();
         if (!openAgents.isEmpty()) {
-            for (AgentGov_Registration__c reg : openAgents) {
-                reg.Circuit_Breaker_State__c = AgentGovConstants.CB_HALF_OPEN;
-                if (reg.Status__c == AgentGovConstants.STATUS_BLOCKED) {
-                    reg.Status__c = AgentGovConstants.STATUS_THROTTLED;
-                }
-            }
-            Database.update(openAgents, false);
+            AgentGovCircuitBreaker.transitionToHalfOpen(openAgents);
         }
 
-        // 2. Auto-close orphaned sessions
-        List<AgentGov_Session__c> orphanedSessions = AgentGovSelector.getOrphanedSessions(ORPHAN_SESSION_HOURS);
+        List<AgentGov_Session__c> orphanedSessions = AgentGovSelector.getOrphanedSessions(
+            AgentGovConstants.ORPHAN_SESSION_HOURS
+        );
         if (!orphanedSessions.isEmpty()) {
+            DateTime now = DateTime.now();
             for (AgentGov_Session__c session : orphanedSessions) {
                 session.Status__c = AgentGovConstants.SESSION_TERMINATED;
-                session.Session_End__c = DateTime.now();
+                session.Session_End__c = now;
             }
-            Database.update(orphanedSessions, false);
+            AgentGovDml.assertAllSucceeded(
+                AgentGovDml.updateRecords(orphanedSessions, false),
+                'Orphaned session cleanup'
+            );
         }
     }
 }

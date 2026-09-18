@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Budget_Key__c</fullName>
+    <label>Budget Key</label>
+    <type>Text</type>
+    <length>255</length>
+    <required>false</required>
+    <unique>true</unique>
+    <externalId>true</externalId>
+    <caseSensitive>true</caseSensitive>
+    <description>Registration Id and budget date combined. The uniqueness constraint guarantees one budget row per agent per day even when two transactions create the day's budget at the same moment. Populated automatically by AgentGovBudgetTrigger.</description>
+    <trackTrending>false</trackTrending>
+</CustomField>
