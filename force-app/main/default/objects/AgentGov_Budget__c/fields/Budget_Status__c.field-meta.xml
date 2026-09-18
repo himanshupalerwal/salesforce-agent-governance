@@ -5,6 +5,7 @@
     <type>Picklist</type>
     <required>true</required>
     <externalId>false</externalId>
+    <trackHistory>true</trackHistory>
     <trackTrending>false</trackTrending>
     <valueSet>
         <restricted>true</restricted>
