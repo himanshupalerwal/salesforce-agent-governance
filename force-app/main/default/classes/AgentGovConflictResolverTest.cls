@@ -1,144 +1,130 @@
+/**
+ * @description Tests for AgentGovConflictResolver: locking, priority resolution, and logging.
+ */
 @IsTest
 private class AgentGovConflictResolverTest {
+    private static final String RECORD = '001000000000001AAA';
 
     @TestSetup
     static void setup() {
         AgentGovTestDataFactory.createSettings();
     }
 
-    @IsTest
-    static void testNoConflict() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
+    private static AgentGov_Registration__c agentWithPriority(String name, Integer priority) {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(name, 'Agentforce', false);
+        reg.Priority__c = priority;
+        insert reg;
+        return reg;
+    }
 
-        Test.startTest();
-        AgentGovConflictResolver.ConflictResult result = AgentGovConflictResolver.checkForConflict(
-            agent1.Id, '001000000000001', 'Account'
+    @IsTest
+    static void firstAgentTakesTheLockAndKeepsIt() {
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
+
+        Assert.isFalse(AgentGovConflictResolver.checkForConflict(agent.Id, RECORD, 'Account').hasConflict);
+        Assert.isFalse(
+            AgentGovConflictResolver.checkForConflict(agent.Id, RECORD, 'Account').hasConflict,
+            'Same agent, no conflict'
         );
-        Test.stopTest();
-
-        System.assertEquals(false, result.hasConflict, 'Should not detect conflict');
+        Assert.isTrue(AgentGovConflictResolver.isRecordLocked(RECORD, 'Account'));
+        Assert.areEqual(agent.Id, AgentGovConflictResolver.getLockHolder(RECORD, 'Account'));
     }
 
     @IsTest
-    static void testSameAgentNoConflict() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
+    static void higherPriorityAgentOverridesAndConflictIsLogged() {
+        AgentGov_Registration__c high = agentWithPriority('High Priority', 1);
+        AgentGov_Registration__c low = agentWithPriority('Low Priority', 5);
+        AgentGovConflictResolver.checkForConflict(low.Id, RECORD, 'Account');
 
-        // Lock record first
-        AgentGovConflictResolver.checkForConflict(agent1.Id, '001000000000001', 'Account');
-
-        Test.startTest();
-        // Same agent checks again
         AgentGovConflictResolver.ConflictResult result = AgentGovConflictResolver.checkForConflict(
-            agent1.Id, '001000000000001', 'Account'
+            high.Id,
+            RECORD,
+            'Account'
         );
-        Test.stopTest();
 
-        System.assertEquals(false, result.hasConflict, 'Same agent should not conflict');
+        Assert.isTrue(result.hasConflict);
+        Assert.areEqual(high.Id, result.winningAgentId);
+        Assert.areEqual(AgentGovConstants.RESOLUTION_AGENT1_WON, result.resolution);
+        Assert.areEqual(
+            1,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Conflict_Log__c
+                WHERE Conflict_Type__c = :AgentGovConstants.CONFLICT_PRIORITY_OVERRIDE
+            ]
+        );
     }
 
     @IsTest
-    static void testConflictHigherPriorityWins() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('High Priority', 'Agentforce', false);
-        agent1.Priority__c = 1;
-        insert agent1;
+    static void lowerPriorityAgentIsQueuedAndAssertThrows() {
+        AgentGov_Registration__c high = agentWithPriority('High Priority', 1);
+        AgentGov_Registration__c low = agentWithPriority('Low Priority', 5);
+        AgentGovConflictResolver.checkForConflict(high.Id, RECORD, 'Account');
 
-        AgentGov_Registration__c agent2 = AgentGovTestDataFactory.createRegistration('Low Priority', 'Custom_Apex', false);
-        agent2.Priority__c = 5;
-        agent2.API_Key__c = 'key-low';
-        insert agent2;
-
-        // Agent 2 locks the record
-        AgentGovConflictResolver.checkForConflict(agent2.Id, '001000000000001', 'Account');
-
-        Test.startTest();
-        // Agent 1 (higher priority) tries to access
         AgentGovConflictResolver.ConflictResult result = AgentGovConflictResolver.checkForConflict(
-            agent1.Id, '001000000000001', 'Account'
+            low.Id,
+            RECORD,
+            'Account'
         );
-        Test.stopTest();
+        Assert.isTrue(result.hasConflict);
+        Assert.areEqual(high.Id, result.winningAgentId);
 
-        System.assertEquals(true, result.hasConflict, 'Should detect conflict');
-        System.assertEquals(agent1.Id, result.winningAgentId, 'Higher priority should win');
+        try {
+            AgentGovConflictResolver.assertNoConflict(low.Id, RECORD, 'Account');
+            Assert.fail('The queued agent must be refused');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.RECORD_LOCKED, e.getErrorCode());
+        }
+        AgentGovConflictResolver.assertNoConflict(high.Id, RECORD, 'Account');
     }
 
     @IsTest
-    static void testConflictLowerPriorityQueued() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('High Priority', 'Agentforce', false);
-        agent1.Priority__c = 1;
-        insert agent1;
+    static void releaseAndClearLocks() {
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
+        AgentGovConflictResolver.checkForConflict(agent.Id, RECORD, 'Account');
 
-        AgentGov_Registration__c agent2 = AgentGovTestDataFactory.createRegistration('Low Priority', 'Custom_Apex', false);
-        agent2.Priority__c = 5;
-        agent2.API_Key__c = 'key-low2';
-        insert agent2;
+        AgentGovConflictResolver.releaseRecord(agent.Id, RECORD, 'Account');
+        Assert.isFalse(AgentGovConflictResolver.isRecordLocked(RECORD, 'Account'));
 
-        // Agent 1 locks the record
-        AgentGovConflictResolver.checkForConflict(agent1.Id, '001000000000002', 'Account');
-
-        Test.startTest();
-        // Agent 2 (lower priority) tries
-        AgentGovConflictResolver.ConflictResult result = AgentGovConflictResolver.checkForConflict(
-            agent2.Id, '001000000000002', 'Account'
-        );
-        Test.stopTest();
-
-        System.assertEquals(true, result.hasConflict);
-        System.assertEquals(agent1.Id, result.winningAgentId, 'Lock holder with higher priority should keep lock');
+        AgentGovConflictResolver.checkForConflict(agent.Id, RECORD, 'Account');
+        AgentGovConflictResolver.clearAllLocks();
+        Assert.isFalse(AgentGovConflictResolver.isRecordLocked(RECORD, 'Account'));
     }
 
     @IsTest
-    static void testReleaseRecord() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
-        AgentGovConflictResolver.checkForConflict(agent1.Id, '001000000000003', 'Account');
-
-        System.assertEquals(true, AgentGovConflictResolver.isRecordLocked('001000000000003', 'Account'));
-
-        Test.startTest();
-        AgentGovConflictResolver.releaseRecord(agent1.Id, '001000000000003', 'Account');
-        Test.stopTest();
-
-        System.assertEquals(false, AgentGovConflictResolver.isRecordLocked('001000000000003', 'Account'));
-    }
-
-    @IsTest
-    static void testGetLockHolder() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
-        AgentGovConflictResolver.checkForConflict(agent1.Id, '001000000000004', 'Account');
-
-        Test.startTest();
-        Id holder = AgentGovConflictResolver.getLockHolder('001000000000004', 'Account');
-        Test.stopTest();
-
-        System.assertEquals(agent1.Id, holder);
-    }
-
-    @IsTest
-    static void testConflictDetectionDisabled() {
+    static void detectionCanBeDisabled() {
         AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
         settings.Enable_Conflict_Detection__c = false;
         update settings;
         AgentGovSelector.clearCache();
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('Agent', 'Agentforce', true);
 
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('Agent', 'Agentforce', true);
-
-        Test.startTest();
         AgentGovConflictResolver.ConflictResult result = AgentGovConflictResolver.checkForConflict(
-            agent1.Id, '001000000000005', 'Account'
+            agent.Id,
+            RECORD,
+            'Account'
         );
-        Test.stopTest();
 
-        System.assertEquals(false, result.hasConflict, 'Should not detect when disabled');
+        Assert.isFalse(result.hasConflict);
+        Assert.isFalse(
+            AgentGovConflictResolver.isRecordLocked(RECORD, 'Account'),
+            'No lock is taken when detection is off'
+        );
     }
 
     @IsTest
-    static void testClearAllLocks() {
-        AgentGov_Registration__c agent1 = AgentGovTestDataFactory.createRegistration('Agent', 'Agentforce', true);
-        AgentGovConflictResolver.checkForConflict(agent1.Id, '001000000000006', 'Account');
+    static void unknownAgentsResolveAsFailed() {
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('Agent', 'Agentforce', true);
+        Id unknownId = AgentGov_Registration__c.SObjectType.getDescribe().getKeyPrefix() + '000000000001AAA';
+        AgentGovConflictResolver.checkForConflict(unknownId, RECORD, 'Account');
 
-        Test.startTest();
-        AgentGovConflictResolver.clearAllLocks();
-        Test.stopTest();
+        AgentGovConflictResolver.ConflictResult result = AgentGovConflictResolver.checkForConflict(
+            agent.Id,
+            RECORD,
+            'Account'
+        );
 
-        System.assertEquals(false, AgentGovConflictResolver.isRecordLocked('001000000000006', 'Account'));
+        Assert.isTrue(result.hasConflict);
+        Assert.areEqual(AgentGovConstants.RESOLUTION_FAILED, result.resolution);
     }
 }

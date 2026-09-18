@@ -1,6 +1,8 @@
+/**
+ * @description Tests for the scheduled daily budget reset.
+ */
 @IsTest
 private class AgentGovDailyResetTest {
-
     @TestSetup
     static void setup() {
         AgentGovTestDataFactory.createSettings();
@@ -8,13 +10,25 @@ private class AgentGovDailyResetTest {
     }
 
     @IsTest
-    static void testExecute() {
+    static void createsTodaysBudgetOnceForActiveAgents() {
         Test.startTest();
-        AgentGovDailyReset job = new AgentGovDailyReset();
-        job.execute(null);
+        new AgentGovDailyReset().execute(null);
+        new AgentGovDailyReset().execute(null);
         Test.stopTest();
 
-        List<AgentGov_Budget__c> budgets = [SELECT Id FROM AgentGov_Budget__c WHERE Budget_Date__c = :Date.today()];
-        System.assert(budgets.size() >= 1, 'Should create budget records');
+        Assert.areEqual(
+            1,
+            [SELECT COUNT() FROM AgentGov_Budget__c WHERE Budget_Date__c = TODAY],
+            'Running twice does not duplicate rows'
+        );
+    }
+
+    @IsTest
+    static void jobCanBeScheduled() {
+        Test.startTest();
+        String jobId = System.schedule('AgentGov Daily Reset Test', '0 0 0 * * ?', new AgentGovDailyReset());
+        Test.stopTest();
+
+        Assert.isNotNull(jobId);
     }
 }

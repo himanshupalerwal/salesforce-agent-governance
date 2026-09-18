@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CustomObject xmlns="http://soap.sforce.com/2006/metadataAPI">
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
     <description>Defines access control policies for AI agents operating in the org.</description>
     <label>AgentGov Policy</label>
     <pluralLabel>AgentGov Policies</pluralLabel>

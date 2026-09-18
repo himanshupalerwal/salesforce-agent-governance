@@ -1,25 +1,39 @@
 <template>
     <lightning-card title="Agent Health Monitor" icon-name="standard:service_report">
-        <lightning-button slot="actions" label="Refresh" icon-name="utility:refresh" onclick={handleRefresh}></lightning-button>
+        <lightning-button
+            slot="actions"
+            label="Refresh"
+            icon-name="utility:refresh"
+            onclick={handleRefresh}
+        ></lightning-button>
 
-        <template if:true={isLoading}>
-            <lightning-spinner alternative-text="Loading" size="medium"></lightning-spinner>
+        <template lwc:if={error}>
+            <div class="slds-p-around_medium slds-text-color_error" role="alert" aria-live="assertive">{error}</div>
         </template>
 
-        <template if:true={error}>
-            <div class="slds-p-around_medium slds-text-color_error">{error}</div>
+        <template lwc:if={isLoading}>
+            <div class="slds-is-relative loading-region" aria-busy="true">
+                <lightning-spinner alternative-text="Loading agent health" size="medium"></lightning-spinner>
+            </div>
         </template>
-
-        <template if:false={isLoading}>
-            <template if:true={hasAgents}>
+        <template lwc:else>
+            <template lwc:if={hasAgents}>
                 <div class="slds-grid slds-wrap slds-gutters slds-p-around_medium">
                     <template for:each={agents} for:item="agent">
-                        <div key={agent.Id} class="slds-col slds-size_1-of-2 slds-large-size_1-of-3 slds-m-bottom_medium">
-                            <div class="slds-card agent-card">
+                        <div
+                            key={agent.Id}
+                            class="slds-col slds-size_1-of-1 slds-medium-size_1-of-2 slds-large-size_1-of-3 slds-m-bottom_medium"
+                        >
+                            <article class="slds-card agent-card">
                                 <div class="slds-card__header slds-grid">
                                     <div class="slds-media slds-media_center slds-has-flexi-truncate">
                                         <div class="slds-media__figure">
-                                            <lightning-icon icon-name={agent.cbIcon} size="small" class={agent.cbClass}></lightning-icon>
+                                            <lightning-icon
+                                                icon-name={agent.breakerIcon}
+                                                size="small"
+                                                variant={agent.breakerVariant}
+                                                alternative-text={agent.breakerAltText}
+                                            ></lightning-icon>
                                         </div>
                                         <div class="slds-media__body">
                                             <h2 class="slds-card__header-title slds-truncate">{agent.Agent_Name__c}</h2>
@@ -31,15 +45,28 @@
                                 <div class="slds-card__body slds-card__body_inner">
                                     <div class="slds-grid slds-m-bottom_x-small">
                                         <span class="slds-text-body_small slds-text-color_weak">Circuit Breaker:</span>
-                                        <span class="slds-text-body_small slds-m-left_xx-small"><strong>{agent.cbState}</strong></span>
+                                        <span class="slds-text-body_small slds-m-left_xx-small breaker-state"
+                                            ><strong>{agent.breakerState}</strong></span
+                                        >
                                     </div>
                                     <div class="slds-grid slds-m-bottom_x-small">
                                         <span class="slds-text-body_small slds-text-color_weak">Priority:</span>
-                                        <span class="slds-text-body_small slds-m-left_xx-small">{agent.Priority__c}</span>
+                                        <span class="slds-text-body_small slds-m-left_xx-small"
+                                            >{agent.Priority__c}</span
+                                        >
                                     </div>
                                     <div class="slds-m-bottom_x-small">
-                                        <span class="slds-text-body_small slds-text-color_weak">Budget Today: {agent.budgetPercent}%</span>
-                                        <div class="slds-progress-bar slds-progress-bar_small slds-m-top_xx-small">
+                                        <span class="slds-text-body_small slds-text-color_weak"
+                                            >Budget Today: {agent.budgetPercent}%</span
+                                        >
+                                        <div
+                                            class="slds-progress-bar slds-progress-bar_small slds-m-top_xx-small"
+                                            role="progressbar"
+                                            aria-valuemin="0"
+                                            aria-valuemax="100"
+                                            aria-valuenow={agent.budgetPercent}
+                                            aria-label={agent.budgetAriaLabel}
+                                        >
                                             <span class={agent.budgetBarClass} style={agent.budgetBarStyle}>
                                                 <span class="slds-assistive-text">{agent.budgetPercent}%</span>
                                             </span>
@@ -48,19 +75,21 @@
                                     <div class="slds-text-body_small slds-text-color_weak">
                                         Last Active: {agent.lastActiveFormatted}
                                     </div>
-                                    <template if:true={agent.Failure_Count__c}>
-                                        <div class="slds-text-body_small slds-text-color_error slds-m-top_xx-small">
+                                    <template lwc:if={agent.hasFailures}>
+                                        <div
+                                            class="slds-text-body_small slds-text-color_error slds-m-top_xx-small failure-count"
+                                        >
                                             Failures: {agent.Failure_Count__c}
                                         </div>
                                     </template>
                                 </div>
-                            </div>
+                            </article>
                         </div>
                     </template>
                 </div>
             </template>
-            <template if:false={hasAgents}>
-                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large">
+            <template lwc:else>
+                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large empty-state">
                     No agents registered. Register agents to see health status.
                 </div>
             </template>

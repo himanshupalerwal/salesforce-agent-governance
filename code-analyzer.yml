@@ -1,0 +1,50 @@
+# Salesforce Code Analyzer v5 configuration.
+#
+# Run locally with:  sf code-analyzer run --workspace force-app --config-file code-analyzer.yml
+# CI runs the same command through the forcedotcom/run-code-analyzer action.
+#
+# Severity scale: 1 Critical, 2 High, 3 Moderate, 4 Low, 5 Info.
+#
+# CI fails on any violation at High or above (--severity-threshold 2). The security rules
+# below are elevated into that band deliberately: the framework executes SOQL and DML on
+# behalf of AI agents, so injection, CRUD/FLS and sharing findings are defects, not
+# advisories, and they stop the build.
+#
+# Moderate findings are reported but do not gate. They are almost entirely complexity and
+# parameter-count advisories on the budget ladder, the breaker state machine and the policy
+# matcher, plus hardcoded Ids in test classes. Reducing them is tracked in docs/ROADMAP.md
+# rather than blocking a release; a threshold the codebase does not meet is worse than an
+# honest one, because it ends up switched off.
+
+rules:
+  pmd:
+    ApexSOQLInjection:
+      severity: 1
+    ApexCRUDViolation:
+      severity: 2
+    ApexSharingViolations:
+      severity: 2
+    ApexInsecureEndpoint:
+      severity: 2
+    ApexOpenRedirect:
+      severity: 2
+    ApexSuggestUsingNamedCred:
+      severity: 3
+    EagerlyLoadedDescribeSObjectResult:
+      # A performance advisory, not a security finding, so it does not gate the build. The
+      # one production describe uses SObjectDescribeOptions.DEFERRED; the rest are in test
+      # code, where the cost of a describe does not matter.
+      severity: 3
+
+engines:
+  eslint:
+    # Use the repository's flat config so the analyzer and `npm run lint` agree.
+    eslint_config_file: eslint.config.js
+    auto_discover_eslint_config: false
+  sfge:
+    # The graph engine needs a JDK and long runtimes; PMD and ESLint cover the
+    # rules this project relies on.
+    disable_engine: true
+  flow:
+    # The project ships no Flow metadata, and the engine needs a Python runtime.
+    disable_engine: true

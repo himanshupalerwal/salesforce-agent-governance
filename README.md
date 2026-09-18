@@ -11,8 +11,9 @@
 
 **Salesforce-native governance framework for AI agents. Manage governor limits, resolve conflicts, enforce policies, and monitor agent health -- all natively on the platform.**
 
+[![CI](https://github.com/himanshupalerwal/salesforce-agent-governance/actions/workflows/ci.yml/badge.svg)](https://github.com/himanshupalerwal/salesforce-agent-governance/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Salesforce API](https://img.shields.io/badge/Salesforce%20API-62.0-00A1E0.svg)](https://developer.salesforce.com/)
+[![Salesforce API](https://img.shields.io/badge/Salesforce%20API-67.0-00A1E0.svg)](https://developer.salesforce.com/)
 [![GitHub Stars](https://img.shields.io/github/stars/himanshupalerwal/salesforce-agent-governance?style=social)](https://github.com/himanshupalerwal/salesforce-agent-governance)
 [![Latest Release](https://img.shields.io/github/v/release/himanshupalerwal/salesforce-agent-governance)](https://github.com/himanshupalerwal/salesforce-agent-governance/releases)
 
@@ -22,9 +23,9 @@
 
 AI agents on Salesforce are powerful -- but unchecked, they become dangerous. A single runaway agent can exhaust your org's daily API limits, overwrite records that another agent is processing, or silently violate data access policies. As organizations deploy more agents (Agentforce, MCP-connected external models, custom Apex bots, Flow-based automations), the governance gap widens fast.
 
-**AgentGov closes that gap.** It provides a declarative, metadata-driven framework that sits between your agents and the Salesforce platform. Every agent action passes through budget checks, policy evaluation, conflict detection, and circuit breaker validation -- before a single DML statement executes. When something goes wrong, the framework automatically throttles or disables the offending agent, fires real-time platform events, and logs everything for audit.
+**AgentGov closes that gap.** It provides a declarative, metadata-driven framework that sits between your agents and the Salesforce platform. Every agent action passes through budget checks, policy evaluation, conflict detection, and circuit breaker validation -- before a single DML statement executes. When something goes wrong, the framework automatically throttles or disables the offending agent, fires real-time platform events, emails an administrator, and logs everything for audit.
 
-No external infrastructure. No managed package dependencies. Pure Salesforce-native Apex, Custom Objects, Custom Metadata Types, Platform Events, and Flows.
+No external infrastructure. No managed package dependencies. Pure Salesforce-native Apex, Custom Objects, Custom Metadata Types, Platform Events, and Lightning Web Components.
 
 ---
 
@@ -33,21 +34,22 @@ No external infrastructure. No managed package dependencies. Pure Salesforce-nat
 ```mermaid
 flowchart TB
     subgraph Agents["AI Agents"]
-        A1["Agentforce Agent"]
-        A2["MCP External Agent"]
+        A1["Agentforce Agent\n(Agent User)"]
+        A2["MCP / External Agent"]
         A3["Custom Apex Agent"]
         A4["Flow-Based Agent"]
     end
 
     subgraph AgentGov["AgentGov Framework"]
-        PROXY["Proxy API\n/query /create /update\n/delete /upsert"]
+        AUTH["REST Auth\nkey hash or user binding"]
+        PROXY["Proxy API\n/query /create /update\n/delete /upsert (user mode)"]
         CTX["AgentGov Context\n(Limits measurement)"]
-        REG["Registry Service"]
+        INV["Flow Actions"]
         CB["Circuit Breaker"]
         PE["Policy Engine"]
         BM["Budget Manager"]
         CR["Conflict Resolver"]
-        AL["Action Logger"]
+        AL["Audit Trail"]
     end
 
     subgraph Platform["Salesforce Platform"]
@@ -55,25 +57,26 @@ flowchart TB
         CS["Custom Settings\n(Configuration)"]
         CO["Custom Objects\n(Registrations, Budgets,\nSessions, Logs)"]
         EVT["Platform Events\n(Alerts & Actions)"]
-        SF["Salesforce DML/SOQL\n(Actual Operations)"]
+        SF["Customer Data\n(Database in USER_MODE)"]
     end
 
-    A2 -->|"REST API"| PROXY
-    A1 -->|"REST API / Apex"| REG
-    A3 -->|"Apex via Context"| CTX
-    A4 -->|"Invocable Actions"| REG
+    A2 -->|"REST"| AUTH
+    AUTH --> PROXY
+    A1 -->|"Flow / Apex"| INV
+    A3 -->|"Apex"| CTX
+    A4 -->|"Flow"| INV
 
-    PROXY -->|"Auth + Governance"| CB
-    CTX -->|"Measures Limits"| BM
-    REG --> CB
+    PROXY --> CB
+    INV --> CB
+    CTX --> BM
     CB -->|"CLOSED?"| PE
     PE -->|"Allowed?"| BM
-    BM -->|"Has Budget?"| CR
-    CR -->|"No Conflict?"| AL
+    BM -->|"Has budget?"| CR
+    CR -->|"No conflict?"| AL
 
-    PROXY -->|"Executes DML"| SF
-    CB -.-> MD
+    PROXY -->|"Executes"| SF
     PE -.-> MD
+    BM -.-> MD
     BM -.-> CS
     AL -.-> CO
     AL -.-> EVT
@@ -83,66 +86,101 @@ flowchart TB
 
 Every agent action follows this pipeline:
 
-1. **Registry Check** -- Is the agent registered and active?
-2. **Circuit Breaker** -- Is the agent's circuit breaker CLOSED (healthy)?
-3. **Policy Evaluation** -- Does the agent have permission for this object and operation?
-4. **Budget Check** -- Does the agent have remaining governor budget for today?
-5. **Conflict Detection** -- Is another agent currently modifying this record?
-6. **Action Logging** -- Record the action via platform events for real-time monitoring.
+1. **Authentication** -- Who is calling? An API key hash in the `X-AgentGov-Key` header, or the Salesforce user bound to the registration.
+2. **Registry Check** -- Is the agent registered and active?
+3. **Circuit Breaker** -- Is the agent's circuit breaker CLOSED (healthy)?
+4. **Policy Evaluation** -- May this agent type perform this operation on this object, with these fields, on this many records?
+5. **Conflict Detection** -- Is another agent in this same transaction already modifying this record?
+6. **Budget Check** -- Does the agent have remaining governor budget for today?
+7. **Action Logging** -- Record the outcome, including denials, via platform events.
 
-If any step fails, the request is denied with a specific error code. The agent is never left guessing about *why* it was blocked.
+If any step fails, the request is denied with a specific error code and a correlation id. The agent is never left guessing about _why_ it was blocked.
+
+---
+
+## Security model
+
+AgentGov targets API 67.0 (Summer '26), where database operations run in user mode by default. The framework decides the access mode for every code path instead of relying on that default:
+
+| Code path                                                            | Sharing           | Access mode   | Why                                                                                                                                                                      |
+| -------------------------------------------------------------------- | ----------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Framework records (registrations, budgets, sessions, logs, policies) | `without sharing` | `SYSTEM_MODE` | Bookkeeping must succeed whoever triggered the action. The user an agent runs as needs no access to AgentGov objects, only the `AgentGov_Agent` permission set.          |
+| Operations on the agent's behalf (the proxy)                         | `with sharing`    | `USER_MODE`   | The calling user's object permissions, field-level security, and sharing rules apply to customer data. Queries are compiled from structured input; SOQL text is refused. |
+| Dashboards                                                           | `with sharing`    | `USER_MODE`   | People see only what they may see.                                                                                                                                       |
+
+API keys are stored only as SHA-256 hashes. REST errors never include exception text; they carry a correlation id that an administrator can look up in the action log.
 
 ---
 
 ## Key Features
 
 ### 1. Governor Budget Management
-Track and enforce daily limits on API calls, SOQL queries, and DML operations per agent. Budgets reset automatically at midnight. Configurable warning (80%), throttle (90%), and block (95%) thresholds fire real-time alerts as agents approach their limits.
+
+Track and enforce daily limits on API calls, SOQL queries, and DML operations per agent. Budgets reset automatically at midnight. Configurable warning (80%), throttle (90%), and block (95%) thresholds fire real-time alerts as agents approach their limits. Exactly one budget row exists per agent per day, even under concurrent first-of-day requests.
 
 ### 2. Circuit Breaker Pattern
-Automatically disable misbehaving agents using the industry-standard circuit breaker pattern. After a configurable number of failures, the breaker trips to OPEN state, blocking all requests. After a cooldown period, it transitions to HALF_OPEN for a test request. A successful test closes the breaker; a failure re-opens it with exponential backoff.
+
+Automatically disable misbehaving agents using the industry-standard circuit breaker pattern. After a configurable number of failures, the breaker trips to OPEN state, blocking all requests. After a cooldown period, it transitions to HALF_OPEN and admits exactly one probe request. A successful probe closes the breaker; a failure re-opens it with a doubled cooldown, capped at one day.
 
 ### 3. Policy Engine
-Declarative, metadata-driven access control. Define which agent types can perform which operations on which objects -- all through Custom Metadata Type records. Supports wildcards, field-level restrictions, and per-transaction record limits. No code changes required to add or modify policies.
+
+Declarative, metadata-driven access control. Define which agent types can perform which operations on which objects -- all through Custom Metadata Type records. Supports wildcards, field-level restrictions, and per-transaction record limits, all enforced by the proxy. No code changes required to add or modify policies.
 
 ### 4. Conflict Resolution
+
 Detect and resolve conflicts when multiple agents attempt to modify the same record. Uses in-memory record locking with priority-based resolution. Higher-priority agents can override lower-priority locks. All conflicts are logged with severity levels for post-incident analysis.
 
-### 5. Real-Time Monitoring
-Platform Events (`AgentGov_Alert__e` and `AgentGov_Action_Event__e`) provide real-time visibility into agent activity. Subscribe from LWC dashboards, Streaming API clients, or trigger follow-up automations. Every budget threshold crossing, circuit breaker trip, and policy violation fires an event.
+**Scope:** the lock table lives for one Apex transaction, so this catches agents that collide inside a single request, such as a Flow that fans out to several agents, or a proxy call that touches a record another agent in the same transaction already claimed. Two agents arriving in two separate REST calls are two separate transactions and will not collide. Cross-transaction locking is on the roadmap for v2.0.
+
+### 5. Real-Time Monitoring and Alerts
+
+Platform Events (`AgentGov_Alert__e` and `AgentGov_Action_Event__e`) provide real-time visibility into agent activity. The Lightning dashboards subscribe to them and refresh live. Alerts are emailed to the address in AgentGov Settings. Every budget threshold crossing, circuit breaker trip, and policy violation fires an event.
 
 ### 6. Governed Proxy API (Dynamic Tracking)
-Instead of agents calling Salesforce REST API directly (which AgentGov can't track), agents go through the **Proxy API** which performs CRUD operations on their behalf. Budget is consumed by the **actual number of records** affected — not a hardcoded 1.
+
+Instead of agents calling the Salesforce REST API directly (which AgentGov can't track), agents go through the **Proxy API**, which performs queries and CRUD on their behalf in user mode. Budget is consumed by the **actual number of records** affected -- not a hardcoded 1.
 
 ```bash
-# Create 5 Lead records through the proxy → budget consumed by 5 DML operations
-curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov-proxy/create \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"apiKey":"your-key","objectName":"Lead","records":[
+# Create 3 Lead records through the proxy → budget consumed by 3 DML operations
+curl -X POST "$INSTANCE/services/apexrest/agentgov-proxy/create" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"objectName":"Lead","records":[
     {"FirstName":"John","LastName":"Doe","Company":"Acme"},
     {"FirstName":"Jane","LastName":"Smith","Company":"Globex"},
-    {"FirstName":"Bob","LastName":"Jones","Company":"Initech"},
-    {"FirstName":"Alice","LastName":"Lee","Company":"Umbrella"},
-    {"FirstName":"Charlie","LastName":"Brown","Company":"Stark"}
+    {"FirstName":"Bob","LastName":"Jones","Company":"Initech"}
   ]}'
 ```
 
-Proxy endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`. Each runs the full governance pipeline (circuit breaker → policy → budget → conflict) before executing.
+Reads take a structured request, never SOQL text:
 
-For Apex agents, use `AgentGovContext` to automatically measure actual resource consumption via the `Limits` class:
+```bash
+curl -X POST "$INSTANCE/services/apexrest/agentgov-proxy/query" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"objectName":"Lead","fields":["Id","Name","Status"],
+       "where":[{"field":"Status","op":"=","value":"Open"}],
+       "orderBy":{"field":"Name","direction":"ASC"},"limit":50}'
+```
+
+Proxy endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`. Each runs the full governance pipeline (circuit breaker → policy → conflict → field-level security → budget) before executing.
+
+For Apex agents, use `AgentGovContext` to measure actual resource consumption via the `Limits` class:
+
 ```apex
 AgentGovContext.startTracking(agentId);
 // ... agent performs SOQL queries, DML operations, callouts ...
 AgentGovBudgetManager.BudgetResult result = AgentGovContext.stopTracking();
-// Budget consumed by ACTUAL measured delta, not self-reported
+// Budget consumed by the measured delta, not a self-reported estimate
 ```
 
 ### 7. Flow-Native Integration
-Four invocable actions make AgentGov accessible from any Salesforce Flow -- no Apex required:
-- **Register Agent Action** -- Check policy + consume budget + log action in one call
+
+Five bulk-safe invocable actions make AgentGov accessible from any Salesforce Flow -- no Apex required:
+
+- **Register Agent Action** -- Check circuit breaker, policy, and budget, then log the action in one call
 - **Check Agent Budget** -- Read-only budget status check
 - **Get Agent Status** -- Health and circuit breaker state
 - **Log Agent Action** -- Record an action for audit
+- **Report Agent Usage** -- Charge the resources a Flow actually used
 
 ---
 
@@ -150,111 +188,103 @@ Four invocable actions make AgentGov accessible from any Salesforce Flow -- no A
 
 AgentGov provides **three ways** to track agent resource consumption. Choose the right one based on your agent type:
 
-| Option | Best For | Accuracy | How It Works |
-|--------|----------|----------|--------------|
-| **Proxy API** | External / MCP agents | **Exact** — counts actual records | AgentGov executes the DML/SOQL on behalf of the agent and counts the records processed |
-| **AgentGovContext** | Apex agents (same org) | **Transaction-level** — measures Limits delta | Captures `Limits.getQueries()` and `Limits.getDMLStatements()` before and after your agent code runs |
-| **/authorize + /report** | Any agent type | **Agent-reported** with reconciliation | Agent pre-declares expected cost, then optionally reports actual consumption afterward |
+| Option                   | Best For               | Accuracy                                      | How It Works                                                                                         |
+| ------------------------ | ---------------------- | --------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **Proxy API**            | External / MCP agents  | **Exact** — counts actual records             | AgentGov executes the query or DML on behalf of the agent and counts the records processed           |
+| **AgentGovContext**      | Apex agents (same org) | **Transaction-level** — measures Limits delta | Captures `Limits.getQueries()` and `Limits.getDMLStatements()` before and after your agent code runs |
+| **/authorize + /report** | Any agent type         | **Agent-reported** with reconciliation        | Agent pre-declares expected cost, then optionally reports actual consumption afterward               |
 
 ### Option 1: Proxy API (Recommended for External Agents)
 
-The agent calls AgentGov's proxy endpoints instead of Salesforce's standard REST API. AgentGov performs the operation and knows exactly how many records were affected.
+The agent calls AgentGov's proxy endpoints instead of Salesforce's standard REST API. AgentGov performs the operation in the calling user's context and knows exactly how many records were affected.
 
-```bash
-# Agent wants to create 3 Leads
-curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov-proxy/create \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"apiKey":"your-key","objectName":"Lead","records":[
-    {"FirstName":"John","LastName":"Doe","Company":"Acme"},
-    {"FirstName":"Jane","LastName":"Smith","Company":"Globex"},
-    {"FirstName":"Bob","LastName":"Jones","Company":"Initech"}
-  ]}'
-# Budget consumed: DML_Operations = 3 (exact record count)
-# Full governance pipeline runs: circuit breaker → policy → budget → conflict → execute
-```
-
-**Endpoints:** `/agentgov-proxy/query`, `/create`, `/update`, `/delete`, `/upsert`
-
-**Why it's the most accurate:** AgentGov controls the DML. There's no way for the agent to do more or fewer operations than what's tracked.
+**Why it's the most accurate:** AgentGov controls the DML. There's no way for the agent to do more or fewer operations than what's tracked, and there is no way to read or write anything the calling user could not.
 
 ### Option 2: AgentGovContext (Recommended for Apex Agents)
 
 Wrap your agent's Apex code between `startTracking()` and `stopTracking()`. AgentGov measures the actual SOQL queries, DML statements, and callouts consumed using Salesforce's `Limits` class.
 
 ```apex
-// Start measuring
 AgentGovContext.startTracking(agentId);
 
-// Agent does its work — any SOQL, DML, callouts here are measured
 List<Lead> leads = [SELECT Id, Status FROM Lead WHERE Status = 'Open'];  // 1 SOQL
 for (Lead l : leads) { l.Status = 'Working'; }
 update leads;                                                             // 1 DML
 insert new Task(Subject = 'Follow up on leads');                          // 1 DML
 
-// Stop measuring — budget consumed by actual delta
 AgentGovBudgetManager.BudgetResult result = AgentGovContext.stopTracking();
 // Measured: 1 SOQL query + 2 DML operations consumed from budget
 ```
 
 **Or use the convenience wrapper:**
+
 ```apex
 AgentGovContext.executeGoverned(agentId, new MyAgentAction());
-// Automatically calls startTracking/stopTracking with try/finally
+// Charges the measured usage; if the action throws, the exception propagates after the charge
 ```
 
-**Important:** This measures everything between start and stop — including triggers and automations that fire as a result of the agent's DML. This is by design: if an agent's insert triggers 3 workflow rules, that's the agent's true cost to the org. The developer controls what goes inside the tracking block.
+Contexts nest: an inner context's usage is charged to its own agent and excluded from the outer one.
+
+**Important:** This measures everything between start and stop -- including triggers and automations that fire as a result of the agent's DML. This is by design: if an agent's insert triggers three automations, that's the agent's true cost to the org.
 
 ### Option 3: /authorize + /report (Flexible, Any Agent Type)
 
-The traditional approach: agent asks permission before acting, then optionally reports what it actually did.
+The agent asks permission before acting, then optionally reports what it actually did.
 
 ```bash
 # Step 1: Pre-authorize (agent declares expected cost)
-curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/authorize \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"apiKey":"your-key","objectName":"Lead","operation":"Update","amount":10}'
+curl -X POST "$INSTANCE/services/apexrest/agentgov/authorize" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"objectName":"Lead","operation":"Update","amount":10}'
 # Budget consumed: 10 DML operations (pre-authorized)
 
-# Step 2: Agent does its actual work (via standard Salesforce API or any method)
+# Step 2: Agent does its actual work
 # ... agent updates 7 leads ...
 
 # Step 3: Report actual usage (reconciliation)
-curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/report \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"apiKey":"your-key",
-    "actual":{"dmlOperations":7},
-    "preAuthorized":{"dmlOperations":10}}'
-# Delta: 7 - 10 = -3 → 3 DML operations credited back to budget
+curl -X POST "$INSTANCE/services/apexrest/agentgov/report" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"actual":{"dmlOperations":7},"preAuthorized":{"dmlOperations":10},"success":true}'
+# Used 7 of the 10 pre-authorized: nothing further is charged.
+# Had it used 12, the extra 2 would be charged now.
 ```
 
-**Note:** If `amount` is omitted from `/authorize`, it defaults to `1` for backward compatibility. The `/report` step is optional but recommended for accurate tracking. Without it, the pre-authorized amount is the final consumption.
+**Note:** If `amount` is omitted from `/authorize`, it defaults to `1`. The `/report` step is optional but recommended: it charges any usage beyond the pre-authorized amount and reports the outcome to the circuit breaker. Unused pre-authorization is not refunded, because both figures come from the agent and the framework cannot verify them.
 
 ---
 
 ## Screenshots
 
 ### AgentGov Dashboard — Summary Cards, Budget Usage & Active Sessions
-![AgentGov Dashboard](docs/images/Dashboard_1.png)
+
+![AgentGov Dashboard](docs/images/dashboard-1.png)
 
 ### Agent Health Monitor, Budget Allocation & Conflicts
-![Health Monitor & Budget Allocation](docs/images/dashboard_2.png)
+
+![Health Monitor & Budget Allocation](docs/images/dashboard-2.png)
 
 ### Detailed Budget Breakdown per Agent & Conflict Log
-![Budget Breakdown](docs/images/Dashboard_3.png)
+
+![Budget Breakdown](docs/images/dashboard-3.png)
 
 ### Agent Registrations
+
 ![Agent Registrations](docs/images/registrations.png)
 
 ### Agent Registration Detail
+
 ![Registration Detail](docs/images/registration-detail.png)
 
 ### Governor Budgets
+
 ![Governor Budgets](docs/images/budgets.png)
 
 ### Agent Action Logs
+
 ![Action Logs](docs/images/action-logs.png)
 
 ### Agent Conflict Logs
+
 ![Conflict Logs](docs/images/conflict-logs.png)
 
 ---
@@ -267,10 +297,13 @@ curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/repo
 sf project deploy start --source-dir force-app
 ```
 
-### Step 2: Assign the permission set
+### Step 2: Assign permissions
 
 ```bash
+# Administrators: full access plus the dashboards
 sf org assign permset --name AgentGov_Admin
+# Or the group that bundles Admin and User
+sf org assign permset --name AgentGov_Operators
 ```
 
 ### Step 3: Register your first agent
@@ -280,11 +313,17 @@ AgentGov_Registration__c agent = AgentGovRegistryService.registerAgent(
     'Lead Enrichment Agent',
     'Agentforce',
     'Enriches leads with firmographic data from external APIs',
-    'key-lead-enrichment-2024',
-    'admin@yourcompany.com'
+    null,                          // no key yet
+    'owner@example.com'
 );
+String apiKey = AgentGovRegistryService.issueApiKey(agent.Id);   // shown once; only its hash is stored
 AgentGovRegistryService.activateAgent(agent.Id);
-System.debug('Agent registered: ' + agent.Id);
+```
+
+For an agent that runs as its own Salesforce user (an Agentforce Agent User or an integration user), bind the user instead of issuing a key:
+
+```apex
+AgentGovRegistryService.bindAgentUser(agent.Id, agentUserId);
 ```
 
 ---
@@ -294,20 +333,16 @@ System.debug('Agent registered: ' + agent.Id);
 ### Prerequisites
 
 - Salesforce CLI (`sf`) installed -- [Install Guide](https://developer.salesforce.com/tools/salesforcecli)
-- A Salesforce org (scratch org, sandbox, or Developer Edition)
+- A Salesforce org on Summer '26 or later (scratch org, sandbox, or Developer Edition)
 - System Administrator profile or equivalent permissions
 
 ### Deploy via Salesforce CLI
 
 ```bash
-# Clone the repository
 git clone https://github.com/himanshupalerwal/salesforce-agent-governance.git
 cd salesforce-agent-governance
 
-# Deploy to your default org
 sf project deploy start --source-dir force-app
-
-# Assign admin permission set
 sf org assign permset --name AgentGov_Admin
 
 # (Optional) Load sample data
@@ -317,21 +352,21 @@ sf apex run --file scripts/setup/load-sample-data.apex
 ### Deploy to a Scratch Org
 
 ```bash
-# Create a scratch org
 sf org create scratch --definition-file config/project-scratch-def.json --alias agentgov-dev --duration-days 30 --set-default
-
-# Push source
 sf project deploy start --source-dir force-app --target-org agentgov-dev
-
-# Assign permission set
 sf org assign permset --name AgentGov_Admin --target-org agentgov-dev
-
-# Load sample data
 sf apex run --file scripts/setup/load-sample-data.apex --target-org agentgov-dev
-
-# Open the org
 sf org open --target-org agentgov-dev
 ```
+
+The scratch org definition enables Agentforce so agents can be built and tested alongside the framework.
+
+### Upgrading from v1.1
+
+1. If your org ever produced duplicate daily budget rows, run `scripts/migrate/dedupe-budgets.apex` **before** deploying; v1.2 adds a unique key that cannot deploy over duplicates.
+2. Deploy v1.2.
+3. Run `scripts/migrate/hash-api-keys.apex` to move any remaining plaintext API keys to hashed storage (keys are also upgraded automatically the first time each agent connects).
+4. Move REST clients from `apiKey` in the body to the `X-AgentGov-Key` header, and from raw SOQL to the structured `/query` request. See `CHANGELOG.md` for every behavior change.
 
 ---
 
@@ -340,44 +375,33 @@ sf org open --target-org agentgov-dev
 ### Registering an Agent
 
 ```apex
-// Register a new Agentforce agent
 AgentGov_Registration__c agent = AgentGovRegistryService.registerAgent(
     'Case Routing Agent',           // Agent name
     'Agentforce',                   // Type: Agentforce, MCP_External, Custom_Apex, Flow_Based
     'Routes cases to the best available support rep based on skills and workload',
-    'key-case-router-001',          // API key for REST access
-    'support-team@yourcompany.com'  // Owner email for alerts
+    null,                           // API key: null to issue one later, or a key of your choosing (stored hashed)
+    'support-team@example.com'      // Owner email for alerts
 );
 
-// Activate the agent (required before it can perform actions)
 AgentGovRegistryService.activateAgent(agent.Id);
 
-// Start a session (tracks activity within a logical unit of work)
 AgentGov_Session__c session = AgentGovRegistryService.startSession(agent.Id);
-System.debug('Session started: ' + session.Id);
-
 // ... agent performs its work ...
-
-// End the session
 AgentGovRegistryService.endSession(session.Id);
 ```
 
 ### Checking Budget Before an Action
 
 ```apex
-// Check if the agent has budget remaining (read-only, does not consume)
 AgentGovBudgetManager.BudgetResult budget = AgentGovBudgetManager.checkBudget(agentId);
 
 if (budget.allowed) {
-    System.debug('Budget status: ' + budget.budgetStatus);
-    System.debug('API calls remaining: ' + budget.apiCallsRemaining);
-    System.debug('SOQL queries remaining: ' + budget.soqlQueriesRemaining);
-    System.debug('DML operations remaining: ' + budget.dmlOperationsRemaining);
+    // budget.budgetStatus, budget.apiCallsRemaining, budget.soqlQueriesRemaining, budget.dmlOperationsRemaining
 } else {
-    System.debug('Agent is over budget. Status: ' + budget.budgetStatus);
+    // The budget is Blocked or Exhausted on at least one limit type
 }
 
-// Consume budget (call this when the agent actually performs an action)
+// Consume budget when the agent performs an action
 AgentGovBudgetManager.BudgetResult result = AgentGovBudgetManager.consumeBudget(
     agentId,
     'API_Calls',  // Limit type: API_Calls, SOQL_Queries, DML_Operations
@@ -388,47 +412,30 @@ AgentGovBudgetManager.BudgetResult result = AgentGovBudgetManager.consumeBudget(
 ### Full Authorization Pipeline (Apex)
 
 ```apex
-// Complete governance check: circuit breaker + policy + budget + conflict detection
-Id agentId = '0015g00000XXXXXXXX';
+Id agentId = ...;
 String objectName = 'Lead';
 String operation = 'Update';
-String recordId = '00Q5g00000YYYYYYYY';
+Id recordId = ...;
 
-// 1. Circuit Breaker
 if (!AgentGovCircuitBreaker.allowRequest(agentId)) {
-    System.debug('Circuit breaker is OPEN -- agent blocked');
-    return;
+    return; // circuit breaker OPEN
 }
 
-// 2. Policy Check
-AgentGovPolicyEngine.PolicyResult policy = AgentGovPolicyEngine.evaluatePolicy(
-    agentId, objectName, operation
-);
+AgentGovPolicyEngine.PolicyResult policy = AgentGovPolicyEngine.evaluatePolicy(agentId, objectName, operation);
 if (!policy.allowed) {
-    System.debug('Policy violation: ' + policy.denialReason);
-    return;
+    return; // policy.denialReason explains why
 }
+AgentGovPolicyEngine.assertFieldsAllowed(policy, new Set<String>{ 'Status', 'Rating' });
 
-// 3. Budget Consumption
+AgentGovConflictResolver.assertNoConflict(agentId, recordId, objectName);
+
 try {
     AgentGovBudgetManager.consumeBudget(agentId, 'DML_Operations', 1);
 } catch (AgentGovException e) {
-    System.debug('Budget exceeded: ' + e.getMessage());
-    return;
+    return; // BUDGET_EXCEEDED
 }
 
-// 4. Conflict Detection
-AgentGovConflictResolver.ConflictResult conflict =
-    AgentGovConflictResolver.checkForConflict(agentId, recordId, objectName);
-if (conflict.hasConflict && conflict.winningAgentId != agentId) {
-    System.debug('Record locked: ' + conflict.message);
-    return;
-}
-
-// All checks passed -- proceed with the action
-System.debug('Action authorized. Proceeding...');
-
-// Record success for circuit breaker tracking
+// ... perform the action ...
 AgentGovCircuitBreaker.recordSuccess(agentId);
 ```
 
@@ -437,115 +444,67 @@ AgentGovCircuitBreaker.recordSuccess(agentId);
 #### Register an Agent
 
 ```bash
-curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/register \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
+curl -X POST "$INSTANCE/services/apexrest/agentgov/register" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
   -d '{
     "agentName": "Lead Enrichment Agent",
     "agentType": "MCP_External",
-    "description": "Enriches leads with firmographic data via Clearbit API",
-    "apiKey": "mcp-lead-enrichment-abc123",
-    "ownerEmail": "data-team@yourcompany.com"
+    "description": "Enriches leads with firmographic data",
+    "ownerEmail": "data-team@example.com"
   }'
 ```
 
 **Response (201):**
+
 ```json
 {
   "success": true,
-  "registrationId": "a0B5g00000XXXXXXXX",
-  "registrationNumber": "REG-0001",
+  "correlationId": "4c0f...",
+  "registrationId": "a0B...",
+  "registrationNumber": "AGT-0001",
   "status": "Inactive",
-  "message": "Agent registered successfully. Call activateAgent to enable."
+  "apiKey": "agk_...",
+  "apiKeyPrefix": "agk_5e2a9c1d",
+  "message": "Agent registered. Store the apiKey now; only its hash is kept and it cannot be retrieved later. Activate the agent to enable it."
 }
 ```
 
 #### Authorize an Action
 
 ```bash
-curl -X POST https://yourinstance.salesforce.com/services/apexrest/agentgov/authorize \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiKey": "mcp-lead-enrichment-abc123",
-    "objectName": "Lead",
-    "operation": "Update",
-    "recordId": "00Q5g00000YYYYYYYY"
-  }'
+curl -X POST "$INSTANCE/services/apexrest/agentgov/authorize" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"objectName": "Lead", "operation": "Update", "recordId": "00Q..."}'
 ```
 
 **Response (200):**
+
 ```json
 {
+  "success": true,
+  "correlationId": "4c0f...",
   "authorized": true,
-  "agentId": "a0B5g00000XXXXXXXX",
+  "agentId": "a0B...",
   "budgetStatus": "Normal",
-  "remainingBudget": {
-    "apiCalls": 9842,
-    "soqlQueries": 4991,
-    "dmlOperations": 2987
-  },
-  "conflict": {
-    "detected": false,
-    "resolution": null
-  }
+  "remainingBudget": { "apiCalls": 9842, "soqlQueries": 4991, "dmlOperations": 2987 },
+  "conflict": { "detected": false, "resolution": null }
 }
 ```
 
-#### Check Budget
+#### Check Budget and Health
 
 ```bash
-curl -X GET https://yourinstance.salesforce.com/services/apexrest/agentgov/budget/a0B5g00000XXXXXXXX \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
+curl "$INSTANCE/services/apexrest/agentgov/budget/a0B..." -H "Authorization: Bearer $ACCESS_TOKEN" -H "X-AgentGov-Key: $AGENT_KEY"
+curl "$INSTANCE/services/apexrest/agentgov/health/a0B..." -H "Authorization: Bearer $ACCESS_TOKEN" -H "X-AgentGov-Key: $AGENT_KEY"
 ```
 
-**Response (200):**
-```json
-{
-  "agentId": "a0B5g00000XXXXXXXX",
-  "budgetStatus": "Warning",
-  "allowed": true,
-  "remaining": {
-    "apiCalls": 1580,
-    "soqlQueries": 920,
-    "dmlOperations": 450
-  },
-  "usagePercent": {
-    "apiCalls": 84.2,
-    "soqlQueries": 81.6,
-    "dmlOperations": 85.0
-  }
-}
-```
-
-#### Check Agent Health
-
-```bash
-curl -X GET https://yourinstance.salesforce.com/services/apexrest/agentgov/health/a0B5g00000XXXXXXXX \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-**Response (200):**
-```json
-{
-  "agentId": "a0B5g00000XXXXXXXX",
-  "agentName": "Lead Enrichment Agent",
-  "status": "Active",
-  "circuitBreakerState": "CLOSED",
-  "failureCount": 2,
-  "lastFailure": "2025-01-15T14:30:00.000Z",
-  "cooldownUntil": null,
-  "lastActive": "2025-01-15T16:45:00.000Z"
-}
-```
+An agent may read its own budget and health. Reading another agent requires the `AgentGov_Admin_Access` custom permission.
 
 ### Using Invocable Actions in Flow
 
-AgentGov ships with four invocable actions that appear in the Flow Builder under the **AgentGov** category.
+AgentGov ships with five invocable actions that appear in the Flow Builder under the **AgentGov** category. All of them are bulk-safe.
 
 #### Register Agent Action (All-in-One)
-
-The most common pattern. Checks policy, consumes budget, and logs the action in a single call:
 
 ```
 Flow Element: Action — "Register Agent Action"
@@ -559,86 +518,86 @@ Output:
   - Authorized → {!varAuthorized}      (Boolean)
   - Budget Status → {!varBudgetStatus}  (Text)
   - Denial Reason → {!varDenialReason}  (Text)
-
-Decision Element:
-  - If {!varAuthorized} = true → Proceed with Case update
-  - If {!varAuthorized} = false → Log denial, notify admin
 ```
 
 #### Check Agent Budget
 
-Read-only budget check, useful in a Flow decision before expensive operations:
-
 ```
 Flow Element: Action — "Check Agent Budget"
-Input:
-  - Agent Registration ID: {!varAgentId}
-
-Output:
-  - Has Budget → {!varHasBudget}              (Boolean)
-  - Budget Status → {!varBudgetStatus}          (Text)
-  - API Calls Remaining → {!varApiRemaining}    (Number)
-  - SOQL Queries Remaining → {!varSoqlRemaining} (Number)
-  - DML Operations Remaining → {!varDmlRemaining} (Number)
+Input:  Agent Registration ID
+Output: Has Budget, Budget Status, API Calls Remaining, SOQL Queries Remaining, DML Operations Remaining, Error Message
 ```
 
 #### Get Agent Status
 
-Check health and circuit breaker state:
-
 ```
 Flow Element: Action — "Get Agent Status"
-Input:
-  - Agent Registration ID: {!varAgentId}
-
-Output:
-  - Agent Name → {!varAgentName}                  (Text)
-  - Agent Status → {!varAgentStatus}              (Text)
-  - Circuit Breaker State → {!varCBState}          (Text)
-  - Is Healthy → {!varIsHealthy}                  (Boolean)
-  - Failure Count → {!varFailureCount}            (Number)
+Input:  Agent Registration ID
+Output: Agent Name, Agent Status, Circuit Breaker State, Is Healthy, Failure Count, Error Message
 ```
+
+#### Log Agent Action
+
+Records an action for audit purposes without running governance checks. Use it when the checks have already been made separately, or for informational events.
+
+#### Report Agent Usage
+
+```
+Flow Element: Action — "Report Agent Usage"
+Input:  Agent Registration ID, API Calls Used, SOQL Queries Used, DML Statements Used
+Output: Budget Status, Budget Allowed, API Calls Remaining, SOQL Queries Remaining, DML Operations Remaining, Error Message
+```
+
+See [docs/flow-integration.md](docs/flow-integration.md) for patterns.
 
 ---
 
 ## REST API Reference
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/services/apexrest/agentgov/register` | Register a new agent |
-| `POST` | `/services/apexrest/agentgov/authorize` | Authorize an agent action (supports `amount` parameter) |
-| `POST` | `/services/apexrest/agentgov/report` | Report actual resource consumption post-execution |
-| `GET` | `/services/apexrest/agentgov/budget/{agentId}` | Get current budget status |
-| `GET` | `/services/apexrest/agentgov/health/{agentId}` | Get agent health and circuit breaker state |
-| `POST` | `/services/apexrest/agentgov-proxy/query` | Execute SOQL query (counts as 1 SOQL budget) |
-| `POST` | `/services/apexrest/agentgov-proxy/create` | Insert records (budget = record count) |
-| `POST` | `/services/apexrest/agentgov-proxy/update` | Update records (budget = record count) |
-| `POST` | `/services/apexrest/agentgov-proxy/delete` | Delete records (budget = record count) |
-| `POST` | `/services/apexrest/agentgov-proxy/upsert` | Upsert records (budget = record count) |
+| Method | Endpoint                                              | Description                                             |
+| ------ | ----------------------------------------------------- | ------------------------------------------------------- |
+| `POST` | `/services/apexrest/agentgov/register`                | Register a new agent; returns a generated key once      |
+| `POST` | `/services/apexrest/agentgov/authorize`               | Authorize an agent action and pre-charge budget         |
+| `POST` | `/services/apexrest/agentgov/report`                  | Report actual resource consumption and reconcile        |
+| `POST` | `/services/apexrest/agentgov/rotate-key`              | Issue a replacement API key                             |
+| `GET`  | `/services/apexrest/agentgov/budget/{registrationId}` | Get current budget status                               |
+| `GET`  | `/services/apexrest/agentgov/health/{registrationId}` | Get agent health and circuit breaker state              |
+| `POST` | `/services/apexrest/agentgov-proxy/query`             | Structured query in user mode (counts as 1 SOQL budget) |
+| `POST` | `/services/apexrest/agentgov-proxy/create`            | Insert records (budget = record count)                  |
+| `POST` | `/services/apexrest/agentgov-proxy/update`            | Update records (budget = record count)                  |
+| `POST` | `/services/apexrest/agentgov-proxy/delete`            | Delete records (budget = record count)                  |
+| `POST` | `/services/apexrest/agentgov-proxy/upsert`            | Upsert records (budget = record count)                  |
 
-All endpoints require a valid Salesforce OAuth bearer token in the `Authorization` header.
+All endpoints require a Salesforce OAuth bearer token from a user with the `AgentGov_Agent` permission set. Every endpoint except `/register` also requires an agent identity: the `X-AgentGov-Key` header, or a Salesforce user bound to the registration through `Agent_User__c`. `apiKey` in the body still works but is deprecated.
 
 **Error Response Format:**
+
 ```json
 {
-  "error": "Human-readable error message",
-  "errorCode": "BUDGET_EXCEEDED"
+  "success": false,
+  "errorCode": "BUDGET_EXCEEDED",
+  "message": "Governor budget exceeded for limit type: DML_Operations",
+  "correlationId": "4c0f...",
+  "timestamp": "2026-09-15T10:00:00.000Z"
 }
 ```
 
 **Error Codes:**
 
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `INVALID_INPUT` | 400 | Missing or invalid request parameters |
-| `AGENT_NOT_FOUND` | 404 | Agent registration ID or API key not found |
-| `AGENT_NOT_ACTIVE` | 403 | Agent exists but is not in Active status |
-| `BUDGET_EXCEEDED` | 429 | Daily governor budget exhausted |
-| `BUDGET_THROTTLED` | 429 | Agent is throttled due to high usage |
-| `POLICY_VIOLATION` | 403 | Action denied by policy configuration |
-| `CIRCUIT_BREAKER_OPEN` | 503 | Agent is temporarily disabled |
-| `RECORD_LOCKED` | 409 | Record is locked by a higher-priority agent |
-| `MAX_CONCURRENT_AGENTS` | 429 | Org has reached the max concurrent agent limit |
+| Code                    | HTTP Status | Description                                                          |
+| ----------------------- | ----------- | -------------------------------------------------------------------- |
+| `INVALID_INPUT`         | 400         | Missing or invalid request parameters, unknown object or field       |
+| `AGENT_NOT_FOUND`       | 404         | No credential resolved to a registration                             |
+| `AGENT_NOT_ACTIVE`      | 403         | Agent exists but is not in Active status                             |
+| `ACCESS_DENIED`         | 403         | The calling user lacks access to the data, or may not read the agent |
+| `POLICY_VIOLATION`      | 403         | Denied by policy, a restricted field, or a record cap                |
+| `BUDGET_EXCEEDED`       | 429         | Daily governor budget blocked or exhausted                           |
+| `MAX_CONCURRENT_AGENTS` | 429         | Org has reached the max concurrent agent limit                       |
+| `RECORD_LOCKED`         | 409         | Record is locked by a higher-priority agent                          |
+| `CIRCUIT_BREAKER_OPEN`  | 503         | Agent is temporarily disabled                                        |
+| `INTERNAL_ERROR`        | 500         | Unexpected failure; details are logged under the correlation id      |
+
+Full details in [docs/rest-api-reference.md](docs/rest-api-reference.md).
 
 ---
 
@@ -646,45 +605,40 @@ All endpoints require a valid Salesforce OAuth bearer token in the `Authorizatio
 
 ### AgentGov_Settings__c (Custom Settings -- Hierarchy)
 
-Org-level configuration that controls global framework behavior.
-
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `Is_Enabled__c` | Checkbox | `true` | Master kill switch for the entire framework |
-| `Default_Agent_Priority__c` | Number | `5` | Default priority for new agents (1 = highest) |
-| `Max_Concurrent_Agents__c` | Number | `10` | Maximum agents in Active status simultaneously |
-| `Circuit_Breaker_Failure_Threshold__c` | Number | `5` | Failures before circuit breaker trips to OPEN |
-| `Circuit_Breaker_Cooldown_Minutes__c` | Number | `30` | Minutes before OPEN breaker transitions to HALF_OPEN |
-| `Log_Retention_Days__c` | Number | `90` | Days to retain action log records |
-| `Enable_Conflict_Detection__c` | Checkbox | `true` | Enable/disable in-memory conflict detection |
-| `Enable_Real_Time_Events__c` | Checkbox | `true` | Enable/disable platform event publishing |
+| Field                                  | Type     | Default | Description                                                                           |
+| -------------------------------------- | -------- | ------- | ------------------------------------------------------------------------------------- |
+| `Is_Enabled__c`                        | Checkbox | `true`  | Master kill switch for the entire framework                                           |
+| `Default_Agent_Priority__c`            | Number   | `5`     | Default priority for new agents (1 = highest)                                         |
+| `Max_Concurrent_Agents__c`             | Number   | `10`    | Maximum agents in Active status simultaneously                                        |
+| `Circuit_Breaker_Failure_Threshold__c` | Number   | `5`     | Failures before circuit breaker trips to OPEN                                         |
+| `Circuit_Breaker_Cooldown_Minutes__c`  | Number   | `30`    | Minutes before an OPEN breaker admits a probe (doubles on re-trip, capped at one day) |
+| `Log_Retention_Days__c`                | Number   | `90`    | Days to retain action log records                                                     |
+| `Enable_Conflict_Detection__c`         | Checkbox | `true`  | Enable/disable in-memory conflict detection                                           |
+| `Enable_Real_Time_Events__c`           | Checkbox | `true`  | Enable/disable platform event publishing                                              |
+| `Admin_Notification_Email__c`          | Email    | (none)  | Recipient of alert emails; leave blank to send none                                   |
 
 ### AgentGov_Limit_Config__mdt (Custom Metadata Type)
 
-Configures thresholds for each type of governor limit.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Limit_Type__c` | Text | `API_Calls`, `SOQL_Queries`, or `DML_Operations` |
-| `Warning_Threshold__c` | Percent | Usage percentage that triggers a warning alert (default: 80%) |
-| `Throttle_Threshold__c` | Percent | Usage percentage that triggers throttling (default: 90%) |
-| `Block_Threshold__c` | Percent | Usage percentage that blocks the agent (default: 95%) |
-| `Default_Daily_Budget__c` | Number | Default daily allocation for this limit type |
-| `Is_Active__c` | Checkbox | Whether this configuration is active |
+| Field                     | Type     | Description                                                   |
+| ------------------------- | -------- | ------------------------------------------------------------- |
+| `Limit_Type__c`           | Text     | `API_Calls`, `SOQL_Queries`, or `DML_Operations`              |
+| `Warning_Threshold__c`    | Percent  | Usage percentage that triggers a warning alert (default: 80%) |
+| `Throttle_Threshold__c`   | Percent  | Usage percentage that triggers throttling (default: 90%)      |
+| `Block_Threshold__c`      | Percent  | Usage percentage that blocks the agent (default: 95%)         |
+| `Default_Daily_Budget__c` | Number   | Default daily allocation for this limit type                  |
+| `Is_Active__c`            | Checkbox | Whether this configuration is active                          |
 
 ### AgentGov_Policy__mdt (Custom Metadata Type)
 
-Defines access control policies for agent types.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `Agent_Type__c` | Text | Agent type this policy applies to (`Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`, or `All`) |
-| `Object_Name__c` | Text | Salesforce object API name, or `*` for all objects |
-| `Operation__c` | Text | Operation type (`Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*`) |
-| `Is_Allowed__c` | Checkbox | Whether this action is allowed (explicit deny overrides allow) |
-| `Field_Restrictions__c` | Text | Comma-separated list of restricted field API names |
-| `Max_Records_Per_Transaction__c` | Number | Maximum records this agent type can process per transaction |
-| `Description__c` | Text | Human-readable description of the policy intent |
+| Field                            | Type     | Description                                                                                             |
+| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
+| `Agent_Type__c`                  | Text     | Agent type this policy applies to (`Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`, or `All`) |
+| `Object_Name__c`                 | Text     | Salesforce object API name, or `*` for all objects                                                      |
+| `Operation__c`                   | Text     | Operation type (`Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*`)    |
+| `Is_Allowed__c`                  | Checkbox | Whether this action is allowed (explicit deny overrides allow)                                          |
+| `Field_Restrictions__c`          | Text     | Comma-separated field API names the agent may neither read nor write through the proxy                  |
+| `Max_Records_Per_Transaction__c` | Number   | Maximum records per proxy request; also caps `/query` results                                           |
+| `Description__c`                 | Text     | Human-readable description of the policy intent                                                         |
 
 ---
 
@@ -701,35 +655,18 @@ stateDiagram-v2
     OPEN --> OPEN : Request denied
     OPEN --> HALF_OPEN : Cooldown period elapsed
 
-    HALF_OPEN --> CLOSED : Test request succeeds
-    HALF_OPEN --> OPEN : Test request fails\n(2x cooldown backoff)
-
-    note right of CLOSED
-        Normal operation.
-        All requests allowed.
-        Failures counted.
-    end note
-
-    note right of OPEN
-        Agent blocked.
-        All requests denied.
-        Waiting for cooldown.
-    end note
-
-    note left of HALF_OPEN
-        Recovery mode.
-        One test request allowed.
-        Success = recovery.
-        Failure = extended block.
-    end note
+    HALF_OPEN --> HALF_OPEN : One probe admitted, others denied
+    HALF_OPEN --> CLOSED : Probe succeeds
+    HALF_OPEN --> OPEN : Probe fails\n(2x cooldown, capped at 24h)
 ```
 
 **Default Configuration:**
+
 - Failure threshold: **5** consecutive failures
 - Cooldown period: **30** minutes
-- Retry backoff: **2x** multiplier on each re-trip
+- Retry backoff: **2x** multiplier on each re-trip, capped at **24 hours**
 
-Circuit breaker transitions are triggered by `recordSuccess()` / `recordFailure()` calls. The Proxy API calls these automatically based on DML results. For `/authorize` agents, the caller is responsible for reporting outcomes.
+The proxy and the Flow actions report outcomes automatically. Agents using `/authorize` report their own by sending `"success": true` or `false` on the following `POST /agentgov/report` call. A successful report from an agent whose breaker is HALF_OPEN closes the breaker and returns it to Active.
 
 ---
 
@@ -739,63 +676,29 @@ Circuit breaker transitions are triggered by `recordSuccess()` / `recordFailure(
 stateDiagram-v2
     [*] --> Normal
 
-    Normal --> Normal : Consume (usage < 80%)
     Normal --> Warning : Usage >= 80%
-
-    Warning --> Warning : Consume (usage < 90%)
     Warning --> Throttled : Usage >= 90%
-
-    Throttled --> Throttled : Consume (usage < 95%)
     Throttled --> Blocked : Usage >= 95%
-
     Blocked --> Exhausted : Usage >= 100%
 
-    Exhausted --> [*] : Request denied
-
-    Normal --> [*] : Daily Reset (midnight)
-    Warning --> [*] : Daily Reset (midnight)
-    Throttled --> [*] : Daily Reset (midnight)
-    Blocked --> [*] : Daily Reset (midnight)
-
-    note right of Normal
-        All requests allowed.
-        No alerts fired.
-    end note
-
-    note right of Warning
-        Alert fired.
-        Requests still allowed.
-    end note
-
-    note right of Throttled
-        Throttle alert fired.
-        Requests allowed but monitored.
-    end note
-
-    note left of Blocked
-        Block alert fired.
-        New requests denied.
-    end note
+    Blocked --> Normal : Credit or daily reset
+    Exhausted --> Normal : Credit or daily reset
 ```
 
+A budget's status is the most severe status across the three limit types. **Blocked** and **Exhausted** deny every operation until a credit or the daily reset brings usage back down. Consumption that crosses a line is recorded before the denial is returned, so the ledger shows the attempt.
+
 **Budget consumption sources:**
-- **Proxy API:** Budget consumed by actual record count (e.g., create 5 records = 5 DML consumed)
-- **AgentGovContext:** Budget consumed by measured `Limits` class delta
-- **`/authorize`:** Budget consumed by `amount` parameter (default 1)
-- **`/report`:** Post-execution reconciliation — adjusts budget based on actual vs. pre-authorized
 
-**Default Budgets per Agent:**
-- API Calls: **10,000** / day
-- SOQL Queries: **5,000** / day
-- DML Operations: **3,000** / day
+- **Proxy API:** actual record count (create 5 records = 5 DML consumed)
+- **AgentGovContext:** measured `Limits` delta
+- **`/authorize`:** the `amount` parameter (default 1)
+- **`/report`:** post-execution reconciliation, charging only usage beyond the pre-authorized amount. **Report Agent Usage** (Flow) is additive: it charges everything it reports.
 
-Budgets are configured per agent on the `AgentGov_Registration__c` record and can be overridden from the defaults.
+**Default Budgets per Agent:** API Calls **10,000** / day, SOQL Queries **5,000** / day, DML Operations **3,000** / day, overridable per registration.
 
 ---
 
 ## Scheduled Jobs
-
-AgentGov includes three scheduled jobs that should be configured after deployment:
 
 ```apex
 // Daily budget reset (run at midnight)
@@ -812,18 +715,20 @@ System.schedule('AgentGov Cleanup', '0 0 2 ? * SUN', new AgentGovCleanup());
 
 ## Data Model
 
-| Object | Type | Purpose |
-|--------|------|---------|
-| `AgentGov_Registration__c` | Custom Object | Agent registry -- one record per agent |
-| `AgentGov_Session__c` | Custom Object | Tracks agent sessions (start/end, resource usage) |
-| `AgentGov_Budget__c` | Custom Object | Daily budget allocations and consumption |
-| `AgentGov_Action_Log__c` | Custom Object | Audit log of all agent actions |
-| `AgentGov_Conflict_Log__c` | Custom Object | Record of detected and resolved conflicts |
-| `AgentGov_Settings__c` | Custom Settings | Org-level framework configuration |
-| `AgentGov_Limit_Config__mdt` | Custom Metadata | Governor limit thresholds |
-| `AgentGov_Policy__mdt` | Custom Metadata | Agent access control policies |
-| `AgentGov_Alert__e` | Platform Event | Real-time budget and circuit breaker alerts |
-| `AgentGov_Action_Event__e` | Platform Event | Real-time action notifications |
+| Object                       | Type            | Purpose                                                                |
+| ---------------------------- | --------------- | ---------------------------------------------------------------------- |
+| `AgentGov_Registration__c`   | Custom Object   | Agent registry -- one record per agent, with hashed key and agent user |
+| `AgentGov_Session__c`        | Custom Object   | Tracks agent sessions (start/end, resource usage)                      |
+| `AgentGov_Budget__c`         | Custom Object   | Daily budget allocations and consumption, one row per agent per day    |
+| `AgentGov_Action_Log__c`     | Custom Object   | Audit log of all agent actions, denials, and framework `System` events |
+| `AgentGov_Conflict_Log__c`   | Custom Object   | Record of detected and resolved conflicts                              |
+| `AgentGov_Settings__c`       | Custom Settings | Org-level framework configuration                                      |
+| `AgentGov_Limit_Config__mdt` | Custom Metadata | Governor limit thresholds                                              |
+| `AgentGov_Policy__mdt`       | Custom Metadata | Agent access control policies                                          |
+| `AgentGov_Alert__e`          | Platform Event  | Real-time budget and circuit breaker alerts                            |
+| `AgentGov_Action_Event__e`   | Platform Event  | Real-time action notifications                                         |
+
+Permission sets: `AgentGov_Admin` (administrators), `AgentGov_User` (read-only dashboards), `AgentGov_Agent` (the user an agent runs as), and the `AgentGov_Operators` group.
 
 ---
 
@@ -831,56 +736,61 @@ System.schedule('AgentGov Cleanup', '0 0 2 ? * SUN', new AgentGovCleanup());
 
 ```
 salesforce-agent-governance/
-├── config/
-│   └── project-scratch-def.json
-├── docs/
-│   ├── architecture.md
-│   ├── getting-started.md
-│   ├── configuration-guide.md
-│   ├── api-reference.md
-│   ├── rest-api-reference.md
-│   ├── flow-integration.md
-│   ├── mcp-integration-guide.md
-│   ├── troubleshooting.md
-│   ├── FAQ.md
-│   └── ROADMAP.md
+├── .github/               # CI, release, and Dependabot workflows; issue and PR templates
+├── config/                # Scratch org definition (Agentforce enabled)
+├── docs/                  # Guides and references
 ├── force-app/main/default/
-│   ├── classes/           # Apex classes (services, selectors, invocables, tests)
-│   ├── objects/           # Custom Objects, Custom Settings, Custom Metadata Types
-│   ├── permissionsets/    # AgentGov_Admin, AgentGov_User
+│   ├── classes/           # Apex services, REST resources, invocables, jobs, tests
+│   ├── customMetadata/    # Shipped limit configurations and policies
+│   ├── lwc/               # Dashboard components and the shared utility module
+│   ├── objects/           # Custom objects, settings, metadata types, platform events
+│   ├── permissionsets/    # AgentGov_Admin, AgentGov_User, AgentGov_Agent
+│   ├── triggers/          # Platform-event and budget triggers (one line each)
 │   └── ...
+├── force-app/test/        # Jest mocks for platform modules
 ├── scripts/
-│   └── setup/
-├── LICENSE
-├── README.md
+│   ├── migrate/           # One-time upgrade scripts
+│   └── setup/             # Scratch org setup and sample data
+├── CLAUDE.md              # Conventions for contributors and AI-assisted changes
+├── code-analyzer.yml      # Salesforce Code Analyzer configuration
 └── sfdx-project.json
 ```
 
 ---
 
+## Documentation
+
+| Guide                                            | What it covers                                           |
+| ------------------------------------------------ | -------------------------------------------------------- |
+| [Getting Started](docs/getting-started.md)       | Install runbook and the administrator's day-to-day guide |
+| [Configuration](docs/configuration-guide.md)     | Every setting, limit config, and policy field            |
+| [Architecture](docs/architecture.md)             | Pipeline, state machines, and the security model         |
+| [Apex API Reference](docs/api-reference.md)      | Public classes, methods, and error codes                 |
+| [REST API Reference](docs/rest-api-reference.md) | Endpoints, request and response shapes                   |
+| [Flow Integration](docs/flow-integration.md)     | The five invocable actions and how to wire them          |
+| [MCP Integration](docs/mcp-integration-guide.md) | Connecting an external or MCP agent                      |
+| [Troubleshooting](docs/troubleshooting.md)       | Symptoms, causes, and fixes                              |
+| [FAQ](docs/FAQ.md)                               | Common questions                                         |
+| [Roadmap](docs/ROADMAP.md)                       | What is planned and what shipped                         |
+| [Security Policy](.github/SECURITY.md)           | Supported versions and how to report a vulnerability     |
+
+---
+
 ## Roadmap
 
-| Version | Target | Features |
-|---------|--------|----------|
-| **v1.1** | Q2 2026 | Email alert templates, admin notification flows |
-| **v1.2** | Q3 2026 | Platform Cache integration for budget checks, enhanced LWC dashboard |
-| **v1.3** | Q4 2026 | Managed package distribution on AppExchange |
-| **v2.0** | 2027 | AI-powered anomaly detection, predictive budget forecasting, multi-org federation |
-
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the full roadmap with details.
+The next release, v1.3, makes AgentGov Agentforce-native: action and credit budgets, a governed Agentforce action with a sample Agent Script agent, hosted MCP exposure, and an observability import. See [docs/ROADMAP.md](docs/ROADMAP.md) for the full roadmap and [CHANGELOG.md](CHANGELOG.md) for what shipped.
 
 ---
 
 ## Contributing
 
-Contributions are welcome. Please read the [Contributing Guide](CONTRIBUTING.md) before submitting a pull request.
+Contributions are welcome. Please read the [Contributing Guide](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md) before submitting a pull request.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Write tests (maintain 90%+ coverage)
-4. Commit your changes (`git commit -m 'Add your feature'`)
-5. Push to the branch (`git push origin feature/your-feature`)
-6. Open a Pull Request
+3. Write tests (Apex coverage 85% or higher; Jest thresholds enforced)
+4. Run `npm run lint`, `npm run prettier:verify`, and `npm run test:unit:coverage`
+5. Open a Pull Request
 
 ---
 
@@ -892,14 +802,10 @@ This project is licensed under the MIT License. See [LICENSE](LICENSE) for detai
 
 ## Author
 
-**Himanshu Palerwal** -- 18x Salesforce Certified | Post Sales Technical Architect
+**Himanshu Palerwal**
 
-- 15 years in the Salesforce ecosystem
-- Currently at **ServiceTitan** -- Post Sales Technical Architect
-- Previously at **JPMorgan Chase** and **Bank of America** -- App Owner & Technical Architect
-- Specializing in Apex, LWC, Enterprise Architecture, AI Agents, MCP, and Agentic Architecture at enterprise scale
-- LinkedIn: [linkedin.com/in/himanshupalerwal](https://linkedin.com/in/himanshupalerwal)
-- GitHub: [github.com/himanshupalerwal](https://github.com/himanshupalerwal)
+Questions and contributions are welcome through
+[issues and pull requests](https://github.com/himanshupalerwal/salesforce-agent-governance/issues).
 
 ---
 

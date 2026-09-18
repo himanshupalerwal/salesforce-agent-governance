@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Log_Retention_Days__c</fullName>
     <defaultValue>90</defaultValue>
     <description>Days to retain action log records</description>

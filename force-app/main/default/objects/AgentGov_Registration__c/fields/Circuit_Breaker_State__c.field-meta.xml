@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Circuit_Breaker_State__c</fullName>
     <label>Circuit Breaker State</label>
     <type>Picklist</type>
     <required>false</required>
     <externalId>false</externalId>
+    <trackHistory>true</trackHistory>
     <description>Circuit breaker pattern state for fault tolerance</description>
     <valueSet>
         <restricted>true</restricted>

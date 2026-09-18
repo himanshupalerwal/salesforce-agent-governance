@@ -63,10 +63,10 @@ Feature requests are welcome! Please use the [Feature Request template](https://
 
    This will create a scratch org, deploy the source, assign permission sets, and load sample data.
 
-4. **Install Node dependencies (for LWC tests):**
+4. **Install Node dependencies (lint, formatting, LWC tests):**
 
    ```bash
-   npm install
+   npm ci
    ```
 
 5. **Start developing!** Make changes in `force-app/` and push to your scratch org:
@@ -111,12 +111,12 @@ Follow standard Apex conventions to keep the codebase consistent and readable.
 
 ### Naming Conventions
 
-- **Classes:** PascalCase (e.g., `AgentGovernanceService`)
+- **Classes:** PascalCase with the `AgentGov` prefix (e.g., `AgentGovBudgetManager`)
 - **Methods:** camelCase (e.g., `calculateRiskScore`)
 - **Variables:** camelCase (e.g., `registrationList`)
 - **Constants:** UPPER_SNAKE_CASE (e.g., `MAX_RETRY_COUNT`)
-- **Test classes:** Suffix with `Test` (e.g., `AgentGovernanceServiceTest`)
-- **Custom objects:** PascalCase with `__c` suffix (e.g., `Agent_Registration__c`)
+- **Test classes:** Suffix with `Test` (e.g., `AgentGovBudgetManagerTest`)
+- **Custom objects:** `AgentGov_` prefix with `__c` suffix (e.g., `AgentGov_Registration__c`)
 - **Custom fields:** PascalCase with `__c` suffix (e.g., `Risk_Score__c`)
 
 ### Code Practices
@@ -126,30 +126,40 @@ Follow standard Apex conventions to keep the codebase consistent and readable.
 - **Use meaningful variable and method names.** Avoid abbreviations.
 - **Add comments** for complex logic, but prefer self-documenting code.
 - **Keep methods short and focused.** Each method should do one thing.
-- **Use `with sharing`** by default. Only use `without sharing` when explicitly required and documented.
-- **Handle exceptions gracefully.** Log errors using a consistent pattern.
+- **State the security posture of every class.** Framework bookkeeping reads through `AgentGovSelector` and writes through `AgentGovDml` (system mode); anything on an agent's behalf runs in user mode; service classes are `inherited sharing` and never issue SOQL or DML directly. See `CLAUDE.md` for the full rules.
+- **Never execute anything a caller sends.** Queries are compiled from structured input with bound values.
+- **Deny loudly.** Errors are `AgentGovException` with an `ErrorCode`; REST callers never see exception text. Framework-level failures become `System` rows in the action log; there is no `System.debug` in production paths.
+- **Document intent.** ApexDoc on every class and public method in the existing `@description` / `@param` / `@return` style; inline comments only where the reason is not obvious.
 - **Avoid global access modifiers** unless building a managed package API.
 
 ### LWC Conventions
 
 - Use camelCase for component names and properties.
 - Keep components small and composable.
-- Use `@wire` for data access where possible.
+- Use `@wire` with `refreshApex` for cacheable Apex, `lwc:if` for conditionals, and the shared `c/agentGovUtils` module for errors, subscriptions, and formatting.
+- Style with SLDS 2 global styling hooks and SLDS 1 fallbacks; never hardcode colors.
+- Keep progress bars and alerts accessible (`role`, `aria-*`, `alternative-text`).
 - Include JSDoc comments for public API properties and methods.
 
 ## Test Requirements
 
-- **Minimum 90% code coverage** for all Apex classes. Aim for 95%+.
+- **Org-wide Apex coverage of 85% or higher** (CI enforces it) and no class below that; Jest thresholds are enforced by `npm run test:unit:coverage`.
+- **Use the `Assert` class** (`Assert.areEqual`, `Assert.isTrue`, `Assert.fail`), never `System.assert*`.
 - **Every PR must include tests** that cover the new or modified functionality.
 - **Test both positive and negative scenarios**, including bulk operations (200+ records).
 - **Use `@TestSetup`** methods to create reusable test data.
 - **Do not use `SeeAllData=true`** unless absolutely necessary and justified.
 - **Assert meaningful outcomes**, not just the absence of exceptions.
 - **Test trigger handlers** with single and bulk record operations.
-- Run `sf apex run test -l RunLocalTests` and confirm all tests pass before submitting.
+- **Prove security behavior with a restricted user**: `AgentGovTestDataFactory.createRestrictedUser(...)` under `System.runAs`.
+- Run `npm run lint`, `npm run prettier:verify`, `npm run test:unit:coverage`, and `sf apex run test -l RunLocalTests --code-coverage` before submitting.
 
 ## Questions?
 
 If you have questions about contributing, feel free to open a discussion or reach out by opening an issue with the `question` label.
 
 Thank you for helping make AgentGov better!
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md). By taking part you agree to uphold it.

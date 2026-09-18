@@ -1,100 +1,151 @@
 /**
- * @description Detects and resolves conflicts when multiple AI agents attempt
- *              to modify the same record simultaneously. Uses priority-based resolution.
- * @author Himanshu Palerwal
+ * @description Detects and resolves contention when more than one agent works on the same
+ *              record within a transaction, using agent priority (lower number wins).
+ *
+ *              The lock table is held in memory for the current transaction, so this class
+ *              catches agents that collide inside one request (for example a Flow that fans
+ *              out to several agents). Detection across transactions is on the roadmap and
+ *              will be built on Platform Cache.
+ *
+ *              Security posture: inherited sharing. Conflict logs are written through
+ *              AgentGovDml in system mode.
  */
-public with sharing class AgentGovConflictResolver {
-
-    // In-memory lock table for the current transaction
+public inherited sharing class AgentGovConflictResolver {
     private static Map<String, Id> recordLocks = new Map<String, Id>();
 
-    /**
-     * @description Result of a conflict check.
-     */
+    /** @description Result of a conflict check. */
     public class ConflictResult {
-        @AuraEnabled public Boolean hasConflict;
-        @AuraEnabled public String resolution;
-        @AuraEnabled public Id winningAgentId;
-        @AuraEnabled public String message;
+        @AuraEnabled
+        public Boolean hasConflict;
+        @AuraEnabled
+        public String resolution;
+        @AuraEnabled
+        public Id winningAgentId;
+        @AuraEnabled
+        public String message;
     }
 
     /**
-     * @description Checks if a record is locked by another agent and resolves based on priority.
+     * @description Checks whether another agent holds the record and resolves by priority.
      * @param agentId The agent attempting the action
      * @param recordId The record being acted upon
-     * @param objectName The API name of the object
-     * @return ConflictResult with resolution details
+     * @param objectName The object API name
+     * @return The resolution; winningAgentId identifies who may proceed when there is a conflict
      */
     public static ConflictResult checkForConflict(Id agentId, String recordId, String objectName) {
-        AgentGov_Settings__c settings = AgentGovSelector.getSettings();
-        if (settings.Enable_Conflict_Detection__c == false) {
-            ConflictResult result = new ConflictResult();
-            result.hasConflict = false;
+        ConflictResult result = new ConflictResult();
+        result.hasConflict = false;
+        if (AgentGovSelector.getSettings().Enable_Conflict_Detection__c == false) {
             result.message = 'Conflict detection is disabled.';
             return result;
         }
 
         String lockKey = objectName + ':' + recordId;
-        ConflictResult result = new ConflictResult();
-
         if (!recordLocks.containsKey(lockKey)) {
-            // No conflict — lock it for this agent
-            result.hasConflict = false;
             recordLocks.put(lockKey, agentId);
             return result;
         }
-
         Id lockHolderId = recordLocks.get(lockKey);
         if (lockHolderId == agentId) {
-            // Same agent — no conflict
-            result.hasConflict = false;
             return result;
         }
 
-        // Conflict detected — resolve by priority
         result.hasConflict = true;
         AgentGov_Registration__c currentAgent = AgentGovSelector.getRegistrationById(agentId);
         AgentGov_Registration__c lockHolder = AgentGovSelector.getRegistrationById(lockHolderId);
-
         if (currentAgent == null || lockHolder == null) {
             result.resolution = AgentGovConstants.RESOLUTION_FAILED;
             result.message = AgentGovConstants.ERR_AGENT_NOT_FOUND;
-            logConflict(agentId, lockHolderId, recordId, objectName,
-                AgentGovConstants.CONFLICT_LOCK_CONTENTION, AgentGovConstants.RESOLUTION_FAILED, AgentGovConstants.SEVERITY_HIGH);
+            // A lookup cannot point at a registration that does not exist, so the unknown
+            // side is recorded in the details instead of the lookup field.
+            logConflict(
+                currentAgent == null ? null : agentId,
+                lockHolder == null ? null : lockHolderId,
+                recordId,
+                objectName,
+                AgentGovConstants.CONFLICT_LOCK_CONTENTION,
+                AgentGovConstants.RESOLUTION_FAILED,
+                AgentGovConstants.SEVERITY_HIGH,
+                'Unknown agent Id: ' + (currentAgent == null ? agentId : lockHolderId)
+            );
             return result;
         }
 
-        Decimal currentPriority = currentAgent.Priority__c != null ? currentAgent.Priority__c : AgentGovConstants.DEFAULT_AGENT_PRIORITY;
-        Decimal holderPriority = lockHolder.Priority__c != null ? lockHolder.Priority__c : AgentGovConstants.DEFAULT_AGENT_PRIORITY;
+        Decimal currentPriority = currentAgent.Priority__c != null
+            ? currentAgent.Priority__c
+            : AgentGovConstants.DEFAULT_AGENT_PRIORITY;
+        Decimal holderPriority = lockHolder.Priority__c != null
+            ? lockHolder.Priority__c
+            : AgentGovConstants.DEFAULT_AGENT_PRIORITY;
 
-        // Lower number = higher priority
         if (currentPriority < holderPriority) {
-            // Current agent wins — override the lock
             recordLocks.put(lockKey, agentId);
             result.winningAgentId = agentId;
             result.resolution = AgentGovConstants.RESOLUTION_AGENT1_WON;
-            result.message = 'Agent ' + currentAgent.Agent_Name__c + ' (priority ' + currentPriority + ') overrides '
-                + lockHolder.Agent_Name__c + ' (priority ' + holderPriority + ').';
-            logConflict(agentId, lockHolderId, recordId, objectName,
-                AgentGovConstants.CONFLICT_PRIORITY_OVERRIDE, AgentGovConstants.RESOLUTION_AGENT1_WON, AgentGovConstants.SEVERITY_MEDIUM);
+            result.message =
+                'Agent ' +
+                currentAgent.Agent_Name__c +
+                ' (priority ' +
+                currentPriority +
+                ') overrides ' +
+                lockHolder.Agent_Name__c +
+                ' (priority ' +
+                holderPriority +
+                ').';
+            logConflict(
+                agentId,
+                lockHolderId,
+                recordId,
+                objectName,
+                AgentGovConstants.CONFLICT_PRIORITY_OVERRIDE,
+                AgentGovConstants.RESOLUTION_AGENT1_WON,
+                AgentGovConstants.SEVERITY_MEDIUM,
+                result.message
+            );
         } else {
-            // Lock holder wins — current agent is queued
             result.winningAgentId = lockHolderId;
             result.resolution = AgentGovConstants.RESOLUTION_AGENT2_WON;
-            result.message = 'Record locked by ' + lockHolder.Agent_Name__c + ' (priority ' + holderPriority
-                + '). Agent ' + currentAgent.Agent_Name__c + ' queued.';
-            logConflict(agentId, lockHolderId, recordId, objectName,
-                AgentGovConstants.CONFLICT_CONCURRENT_WRITE, AgentGovConstants.RESOLUTION_AGENT2_WON, AgentGovConstants.SEVERITY_MEDIUM);
+            result.message =
+                'Record locked by ' +
+                lockHolder.Agent_Name__c +
+                ' (priority ' +
+                holderPriority +
+                '). Agent ' +
+                currentAgent.Agent_Name__c +
+                ' queued.';
+            logConflict(
+                agentId,
+                lockHolderId,
+                recordId,
+                objectName,
+                AgentGovConstants.CONFLICT_CONCURRENT_WRITE,
+                AgentGovConstants.RESOLUTION_AGENT2_WON,
+                AgentGovConstants.SEVERITY_MEDIUM,
+                result.message
+            );
         }
-
         return result;
     }
 
     /**
-     * @description Releases a record lock held by an agent.
+     * @description Checks for a conflict and throws when another agent wins the record.
+     * @param agentId The agent attempting the action
+     * @param recordId The record being acted upon
+     * @param objectName The object API name
+     * @throws AgentGovException RECORD_LOCKED when a higher-priority agent holds the record
+     */
+    public static void assertNoConflict(Id agentId, String recordId, String objectName) {
+        ConflictResult result = checkForConflict(agentId, recordId, objectName);
+        if (result.hasConflict && result.winningAgentId != agentId) {
+            throw new AgentGovException(AgentGovException.ErrorCode.RECORD_LOCKED, result.message);
+        }
+    }
+
+    /**
+     * @description Releases a lock held by an agent.
      * @param agentId The agent releasing the lock
      * @param recordId The record to unlock
-     * @param objectName The API name of the object
+     * @param objectName The object API name
      */
     public static void releaseRecord(Id agentId, String recordId, String objectName) {
         String lockKey = objectName + ':' + recordId;
@@ -104,48 +155,52 @@ public with sharing class AgentGovConflictResolver {
     }
 
     /**
-     * @description Checks if a record is currently locked.
+     * @description Checks whether a record is locked in this transaction.
      * @param recordId The record to check
-     * @param objectName The API name of the object
-     * @return True if the record is locked
+     * @param objectName The object API name
+     * @return True when locked
      */
     public static Boolean isRecordLocked(String recordId, String objectName) {
         return recordLocks.containsKey(objectName + ':' + recordId);
     }
 
     /**
-     * @description Gets the agent ID that holds the lock on a record.
+     * @description Returns the agent holding a record's lock.
      * @param recordId The record to check
-     * @param objectName The API name of the object
-     * @return The agent registration ID holding the lock, or null
+     * @param objectName The object API name
+     * @return The lock holder's registration Id, or null
      */
     public static Id getLockHolder(String recordId, String objectName) {
         return recordLocks.get(objectName + ':' + recordId);
     }
 
-    /**
-     * @description Clears all in-memory locks. For testing only.
-     */
+    /** @description Clears all in-memory locks. For tests only. */
     @TestVisible
     private static void clearAllLocks() {
         recordLocks.clear();
     }
 
-    private static void logConflict(Id agent1Id, Id agent2Id, String recordId, String objectName, String conflictType, String resolution, String severity) {
-        try {
-            AgentGov_Conflict_Log__c log = new AgentGov_Conflict_Log__c(
-                Agent_1__c = agent1Id,
-                Agent_2__c = agent2Id,
-                Record_Id__c = recordId,
-                Object_Name__c = objectName,
-                Conflict_Type__c = conflictType,
-                Resolution__c = resolution,
-                Severity__c = severity,
-                Timestamp__c = DateTime.now()
-            );
-            insert log;
-        } catch (Exception e) {
-            System.debug(LoggingLevel.ERROR, 'AgentGov: Failed to log conflict: ' + e.getMessage());
-        }
+    private static void logConflict(
+        Id agent1Id,
+        Id agent2Id,
+        String recordId,
+        String objectName,
+        String conflictType,
+        String resolution,
+        String severity,
+        String details
+    ) {
+        AgentGov_Conflict_Log__c entry = new AgentGov_Conflict_Log__c(
+            Agent_1__c = agent1Id,
+            Agent_2__c = agent2Id,
+            Record_Id__c = recordId,
+            Object_Name__c = objectName,
+            Conflict_Type__c = conflictType,
+            Resolution__c = resolution,
+            Severity__c = severity,
+            Timestamp__c = DateTime.now(),
+            Details__c = details
+        );
+        AgentGovDml.assertAllSucceeded(AgentGovDml.insertRecords(new List<SObject>{ entry }, false), 'Conflict log');
     }
 }

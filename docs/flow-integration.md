@@ -1,6 +1,8 @@
 # Flow Integration Guide
 
-AgentGov provides four invocable actions that can be used directly in Salesforce Flow Builder. This guide explains how to use each one and provides common patterns.
+AgentGov provides five invocable actions that can be used directly in Salesforce Flow Builder. This guide explains how to use each one and provides common patterns.
+
+All five actions are bulk-safe: a Flow that submits 200 requests in one batch causes a fixed handful of queries and DML statements, not one set per request.
 
 ---
 
@@ -8,13 +10,13 @@ AgentGov provides four invocable actions that can be used directly in Salesforce
 
 All actions appear in Flow Builder under the **AgentGov** category when you add an Action element.
 
-| Action Label | Apex Class | Description |
-|-------------|-----------|-------------|
-| **Register Agent Action** | `AgentGovRegisterAction` | All-in-one: checks policy, consumes budget, logs action |
-| **Check Agent Budget** | `AgentGovCheckBudget` | Read-only budget status check |
-| **Get Agent Status** | `AgentGovGetStatus` | Health and circuit breaker state |
-| **Log Agent Action** | `AgentGovLogAction` | Records an action for audit logging |
-| **Report Agent Usage** | `AgentGovReportUsage` | Reports actual resource consumption for accurate budget tracking |
+| Action Label              | Apex Class               | Description                                                      |
+| ------------------------- | ------------------------ | ---------------------------------------------------------------- |
+| **Register Agent Action** | `AgentGovRegisterAction` | All-in-one: checks policy, consumes budget, logs action          |
+| **Check Agent Budget**    | `AgentGovCheckBudget`    | Read-only budget status check                                    |
+| **Get Agent Status**      | `AgentGovGetStatus`      | Health and circuit breaker state                                 |
+| **Log Agent Action**      | `AgentGovLogAction`      | Records an action for audit logging                              |
+| **Report Agent Usage**    | `AgentGovReportUsage`    | Reports actual resource consumption for accurate budget tracking |
 
 ---
 
@@ -31,20 +33,22 @@ This is the most commonly used action. It runs the full governance pipeline in a
 
 ### Input Variables
 
-| Variable | Type | Required | Description |
-|----------|------|----------|-------------|
-| Agent Registration ID | Id | Yes | The agent's registration record ID |
-| Action Type | Text | Yes | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger` |
-| Object Name | Text | Yes | Salesforce object API name (e.g., `Lead`, `Case`) |
-| Record ID | Text | No | The specific record being acted upon |
+| Variable              | Type | Required | Description                                                                    |
+| --------------------- | ---- | -------- | ------------------------------------------------------------------------------ |
+| Agent Registration ID | Id   | Yes      | The agent's registration record ID                                             |
+| Action Type           | Text | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger` |
+| Object Name           | Text | Yes      | Salesforce object API name (e.g., `Lead`, `Case`)                              |
+| Record ID             | Text | No       | The specific record being acted upon                                           |
 
 ### Output Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| Authorized | Boolean | `true` if the action is allowed |
-| Budget Status | Text | `Normal`, `Warning`, `Throttled`, or `Framework disabled - bypassed` |
-| Denial Reason | Text | Reason for denial (empty if authorized) |
+| Variable      | Type    | Description                                     |
+| ------------- | ------- | ----------------------------------------------- |
+| Authorized    | Boolean | `true` if the action is allowed                 |
+| Budget Status | Text    | `Normal`, `Warning`, `Throttled`, or `Bypassed` |
+| Denial Reason | Text    | Reason for denial (empty if authorized)         |
+
+When several requests in one batch belong to the same agent and their combined consumption would exceed its budget, every request for that agent is denied, so the outcome does not depend on the order of the batch.
 
 ### Example: Record-Triggered Flow with Governance
 
@@ -52,7 +56,7 @@ This is the most commonly used action. It runs the full governance pipeline in a
 
 1. **Trigger:** Record-Triggered Flow on Case (After Create)
 2. **Action:** Register Agent Action
-   - Agent Registration ID: `{!$CustomMetadata.AgentGov_Config.Case_Router_Agent_Id}`
+   - Agent Registration ID: `{!$Label.AgentGov_Case_Router_Agent_Id}` (store the Id in a Custom Label or Custom Setting so it is not hardcoded in the Flow)
    - Action Type: `Update`
    - Object Name: `Case`
    - Record ID: `{!$Record.Id}`
@@ -68,20 +72,20 @@ A read-only check that does not consume budget. Use this when you need to know b
 
 ### Input Variables
 
-| Variable | Type | Required | Description |
-|----------|------|----------|-------------|
-| Agent Registration ID | Id | Yes | The agent's registration record ID |
+| Variable              | Type | Required | Description                        |
+| --------------------- | ---- | -------- | ---------------------------------- |
+| Agent Registration ID | Id   | Yes      | The agent's registration record ID |
 
 ### Output Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| Has Budget | Boolean | `true` if the agent has budget remaining |
-| Budget Status | Text | `Normal`, `Warning`, `Throttled`, `Blocked`, or `Exhausted` |
-| API Calls Remaining | Number | Remaining daily API call budget |
-| SOQL Queries Remaining | Number | Remaining daily SOQL query budget |
-| DML Operations Remaining | Number | Remaining daily DML operation budget |
-| Error Message | Text | Error details if the check failed |
+| Variable                 | Type    | Description                                                 |
+| ------------------------ | ------- | ----------------------------------------------------------- |
+| Has Budget               | Boolean | `true` if the agent has budget remaining                    |
+| Budget Status            | Text    | `Normal`, `Warning`, `Throttled`, `Blocked`, or `Exhausted` |
+| API Calls Remaining      | Number  | Remaining daily API call budget                             |
+| SOQL Queries Remaining   | Number  | Remaining daily SOQL query budget                           |
+| DML Operations Remaining | Number  | Remaining daily DML operation budget                        |
+| Error Message            | Text    | Error details if the check failed                           |
 
 ### Example: Pre-Check Before Batch Processing
 
@@ -102,20 +106,20 @@ Retrieves the health status of an agent, including circuit breaker state. Use th
 
 ### Input Variables
 
-| Variable | Type | Required | Description |
-|----------|------|----------|-------------|
-| Agent Registration ID | Id | Yes | The agent's registration record ID |
+| Variable              | Type | Required | Description                        |
+| --------------------- | ---- | -------- | ---------------------------------- |
+| Agent Registration ID | Id   | Yes      | The agent's registration record ID |
 
 ### Output Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| Agent Name | Text | The agent's display name |
-| Agent Status | Text | `Active`, `Inactive`, `Throttled`, or `Blocked` |
-| Circuit Breaker State | Text | `CLOSED`, `OPEN`, or `HALF_OPEN` |
-| Is Healthy | Boolean | `true` if Status = Active AND Circuit Breaker = CLOSED |
-| Failure Count | Number | Current consecutive failure count |
-| Error Message | Text | Error details if the check failed |
+| Variable              | Type    | Description                                            |
+| --------------------- | ------- | ------------------------------------------------------ |
+| Agent Name            | Text    | The agent's display name                               |
+| Agent Status          | Text    | `Active`, `Inactive`, `Throttled`, or `Blocked`        |
+| Circuit Breaker State | Text    | `CLOSED`, `OPEN`, or `HALF_OPEN`                       |
+| Is Healthy            | Boolean | `true` if Status = Active AND Circuit Breaker = CLOSED |
+| Failure Count         | Number  | Current consecutive failure count                      |
+| Error Message         | Text    | Error details if the check failed                      |
 
 ### Example: Agent Health Gate
 
@@ -135,21 +139,21 @@ Records an agent action for audit purposes without running governance checks. Us
 
 ### Input Variables
 
-| Variable | Type | Required | Description |
-|----------|------|----------|-------------|
-| Agent Registration ID | Id | Yes | The agent's registration record ID |
-| Action Type | Text | Yes | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger` |
-| Object Name | Text | No | Salesforce object API name |
-| Record ID | Text | No | The specific record acted upon |
-| Status | Text | Yes | `Success`, `Failure`, `Denied`, or `Throttled` |
-| Details | Text | No | Additional context or error details |
+| Variable              | Type | Required | Description                                                                    |
+| --------------------- | ---- | -------- | ------------------------------------------------------------------------------ |
+| Agent Registration ID | Id   | Yes      | The agent's registration record ID                                             |
+| Action Type           | Text | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger` |
+| Object Name           | Text | No       | Salesforce object API name                                                     |
+| Record ID             | Text | No       | The specific record acted upon                                                 |
+| Status                | Text | Yes      | `Success`, `Failure`, `Denied`, or `Throttled`                                 |
+| Details               | Text | No       | Additional context or error details                                            |
 
 ### Output Variables
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| Success | Boolean | `true` if the action was logged successfully |
-| Error Message | Text | Error details if logging failed |
+| Variable      | Type    | Description                                  |
+| ------------- | ------- | -------------------------------------------- |
+| Success       | Boolean | `true` if the action was logged successfully |
+| Error Message | Text    | Error details if logging failed              |
 
 ---
 
@@ -206,24 +210,39 @@ Input:
 
 Output:
   - Budget Status → {!varBudgetStatus}          (Text)
+  - Budget Allowed → {!varBudgetAllowed}        (Boolean, false when the report leaves the budget Blocked or Exhausted)
   - API Calls Remaining → {!varApiRemaining}    (Number)
   - SOQL Queries Remaining → {!varSoqlRemaining} (Number)
   - DML Operations Remaining → {!varDmlRemaining} (Number)
+  - Error Message → {!varErrorMessage}          (Text, set when the agent is unknown or the budget is exceeded)
 ```
 
+Usage reported for the same agent by several requests in one batch is summed and charged once.
+
 **Pattern: Post-Operation Reporting**
+
 ```
 1. Register Agent Action (pre-authorize with budget=1)
 2. Flow performs actual operations (creates 10 records, queries 5 times)
 3. Report Agent Usage (reports actual: dmlStatementsUsed=10, soqlQueriesUsed=5)
-4. Budget reconciled to reflect true consumption
+4. The reported usage is charged ON TOP of anything already charged in step 1
 ```
+
+> **Report Agent Usage is additive, not a reconciliation.** Unlike the REST `/report`
+> endpoint, which accepts a `preAuthorized` figure and charges only the excess, this action
+> has no pre-authorization input: every unit it reports is added to the agent's consumption.
+> The sequence above therefore charges 1 DML at step 1 and a further 10 at step 3, for 11
+> against 10 records of real work.
+>
+> If you want the reported figures to be the whole charge, skip the pre-authorization: call
+> **Check Agent Budget** to confirm headroom, do the work, then report the actual usage.
 
 ---
 
 ## Tips
 
-- Store agent registration IDs in Custom Metadata, Custom Labels, or Custom Settings for easy maintenance.
+- Store agent registration IDs in Custom Labels or Custom Settings for easy maintenance.
+- Prefer running Flow-based agents as a dedicated user bound to the registration (`Agent_User__c`); the framework records its bookkeeping in system mode, so that user needs only the `AgentGov_Agent` permission set for REST calls and no access to AgentGov objects for Flow actions.
 - Use the `Register Agent Action` for most cases -- it handles the full governance pipeline in one call.
 - Use `Check Agent Budget` separately only when you need to make decisions based on remaining budget amounts.
 - The `Error Message` output variable captures exception details -- always display or log it when an action fails.

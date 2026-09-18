@@ -1,43 +1,48 @@
+/**
+ * @description Tests for the Get Agent Status invocable.
+ */
 @IsTest
 private class AgentGovGetStatusTest {
-
     @TestSetup
     static void setup() {
         AgentGovTestDataFactory.createSettings();
     }
 
-    @IsTest
-    static void testGetStatusInvocable() {
-        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Status Agent', 'Agentforce', true);
-
+    private static AgentGovGetStatus.Request request(Id registrationId) {
         AgentGovGetStatus.Request req = new AgentGovGetStatus.Request();
-        req.registrationId = reg.Id;
-
-        Test.startTest();
-        List<AgentGovGetStatus.Result> results = AgentGovGetStatus.getStatus(
-            new List<AgentGovGetStatus.Request>{ req }
-        );
-        Test.stopTest();
-
-        System.assertEquals(1, results.size());
-        System.assertEquals('Status Agent', results[0].agentName);
-        System.assertEquals('Active', results[0].agentStatus);
-        System.assertEquals('CLOSED', results[0].circuitBreakerState);
-        System.assertEquals(true, results[0].isHealthy);
+        req.registrationId = registrationId;
+        return req;
     }
 
     @IsTest
-    static void testGetStatusNotFound() {
-        AgentGovGetStatus.Request req = new AgentGovGetStatus.Request();
-        req.registrationId = 'a00000000000001AAA';
-
-        Test.startTest();
-        List<AgentGovGetStatus.Result> results = AgentGovGetStatus.getStatus(
-            new List<AgentGovGetStatus.Request>{ req }
+    static void reportsHealthAndUnknownAgents() {
+        AgentGov_Registration__c healthy = AgentGovTestDataFactory.createRegistration(
+            'Status Agent',
+            'Agentforce',
+            true
         );
-        Test.stopTest();
+        AgentGov_Registration__c tripped = AgentGovTestDataFactory.createRegistration(
+            'Tripped Agent',
+            'Agentforce',
+            false
+        );
+        tripped.Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN;
+        tripped.Status__c = AgentGovConstants.STATUS_BLOCKED;
+        tripped.Failure_Count__c = 5;
+        insert tripped;
+        Id unknownId = AgentGov_Registration__c.SObjectType.getDescribe().getKeyPrefix() + '000000000001AAA';
 
-        System.assertEquals(false, results[0].isHealthy);
-        System.assertNotEquals(null, results[0].errorMessage);
+        List<AgentGovGetStatus.Result> results = AgentGovGetStatus.getStatus(
+            new List<AgentGovGetStatus.Request>{ request(healthy.Id), request(tripped.Id), request(unknownId) }
+        );
+
+        Assert.areEqual('Status Agent', results[0].agentName);
+        Assert.areEqual(AgentGovConstants.STATUS_ACTIVE, results[0].agentStatus);
+        Assert.areEqual(AgentGovConstants.CB_CLOSED, results[0].circuitBreakerState);
+        Assert.isTrue(results[0].isHealthy);
+        Assert.isFalse(results[1].isHealthy);
+        Assert.areEqual(5, results[1].failureCount);
+        Assert.isFalse(results[2].isHealthy);
+        Assert.areEqual(AgentGovConstants.ERR_AGENT_NOT_FOUND, results[2].errorMessage);
     }
 }

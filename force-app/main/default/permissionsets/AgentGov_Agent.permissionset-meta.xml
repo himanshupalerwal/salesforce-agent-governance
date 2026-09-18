@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>For the user an AI agent runs as (Agentforce Agent User or integration user). Grants the AgentGov REST endpoints only; bookkeeping runs in system mode, so no AgentGov object access is needed.</description>
+    <hasActivationRequired>false</hasActivationRequired>
+    <label>AgentGov Agent</label>
+    <classAccesses>
+        <apexClass>AgentGovRestApi</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
+        <apexClass>AgentGovProxyApi</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+</PermissionSet>
