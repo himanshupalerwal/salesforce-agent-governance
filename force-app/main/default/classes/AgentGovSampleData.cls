@@ -1,198 +1,368 @@
 /**
- * @description Creates sample data for the AgentGov framework.
- *              Run after installation to populate the dashboard with demo data.
- *              Execute: AgentGovSampleData.createAll();
- * @author Himanshu Palerwal
+ * @description Creates demonstration data so the dashboard has something to show right
+ *              after installation. Run from anonymous Apex: AgentGovSampleData.createAll();
+ *              The sample agents receive fixed API keys (listed in docs/getting-started.md)
+ *              which are stored hashed, exactly as real keys are.
+ *
+ *              Security posture: with sharing. Intended to be run by an administrator from
+ *              anonymous Apex, so plain DML in the running user's context is appropriate.
  */
 public with sharing class AgentGovSampleData {
+    /**
+     * @description Rows removed per object in one run. Five objects are purged per run, so
+     *              this is sized so that five full batches stay inside the 10,000-row DML
+     *              limit for a single transaction.
+     */
+    private static final Integer DELETE_BATCH_SIZE = 1500;
 
-    public static void createAll() {
-        // Create settings if not exist
+    /** @description Fixed keys for the sample agents, in the order the agents are created. */
+    public static final List<String> SAMPLE_API_KEYS = new List<String>{
+        'agk_sample_lead_enrichment_001',
+        'agk_sample_case_routing_002',
+        'agk_sample_data_sync_003',
+        'agk_sample_opp_scoring_004',
+        'agk_sample_email_campaign_005'
+    };
+
+    /**
+     * @description Creates settings, five agents, today's budgets, sessions, action logs, and conflicts.
+     * @return A one-line summary of what was created
+     */
+    public static String createAll() {
+        // The sample keys are fixed and API_Key_Hash__c is unique, so a second run would fail
+        // with a raw DUPLICATE_VALUE. Say so plainly instead, and point at the cleanup.
+        Set<String> sampleHashes = new Set<String>();
+        for (String sampleKey : SAMPLE_API_KEYS) {
+            sampleHashes.add(AgentGovRestAuth.hashKey(sampleKey));
+        }
+        if ([SELECT COUNT() FROM AgentGov_Registration__c WHERE API_Key_Hash__c IN :sampleHashes] > 0) {
+            return 'AgentGov: sample data is already loaded. Run AgentGovSampleData.deleteSampleData() first to reload it.';
+        }
+
         AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
         if (settings == null || settings.Id == null) {
             settings = new AgentGov_Settings__c(
                 Is_Enabled__c = true,
-                Default_Agent_Priority__c = 5,
-                Circuit_Breaker_Failure_Threshold__c = 5,
-                Circuit_Breaker_Cooldown_Minutes__c = 30,
-                Log_Retention_Days__c = 90,
+                Default_Agent_Priority__c = AgentGovConstants.DEFAULT_AGENT_PRIORITY,
+                Circuit_Breaker_Failure_Threshold__c = AgentGovConstants.DEFAULT_CB_FAILURE_THRESHOLD,
+                Circuit_Breaker_Cooldown_Minutes__c = AgentGovConstants.DEFAULT_CB_COOLDOWN_MINUTES,
+                Log_Retention_Days__c = AgentGovConstants.DEFAULT_LOG_RETENTION_DAYS,
                 Enable_Conflict_Detection__c = true,
                 Enable_Real_Time_Events__c = true,
-                Max_Concurrent_Agents__c = 10
+                Max_Concurrent_Agents__c = AgentGovConstants.DEFAULT_MAX_CONCURRENT_AGENTS
             );
             upsert settings;
         }
 
-        // Create sample agent registrations
         List<AgentGov_Registration__c> agents = new List<AgentGov_Registration__c>{
-            new AgentGov_Registration__c(
-                Agent_Name__c = 'Lead Enrichment Agent',
-                Agent_Type__c = 'Agentforce',
-                Status__c = 'Active',
-                Priority__c = 2,
-                Daily_API_Budget__c = 10000,
-                Daily_SOQL_Budget__c = 5000,
-                Daily_DML_Budget__c = 3000,
-                Circuit_Breaker_State__c = 'CLOSED',
-                Failure_Count__c = 0,
-                Owner_Email__c = 'admin@example.com',
-                Description__c = 'Enriches incoming leads with firmographic data from external APIs.',
-                API_Key__c = 'agentgov-lead-enrichment-001'
+            agent(
+                'Lead Enrichment Agent',
+                AgentGovConstants.AGENT_TYPE_AGENTFORCE,
+                AgentGovConstants.STATUS_ACTIVE,
+                2,
+                10000,
+                5000,
+                3000,
+                'Enriches incoming leads with firmographic data from external APIs.'
             ),
-            new AgentGov_Registration__c(
-                Agent_Name__c = 'Case Routing Agent',
-                Agent_Type__c = 'Agentforce',
-                Status__c = 'Active',
-                Priority__c = 1,
-                Daily_API_Budget__c = 5000,
-                Daily_SOQL_Budget__c = 8000,
-                Daily_DML_Budget__c = 4000,
-                Circuit_Breaker_State__c = 'CLOSED',
-                Failure_Count__c = 0,
-                Owner_Email__c = 'admin@example.com',
-                Description__c = 'Routes incoming cases to the appropriate support queue based on AI analysis.',
-                API_Key__c = 'agentgov-case-routing-002'
+            agent(
+                'Case Routing Agent',
+                AgentGovConstants.AGENT_TYPE_AGENTFORCE,
+                AgentGovConstants.STATUS_ACTIVE,
+                1,
+                5000,
+                8000,
+                4000,
+                'Routes incoming cases to the appropriate support queue based on AI analysis.'
             ),
-            new AgentGov_Registration__c(
-                Agent_Name__c = 'Data Sync MCP Agent',
-                Agent_Type__c = 'MCP_External',
-                Status__c = 'Active',
-                Priority__c = 3,
-                Daily_API_Budget__c = 15000,
-                Daily_SOQL_Budget__c = 3000,
-                Daily_DML_Budget__c = 5000,
-                Circuit_Breaker_State__c = 'CLOSED',
-                Failure_Count__c = 0,
-                Owner_Email__c = 'integrations@example.com',
-                Description__c = 'External MCP server that synchronizes data between Salesforce and the data warehouse.',
-                API_Key__c = 'agentgov-data-sync-003'
+            agent(
+                'Data Sync MCP Agent',
+                AgentGovConstants.AGENT_TYPE_MCP_EXTERNAL,
+                AgentGovConstants.STATUS_ACTIVE,
+                3,
+                15000,
+                3000,
+                5000,
+                'External MCP server that synchronizes data between Salesforce and the data warehouse.'
             ),
-            new AgentGov_Registration__c(
-                Agent_Name__c = 'Opportunity Scoring Agent',
-                Agent_Type__c = 'Custom_Apex',
-                Status__c = 'Throttled',
-                Priority__c = 4,
-                Daily_API_Budget__c = 8000,
-                Daily_SOQL_Budget__c = 6000,
-                Daily_DML_Budget__c = 2000,
-                Circuit_Breaker_State__c = 'HALF_OPEN',
-                Failure_Count__c = 3,
-                Last_Failure__c = DateTime.now().addHours(-1),
-                Cooldown_Until__c = DateTime.now().addMinutes(15),
-                Owner_Email__c = 'datascience@example.com',
-                Description__c = 'Scores opportunities based on historical win/loss patterns and engagement data.',
-                API_Key__c = 'agentgov-opp-scoring-004'
+            agent(
+                'Opportunity Scoring Agent',
+                AgentGovConstants.AGENT_TYPE_CUSTOM_APEX,
+                AgentGovConstants.STATUS_THROTTLED,
+                4,
+                8000,
+                6000,
+                2000,
+                'Scores opportunities based on historical win/loss patterns and engagement data.'
             ),
-            new AgentGov_Registration__c(
-                Agent_Name__c = 'Email Campaign Agent',
-                Agent_Type__c = 'Flow_Based',
-                Status__c = 'Active',
-                Priority__c = 5,
-                Daily_API_Budget__c = 20000,
-                Daily_SOQL_Budget__c = 2000,
-                Daily_DML_Budget__c = 1000,
-                Circuit_Breaker_State__c = 'CLOSED',
-                Failure_Count__c = 0,
-                Owner_Email__c = 'marketing@example.com',
-                Description__c = 'Flow-based agent that manages email campaign sends and tracks engagement.',
-                API_Key__c = 'agentgov-email-campaign-005'
+            agent(
+                'Email Campaign Agent',
+                AgentGovConstants.AGENT_TYPE_FLOW_BASED,
+                AgentGovConstants.STATUS_ACTIVE,
+                5,
+                20000,
+                2000,
+                1000,
+                'Flow-based agent that manages email campaign sends and tracks engagement.'
             )
         };
+        agents[3].Circuit_Breaker_State__c = AgentGovConstants.CB_HALF_OPEN;
+        agents[3].Failure_Count__c = 3;
+        agents[3].Last_Failure__c = DateTime.now().addHours(-1);
+        agents[3].Cooldown_Until__c = DateTime.now().addMinutes(15);
+        for (Integer i = 0; i < agents.size(); i++) {
+            AgentGovRestAuth.applyKey(agents[i], SAMPLE_API_KEYS[i]);
+        }
         insert agents;
 
-        // Create today's budgets with varying consumption
         Date today = Date.today();
         List<AgentGov_Budget__c> budgets = new List<AgentGov_Budget__c>{
-            new AgentGov_Budget__c(Agent_Registration__c = agents[0].Id, Budget_Date__c = today, API_Calls_Allocated__c = 10000, API_Calls_Consumed__c = 4200, SOQL_Queries_Allocated__c = 5000, SOQL_Queries_Consumed__c = 2100, DML_Operations_Allocated__c = 3000, DML_Operations_Consumed__c = 1350, Budget_Status__c = 'Normal'),
-            new AgentGov_Budget__c(Agent_Registration__c = agents[1].Id, Budget_Date__c = today, API_Calls_Allocated__c = 5000, API_Calls_Consumed__c = 4100, SOQL_Queries_Allocated__c = 8000, SOQL_Queries_Consumed__c = 5600, DML_Operations_Allocated__c = 4000, DML_Operations_Consumed__c = 3200, Budget_Status__c = 'Warning'),
-            new AgentGov_Budget__c(Agent_Registration__c = agents[2].Id, Budget_Date__c = today, API_Calls_Allocated__c = 15000, API_Calls_Consumed__c = 13800, SOQL_Queries_Allocated__c = 3000, SOQL_Queries_Consumed__c = 900, DML_Operations_Allocated__c = 5000, DML_Operations_Consumed__c = 4600, Budget_Status__c = 'Throttled'),
-            new AgentGov_Budget__c(Agent_Registration__c = agents[3].Id, Budget_Date__c = today, API_Calls_Allocated__c = 8000, API_Calls_Consumed__c = 1600, SOQL_Queries_Allocated__c = 6000, SOQL_Queries_Consumed__c = 1200, DML_Operations_Allocated__c = 2000, DML_Operations_Consumed__c = 400, Budget_Status__c = 'Normal'),
-            new AgentGov_Budget__c(Agent_Registration__c = agents[4].Id, Budget_Date__c = today, API_Calls_Allocated__c = 20000, API_Calls_Consumed__c = 8000, SOQL_Queries_Allocated__c = 2000, SOQL_Queries_Consumed__c = 800, DML_Operations_Allocated__c = 1000, DML_Operations_Consumed__c = 450, Budget_Status__c = 'Normal')
+            budget(agents[0].Id, today, 10000, 4200, 5000, 2100, 3000, 1350, AgentGovConstants.BUDGET_NORMAL),
+            budget(agents[1].Id, today, 5000, 4100, 8000, 5600, 4000, 3200, AgentGovConstants.BUDGET_WARNING),
+            budget(agents[2].Id, today, 15000, 13800, 3000, 900, 5000, 4600, AgentGovConstants.BUDGET_THROTTLED),
+            budget(agents[3].Id, today, 8000, 1600, 6000, 1200, 2000, 400, AgentGovConstants.BUDGET_NORMAL),
+            budget(agents[4].Id, today, 20000, 8000, 2000, 800, 1000, 450, AgentGovConstants.BUDGET_NORMAL)
         };
         insert budgets;
 
-        // Create sessions
         List<AgentGov_Session__c> sessions = new List<AgentGov_Session__c>();
         for (Integer i = 0; i < agents.size(); i++) {
-            sessions.add(new AgentGov_Session__c(
-                Agent_Registration__c = agents[i].Id,
-                Session_Start__c = DateTime.now().addHours(-i - 1),
-                Status__c = i < 3 ? 'Active' : 'Completed',
-                Session_End__c = i >= 3 ? DateTime.now().addMinutes(-30) : null,
-                API_Calls_Used__c = Math.round(Math.random() * 500),
-                SOQL_Queries_Used__c = Math.round(Math.random() * 200),
-                DML_Statements_Used__c = Math.round(Math.random() * 100),
-                Actions_Count__c = Math.round(Math.random() * 50)
-            ));
+            sessions.add(
+                new AgentGov_Session__c(
+                    Agent_Registration__c = agents[i].Id,
+                    Session_Start__c = DateTime.now().addHours(-i - 1),
+                    Status__c = i < 3 ? AgentGovConstants.SESSION_ACTIVE : AgentGovConstants.SESSION_COMPLETED,
+                    Session_End__c = i >= 3 ? DateTime.now().addMinutes(-30) : null,
+                    API_Calls_Used__c = 120 * (i + 1),
+                    SOQL_Queries_Used__c = 45 * (i + 1),
+                    DML_Statements_Used__c = 20 * (i + 1),
+                    Actions_Count__c = 12 * (i + 1)
+                )
+            );
         }
         insert sessions;
 
-        // Create sample action logs
         List<AgentGov_Action_Log__c> logs = new List<AgentGov_Action_Log__c>();
-        List<String> actionTypes = new List<String>{'Query', 'Create', 'Update', 'Delete', 'API_Call'};
-        List<String> objects = new List<String>{'Account', 'Contact', 'Lead', 'Opportunity', 'Case'};
-
+        List<String> actionTypes = new List<String>{
+            AgentGovConstants.ACTION_QUERY,
+            AgentGovConstants.ACTION_CREATE,
+            AgentGovConstants.ACTION_UPDATE,
+            AgentGovConstants.ACTION_DELETE,
+            AgentGovConstants.ACTION_API_CALL
+        };
+        List<String> objects = new List<String>{ 'Account', 'Contact', 'Lead', 'Opportunity', 'Case' };
         for (Integer i = 0; i < 25; i++) {
-            Integer agentIdx = Math.mod(i, agents.size());
-            logs.add(new AgentGov_Action_Log__c(
-                Agent_Registration__c = agents[agentIdx].Id,
-                Agent_Session__c = sessions[agentIdx].Id,
-                Action_Type__c = actionTypes[Math.mod(i, actionTypes.size())],
-                Object_Name__c = objects[Math.mod(i, objects.size())],
-                Status__c = Math.mod(i, 7) == 0 ? 'Failure' : 'Success',
-                Timestamp__c = DateTime.now().addMinutes(-i * 5),
-                Execution_Time_Ms__c = Math.round(Math.random() * 500 + 10)
-            ));
+            Integer agentIndex = Math.mod(i, agents.size());
+            logs.add(
+                new AgentGov_Action_Log__c(
+                    Agent_Registration__c = agents[agentIndex].Id,
+                    Agent_Session__c = sessions[agentIndex].Id,
+                    Action_Type__c = actionTypes[Math.mod(i, actionTypes.size())],
+                    Object_Name__c = objects[Math.mod(i, objects.size())],
+                    Status__c = Math.mod(i, 7) == 0
+                        ? AgentGovConstants.ACTION_FAILURE
+                        : AgentGovConstants.ACTION_SUCCESS,
+                    Timestamp__c = DateTime.now().addMinutes(-i * 5),
+                    Execution_Time_Ms__c = 40 + 17 * i
+                )
+            );
         }
         insert logs;
 
-        // Create sample conflict logs
         List<AgentGov_Conflict_Log__c> conflicts = new List<AgentGov_Conflict_Log__c>{
-            new AgentGov_Conflict_Log__c(
-                Agent_1__c = agents[0].Id,
-                Agent_2__c = agents[2].Id,
-                Record_Id__c = '001000000000001',
-                Object_Name__c = 'Account',
-                Conflict_Type__c = 'Concurrent_Write',
-                Resolution__c = 'Agent1_Won',
-                Severity__c = 'High',
-                Timestamp__c = DateTime.now().addHours(-2),
-                Details__c = 'Both agents attempted to update Account billing address simultaneously.'
+            conflict(
+                agents[0].Id,
+                agents[2].Id,
+                '001000000000001',
+                'Account',
+                AgentGovConstants.CONFLICT_CONCURRENT_WRITE,
+                AgentGovConstants.RESOLUTION_AGENT1_WON,
+                AgentGovConstants.SEVERITY_HIGH,
+                -2,
+                'Both agents attempted to update the Account billing address at the same time.'
             ),
-            new AgentGov_Conflict_Log__c(
-                Agent_1__c = agents[1].Id,
-                Agent_2__c = agents[4].Id,
-                Record_Id__c = '500000000000001',
-                Object_Name__c = 'Case',
-                Conflict_Type__c = 'Priority_Override',
-                Resolution__c = 'Agent1_Won',
-                Severity__c = 'Medium',
-                Timestamp__c = DateTime.now().addHours(-5),
-                Details__c = 'Case Routing Agent (priority 1) overrode Email Campaign Agent (priority 5) for case assignment.'
+            conflict(
+                agents[1].Id,
+                agents[4].Id,
+                '500000000000001',
+                'Case',
+                AgentGovConstants.CONFLICT_PRIORITY_OVERRIDE,
+                AgentGovConstants.RESOLUTION_AGENT1_WON,
+                AgentGovConstants.SEVERITY_MEDIUM,
+                -5,
+                'Case Routing Agent (priority 1) overrode Email Campaign Agent (priority 5) for case assignment.'
             ),
-            new AgentGov_Conflict_Log__c(
-                Agent_1__c = agents[2].Id,
-                Agent_2__c = agents[3].Id,
-                Record_Id__c = '006000000000001',
-                Object_Name__c = 'Opportunity',
-                Conflict_Type__c = 'Lock_Contention',
-                Resolution__c = 'Queued',
-                Severity__c = 'Low',
-                Timestamp__c = DateTime.now().addHours(-8),
-                Details__c = 'Data Sync MCP Agent queued while Opportunity Scoring Agent completed its update.'
+            conflict(
+                agents[2].Id,
+                agents[3].Id,
+                '006000000000001',
+                'Opportunity',
+                AgentGovConstants.CONFLICT_LOCK_CONTENTION,
+                AgentGovConstants.RESOLUTION_QUEUED,
+                AgentGovConstants.SEVERITY_LOW,
+                -8,
+                'Data Sync MCP Agent queued while Opportunity Scoring Agent completed its update.'
             )
         };
         insert conflicts;
 
-        System.debug('AgentGov Sample Data: Created ' + agents.size() + ' agents, ' + budgets.size() + ' budgets, ' + sessions.size() + ' sessions, ' + logs.size() + ' action logs, ' + conflicts.size() + ' conflict logs.');
+        return 'AgentGov sample data: created ' +
+            agents.size() +
+            ' agents, ' +
+            budgets.size() +
+            ' budgets, ' +
+            sessions.size() +
+            ' sessions, ' +
+            logs.size() +
+            ' action logs, ' +
+            conflicts.size() +
+            ' conflict logs.';
     }
 
-    /** @description Deletes all AgentGov sample data. */
-    public static void deleteAll() {
-        delete [SELECT Id FROM AgentGov_Action_Log__c];
-        delete [SELECT Id FROM AgentGov_Conflict_Log__c];
-        delete [SELECT Id FROM AgentGov_Session__c];
-        delete [SELECT Id FROM AgentGov_Budget__c];
-        delete [SELECT Id FROM AgentGov_Registration__c];
+    /**
+     * @description Deletes only the demonstration records this class created, identified by
+     *              the fixed sample keys, along with their budgets, sessions, logs and
+     *              conflicts. Real agents registered in the org are left untouched.
+     *
+     *              This is what the install guide points people at. deleteAll() removes every
+     *              AgentGov row in the org, which is not what someone clearing a demo wants.
+     * @return The number of rows removed
+     */
+    public static Integer deleteSampleData() {
+        Set<String> hashes = new Set<String>();
+        for (String sampleKey : SAMPLE_API_KEYS) {
+            hashes.add(AgentGovRestAuth.hashKey(sampleKey));
+        }
+        List<AgentGov_Registration__c> sampleAgents = [
+            SELECT Id
+            FROM AgentGov_Registration__c
+            WHERE API_Key_Hash__c IN :hashes
+        ];
+        if (sampleAgents.isEmpty()) {
+            return 0;
+        }
+        Set<Id> agentIds = new Map<Id, AgentGov_Registration__c>(sampleAgents).keySet();
+
+        Integer removed = 0;
+        removed += purge(
+            [SELECT Id FROM AgentGov_Action_Log__c WHERE Agent_Registration__c IN :agentIds LIMIT :DELETE_BATCH_SIZE]
+        );
+        removed += purge(
+            [
+                SELECT Id
+                FROM AgentGov_Conflict_Log__c
+                WHERE Agent_1__c IN :agentIds OR Agent_2__c IN :agentIds
+                LIMIT :DELETE_BATCH_SIZE
+            ]
+        );
+        removed += purge(
+            [SELECT Id FROM AgentGov_Session__c WHERE Agent_Registration__c IN :agentIds LIMIT :DELETE_BATCH_SIZE]
+        );
+        removed += purge(
+            [SELECT Id FROM AgentGov_Budget__c WHERE Agent_Registration__c IN :agentIds LIMIT :DELETE_BATCH_SIZE]
+        );
+        removed += purge(sampleAgents);
+        return removed;
+    }
+
+    /**
+     * @description Deletes EVERY AgentGov row in the org, not only the sample records.
+     *              Use deleteSampleData() to clear a demonstration; this is the blunt
+     *              instrument for resetting a scratch org.
+     *
+     *              Each pass is capped at DELETE_BATCH_SIZE rows so a single run cannot
+     *              exceed the DML row limit in an org that has accumulated a real action log.
+     *              Re-run it until it reports nothing left to delete.
+     * @return The number of rows removed by this run
+     */
+    public static Integer deleteAll() {
+        Integer removed = 0;
+        removed += purge([SELECT Id FROM AgentGov_Action_Log__c LIMIT :DELETE_BATCH_SIZE]);
+        removed += purge([SELECT Id FROM AgentGov_Conflict_Log__c LIMIT :DELETE_BATCH_SIZE]);
+        removed += purge([SELECT Id FROM AgentGov_Session__c LIMIT :DELETE_BATCH_SIZE]);
+        removed += purge([SELECT Id FROM AgentGov_Budget__c LIMIT :DELETE_BATCH_SIZE]);
+        removed += purge([SELECT Id FROM AgentGov_Registration__c LIMIT :DELETE_BATCH_SIZE]);
+        return removed;
+    }
+
+    private static Integer purge(List<SObject> records) {
+        if (records.isEmpty()) {
+            return 0;
+        }
+        delete records;
+        return records.size();
+    }
+
+    private static AgentGov_Registration__c agent(
+        String name,
+        String type,
+        String status,
+        Integer priority,
+        Integer apiBudget,
+        Integer soqlBudget,
+        Integer dmlBudget,
+        String description
+    ) {
+        return new AgentGov_Registration__c(
+            Agent_Name__c = name,
+            Agent_Type__c = type,
+            Status__c = status,
+            Priority__c = priority,
+            Daily_API_Budget__c = apiBudget,
+            Daily_SOQL_Budget__c = soqlBudget,
+            Daily_DML_Budget__c = dmlBudget,
+            Circuit_Breaker_State__c = AgentGovConstants.CB_CLOSED,
+            Failure_Count__c = 0,
+            Owner_Email__c = 'agentgov-owner@example.com',
+            Description__c = description
+        );
+    }
+
+    private static AgentGov_Budget__c budget(
+        Id registrationId,
+        Date budgetDate,
+        Integer apiAllocated,
+        Integer apiConsumed,
+        Integer soqlAllocated,
+        Integer soqlConsumed,
+        Integer dmlAllocated,
+        Integer dmlConsumed,
+        String status
+    ) {
+        return new AgentGov_Budget__c(
+            Agent_Registration__c = registrationId,
+            Budget_Date__c = budgetDate,
+            API_Calls_Allocated__c = apiAllocated,
+            API_Calls_Consumed__c = apiConsumed,
+            SOQL_Queries_Allocated__c = soqlAllocated,
+            SOQL_Queries_Consumed__c = soqlConsumed,
+            DML_Operations_Allocated__c = dmlAllocated,
+            DML_Operations_Consumed__c = dmlConsumed,
+            Budget_Status__c = status
+        );
+    }
+
+    private static AgentGov_Conflict_Log__c conflict(
+        Id agent1Id,
+        Id agent2Id,
+        String recordId,
+        String objectName,
+        String conflictType,
+        String resolution,
+        String severity,
+        Integer hoursAgo,
+        String details
+    ) {
+        return new AgentGov_Conflict_Log__c(
+            Agent_1__c = agent1Id,
+            Agent_2__c = agent2Id,
+            Record_Id__c = recordId,
+            Object_Name__c = objectName,
+            Conflict_Type__c = conflictType,
+            Resolution__c = resolution,
+            Severity__c = severity,
+            Timestamp__c = DateTime.now().addHours(hoursAgo),
+            Details__c = details
+        );
     }
 }
