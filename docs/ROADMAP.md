@@ -1,111 +1,98 @@
 # Roadmap
 
-This document outlines planned features and improvements for AgentGov.
+This document is the single source of truth for what has shipped and what is planned.
+Dates are targets, not commitments. Contributions toward any item are welcome; open an
+issue to discuss the approach before starting.
 
 ---
 
-## v1.0 -- Core Framework (Released)
+## v1.0 — Core Framework (Released April 2026)
 
-**Released: April 2026**
-
-- Agent Registry with session tracking
-- Governor Budget Manager with configurable thresholds
-- Circuit Breaker pattern (CLOSED/OPEN/HALF_OPEN)
-- Metadata-driven Policy Engine
-- Priority-based Conflict Resolution
+- Agent registry with session tracking
+- Governor budget manager with configurable thresholds
+- Circuit breaker pattern (CLOSED / OPEN / HALF_OPEN)
+- Metadata-driven policy engine
+- Priority-based conflict resolution
 - REST API (register, authorize, budget, health)
-- Invocable Actions for Flows
-- LWC Dashboard with 4 monitoring components
-- Platform Events for real-time alerts
+- Invocable actions for Flows
+- LWC dashboard with four monitoring components
+- Platform events for real-time alerts
+
+## v1.1 — Dynamic Budget Tracking (Released April 2026)
+
+- Governed Proxy API: five CRUD endpoints that execute on behalf of agents and charge
+  budget by the real record count
+- `AgentGovContext`: transaction measurement for Apex agents using the `Limits` class
+- `POST /report` with reconciliation and credit-back
+- Parameterized `/authorize` (`amount`)
+- Multi-limit consumption in one update
+- Session counters, the Report Agent Usage action, and an enhanced dashboard
+
+## v1.2 — Summer '26 Ready (Released September 2026)
+
+Platform modernization and security hardening. See `CHANGELOG.md` for the full list.
+
+- API 67.0 with an explicit system-mode / user-mode split
+- Structured proxy queries with bound values (no SOQL text from callers)
+- CRUD and field-level security enforcement on every proxied operation, plus policy field
+  restrictions and record caps
+- Hashed API keys, server-side key issuance and rotation, and Agent User binding
+- Unique daily budget rows, persisted overage, single-probe half-open breakers
+- Administrator alert emails and a complete audit trail (rejected rows kept as `System`
+  entries, purge summaries, correlation ids on REST errors)
+- Bulk-safe invocable actions
+- Live dashboards with `@wire`, platform-event refresh, ARIA, and SLDS 2 styling hooks
+- Prettier, ESLint, Jest thresholds, Code Analyzer, scratch-org Apex tests in CI, Dependabot,
+  a release workflow, and migration scripts
 
 ---
 
-## v1.1 -- Dynamic Budget Tracking (Released)
+## v1.3 — Agentforce-Native (Target: Q4 2026)
 
-**Released: April 2026**
+- **Action and credit budgets.** A fourth limit type for agent actions, with an optional
+  cost per action so the dashboard can show estimated Flex Credit spend per agent per day.
+- **Governed Agentforce action.** A generic invocable action, compatible with Agentforce
+  Builder, that resolves the registration from the running Agent User, runs the governance
+  pipeline, and invokes a target Flow or Apex action. Shipped with a sample Agent Script
+  agent so the repository demonstrates governance inside a real agent.
+- **Hosted MCP exposure.** Metadata and a walkthrough for exposing the governed actions
+  through a Salesforce Hosted MCP Server behind an External Client App, so external MCP
+  clients get governance without the REST proxy.
+- **Observability import.** A scheduled job that reads the Data 360 AI usage data model,
+  when present, and reconciles action and token usage into AgentGov budgets. Session trace
+  correlation ids stored on action logs.
+- **Platform Cache** for registration, policy, and limit-configuration reads.
+- **Removal** of the deprecated body `apiKey` credential and the `API_Key__c` field.
 
-- **Governed Proxy API** — 5 CRUD endpoints that execute operations on behalf of agents with real budget tracking (budget = actual record count)
-- **AgentGovContext** — Apex transaction measurement using `Limits` class for automatic SOQL/DML/callout tracking
-- **POST /report** — Post-execution reporting with reconciliation and credit-back
-- **Parameterized /authorize** — Optional `amount` parameter for pre-declared consumption
-- **Multi-limit consumption** — `consumeBudget(Map)` for single-DML multi-type updates
-- **Session counter updates** — Session fields now track actual resource usage
-- **Report Agent Usage** invocable action for Flows
-- **Enhanced Dashboard** — 6 summary cards, active sessions table, circuit breaker tripped count
+## v2.0 — Advanced Governance (Target: 2027)
 
----
-
-## v1.2 -- Email Alerts & Platform Cache
-
-**Target: Q3 2026**
-
-- Custom email alert templates for budget warnings, circuit breaker trips, and policy violations
-- Admin notification flows triggered by platform events
-- Platform Cache integration for sub-millisecond budget reads
-- Cache-first, database-fallback pattern (target: 0-1 SOQL per authorization)
-- Daily digest email summarizing agent activity
-
----
-
-## v1.3 -- Managed Package
-
-**Target: Q4 2026**
-
-- Package AgentGov as a Salesforce 2GP Managed Package
-- AppExchange listing with free installation
-- Namespace-prefixed components for conflict-free installation
-- Post-install configuration wizard
-- Automated test suite validation during install
+- **Human-in-the-loop approvals** for operations a policy marks as high risk, with an
+  "awaiting approval" pipeline outcome.
+- **Audit immutability.** A Big Object archive with a hash chain instead of hard-delete
+  cleanup.
+- **Cross-transaction conflict detection** through Platform Cache locks, with queued
+  resolution and configurable retry.
+- **Second-generation package** with a namespace, an AppExchange listing, and a post-install
+  wizard.
+- **Anomaly detection and forecasting**: behavior profiles per agent, proactive breaker
+  engagement, and budget forecasts.
+- **Multi-org federation** with a central governance hub.
 
 ---
 
-## v2.0 -- AI-Powered Governance
+## Ideas under consideration
 
-**Target: 2027**
-
-### Anomaly Detection
-- ML model trained on historical agent behavior
-- Automatic detection of unusual patterns (spike in API calls, unexpected object access)
-- Proactive circuit breaker engagement before failures occur
-- Risk scoring per agent based on behavior profile
-
-### Predictive Budget Forecasting
-- Forecast daily budget consumption based on historical patterns
-- Auto-adjust budget allocations to prevent exhaustion
-- "What-if" analysis for adding new agents
-
-### Multi-Org Federation
-- Central governance hub for multi-org Salesforce environments
-- Cross-org agent policy synchronization
-- Aggregated monitoring dashboard across orgs
-
-### Advanced Conflict Resolution
-- Cross-transaction conflict detection via Platform Cache locks
-- Queue-based conflict resolution (FIFO with priority override)
-- Automatic retry with configurable backoff
+- Agent-to-agent coordination messages
+- Custom Apex policy evaluators beyond metadata rules
+- Trigger-based attribution of DML to agent users
+- Change Data Capture reconciliation of agent operations
 
 ---
 
-## Ideas Under Consideration
+## Version history
 
-- **Agent-to-agent communication:** Structured messaging between agents for coordination
-- **Cost tracking:** Map governor budget consumption to actual Salesforce API credit costs
-- **Approval workflows:** Require human approval before high-risk actions
-- **Custom policy functions:** Apex-based custom policy evaluators beyond metadata-driven rules
-- **Trigger-based tracking:** Deploy triggers on key objects to count DML per agent user
-- **Change Data Capture integration:** Independent verification of agent operations via CDC
-
----
-
-## How to Contribute
-
-We welcome contributions to any roadmap item. Check the [Contributing Guide](../CONTRIBUTING.md) for how to get started. If you want to work on a specific roadmap item, open a GitHub issue to discuss the approach before starting implementation.
-
----
-
-## Version History
-
-| Version | Date | Highlights |
-|---------|------|------------|
-| **v1.1.0** | April 2026 | Dynamic budget tracking -- Governed Proxy API, AgentGovContext, /report endpoint, enhanced dashboard |
-| **v1.0.0** | April 2026 | Initial release -- Registry, Budget Manager, Circuit Breaker, Policy Engine, Conflict Resolver, REST API, Flow Actions, LWC Dashboard |
+| Version | Date           | Highlights                                                                             |
+| ------- | -------------- | -------------------------------------------------------------------------------------- |
+| 1.2.0   | September 2026 | API 67.0, hardened proxy and auth, atomic budgets, live dashboards, CI and tooling     |
+| 1.1.0   | April 2026     | Governed Proxy API, `AgentGovContext`, `/report`, enhanced dashboard                   |
+| 1.0.0   | April 2026     | Registry, budgets, circuit breaker, policies, conflicts, REST, Flow actions, dashboard |

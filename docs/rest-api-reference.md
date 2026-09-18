@@ -1,412 +1,353 @@
 # REST API Reference
 
-AgentGov exposes a REST API for external agents (MCP servers, third-party integrations) to interact with the governance framework.
-
-**Base URL:** `https://<your-instance>.salesforce.com/services/apexrest/agentgov`
-
-**Authentication:** All requests require a valid Salesforce OAuth 2.0 bearer token in the `Authorization` header.
-
----
-
-## POST /register
-
-Registers a new AI agent in the governance framework.
-
-### Request
-
-```
-POST /services/apexrest/agentgov/register
-Content-Type: application/json
-Authorization: Bearer <access_token>
-```
-
-**Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `agentName` | String | Yes | Display name of the agent |
-| `agentType` | String | Yes | `Agentforce`, `MCP_External`, `Custom_Apex`, or `Flow_Based` |
-| `description` | String | No | Description of the agent's purpose |
-| `apiKey` | String | No | API key for subsequent authorize calls |
-| `ownerEmail` | String | No | Contact email for the agent owner |
-
-### Response (201 Created)
-
-```json
-{
-  "success": true,
-  "registrationId": "a0B5g00000XXXXXXXX",
-  "registrationNumber": "REG-0001",
-  "status": "Inactive",
-  "message": "Agent registered successfully. Call activateAgent to enable."
-}
-```
-
-### curl Example
-
-```bash
-curl -X POST \
-  https://myinstance.salesforce.com/services/apexrest/agentgov/register \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "agentName": "Lead Enrichment Agent",
-    "agentType": "MCP_External",
-    "description": "Enriches leads with firmographic data via Clearbit API",
-    "apiKey": "mcp-lead-enrichment-abc123",
-    "ownerEmail": "data-team@yourcompany.com"
-  }'
-```
-
-### Error Responses
-
-| Status | Error Code | Cause |
-|--------|-----------|-------|
-| 400 | `INVALID_INPUT` | Missing `agentName` or invalid `agentType` |
-| 500 | (none) | Unexpected server error |
-
----
-
-## POST /authorize
-
-Authorizes an agent action by running the full governance pipeline: circuit breaker check, policy evaluation, budget consumption, and conflict detection.
-
-This is the primary endpoint for external agents. Call this before every action.
-
-### Request
-
-```
-POST /services/apexrest/agentgov/authorize
-Content-Type: application/json
-Authorization: Bearer <access_token>
-```
-
-**Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `apiKey` | String | Yes | The API key provided during registration |
-| `objectName` | String | Yes | Salesforce object API name (e.g., `Lead`, `Case`) |
-| `operation` | String | Yes | Operation type: `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger` |
-| `recordId` | String | No | Specific record ID (enables conflict detection) |
-
-### Response (200 OK)
-
-```json
-{
-  "authorized": true,
-  "agentId": "a0B5g00000XXXXXXXX",
-  "budgetStatus": "Normal",
-  "remainingBudget": {
-    "apiCalls": 9842,
-    "soqlQueries": 4991,
-    "dmlOperations": 2987
-  },
-  "conflict": {
-    "detected": false,
-    "resolution": null
-  }
-}
-```
-
-### curl Example
-
-```bash
-curl -X POST \
-  https://myinstance.salesforce.com/services/apexrest/agentgov/authorize \
-  -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "apiKey": "mcp-lead-enrichment-abc123",
-    "objectName": "Lead",
-    "operation": "Update",
-    "recordId": "00Q5g00000YYYYYYYY"
-  }'
-```
-
-### Error Responses
-
-| Status | Error Code | Cause |
-|--------|-----------|-------|
-| 400 | `INVALID_INPUT` | Missing `apiKey` |
-| 403 | `AGENT_NOT_ACTIVE` | Agent exists but is not Active |
-| 403 | `POLICY_VIOLATION` | Action denied by policy configuration |
-| 404 | `AGENT_NOT_FOUND` | No agent found with the provided API key |
-| 409 | `RECORD_LOCKED` | Record is locked by a higher-priority agent |
-| 429 | `BUDGET_EXCEEDED` | Daily governor budget exhausted for the relevant limit type |
-| 503 | `CIRCUIT_BREAKER_OPEN` | Agent's circuit breaker is OPEN (temporarily disabled) |
-
-### Error Response Format
-
-```json
-{
-  "error": "Human-readable error message",
-  "errorCode": "BUDGET_EXCEEDED"
-}
-```
-
----
-
-## GET /budget/{agentId}
-
-Returns the current budget status for an agent, including remaining allocations and usage percentages.
-
-### Request
-
-```
-GET /services/apexrest/agentgov/budget/{agentId}
-Authorization: Bearer <access_token>
-```
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `agentId` | String | The agent registration record ID (18-character Salesforce ID) |
-
-### Response (200 OK)
-
-```json
-{
-  "agentId": "a0B5g00000XXXXXXXX",
-  "budgetStatus": "Warning",
-  "allowed": true,
-  "remaining": {
-    "apiCalls": 1580,
-    "soqlQueries": 920,
-    "dmlOperations": 450
-  },
-  "usagePercent": {
-    "apiCalls": 84.2,
-    "soqlQueries": 81.6,
-    "dmlOperations": 85.0
-  }
-}
-```
-
-### curl Example
-
-```bash
-curl -X GET \
-  https://myinstance.salesforce.com/services/apexrest/agentgov/budget/a0B5g00000XXXXXXXX \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-### Error Responses
-
-| Status | Error Code | Cause |
-|--------|-----------|-------|
-| 400 | `INVALID_INPUT` | Missing or blank agent ID |
-| 404 | `AGENT_NOT_FOUND` | Agent registration not found |
-
----
-
-## GET /health/{agentId}
-
-Returns the health status of an agent, including circuit breaker state, failure count, and timing information.
-
-### Request
-
-```
-GET /services/apexrest/agentgov/health/{agentId}
-Authorization: Bearer <access_token>
-```
-
-**Path Parameters:**
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `agentId` | String | The agent registration record ID (18-character Salesforce ID) |
-
-### Response (200 OK)
-
-```json
-{
-  "agentId": "a0B5g00000XXXXXXXX",
-  "agentName": "Lead Enrichment Agent",
-  "status": "Active",
-  "circuitBreakerState": "CLOSED",
-  "failureCount": 2,
-  "lastFailure": "2025-01-15T14:30:00.000Z",
-  "cooldownUntil": null,
-  "lastActive": "2025-01-15T16:45:00.000Z"
-}
-```
-
-### curl Example
-
-```bash
-curl -X GET \
-  https://myinstance.salesforce.com/services/apexrest/agentgov/health/a0B5g00000XXXXXXXX \
-  -H "Authorization: Bearer $ACCESS_TOKEN"
-```
-
-### Health Status Interpretation
-
-| Status | Circuit Breaker | Meaning |
-|--------|----------------|---------|
-| Active | CLOSED | Healthy -- fully operational |
-| Active | HALF_OPEN | Recovering -- one test request allowed |
-| Throttled | HALF_OPEN | Recovering from a circuit breaker trip |
-| Blocked | OPEN | Unhealthy -- all requests denied until cooldown |
-| Inactive | CLOSED | Administratively deactivated |
-
-### Error Responses
-
-| Status | Error Code | Cause |
-|--------|-----------|-------|
-| 400 | `INVALID_INPUT` | Missing or blank agent ID |
-| 404 | `AGENT_NOT_FOUND` | Agent registration not found |
+AgentGov exposes two Apex REST resources for agents that run outside the org: the
+**governance API** at `/services/apexrest/agentgov` (register, authorize, report, rotate a
+key, read budget and health) and the **governed proxy** at
+`/services/apexrest/agentgov-proxy` (query and CRUD executed on the agent's behalf, with
+budget charged by the real record count).
 
 ---
 
 ## Authentication
 
-All REST endpoints require a valid Salesforce OAuth 2.0 access token. The recommended flow for server-to-server integration is the **OAuth 2.0 JWT Bearer Flow** or the **Client Credentials Flow**.
+Every call needs two things: a Salesforce session and an agent identity.
 
-### Obtaining an Access Token (Client Credentials)
+**1. A Salesforce OAuth 2.0 access token** in the `Authorization: Bearer <token>` header.
+Obtain it through an External Client App (Connected Apps can no longer be created in most
+orgs). The user the token belongs to must hold the `AgentGov_Agent` permission set, which
+grants the two REST classes and nothing else; the framework records its own bookkeeping in
+system mode.
 
-```bash
-curl -X POST https://login.salesforce.com/services/oauth2/token \
-  -d "grant_type=client_credentials" \
-  -d "client_id=$CLIENT_ID" \
-  -d "client_secret=$CLIENT_SECRET"
-```
+**2. An agent identity**, resolved in this order:
 
-### Using the Token
+| Credential                             | How                                                                                                                        | Status                                                                |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `X-AgentGov-Key` header                | The agent's API key. The legacy header name `X-AgentGov-API-Key` is accepted as an alias.                                  | Recommended for external agents                                       |
+| `apiKey` in the JSON body              | Same key, in the body.                                                                                                     | **Deprecated**; responses carry a `deprecation` note; removed in v1.3 |
+| No key, user bound to the registration | The token's user is set in `Agent_User__c` on the registration. Intended for Agentforce Agent Users and integration users. | Recommended when the agent has its own Salesforce user                |
 
-Include it in the `Authorization` header on every request:
-
-```
-Authorization: Bearer <access_token>
-```
-
-The connected app user must have the **AgentGov_Admin** or **AgentGov_User** permission set assigned.
+Keys are never stored; only a SHA-256 hash and a short prefix are kept. A key created by a
+release before v1.2 is upgraded to hashed storage the first time it is presented.
 
 ---
 
-## POST /report
+## Response envelope
 
-Reports actual resource consumption after an agent completes its work. Used for budget reconciliation when agents pre-authorize with `/authorize` and then report what they actually consumed.
+Every response is JSON and carries a `correlationId`. Send your own in the
+`X-Correlation-Id` request header and it is echoed back; otherwise one is generated. The id
+is also returned as a response header.
 
-### Request
-
-```
-POST /services/apexrest/agentgov/report
-Content-Type: application/json
-Authorization: Bearer <access_token>
-```
-
-**Body:**
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `apiKey` | String | Yes | The agent's API key |
-| `actual` | Object | Yes | Actual consumption: `{ "apiCalls": 3, "soqlQueries": 12, "dmlOperations": 4 }` |
-| `preAuthorized` | Object | No | What was pre-authorized via `/authorize`. If provided, only the delta is consumed. If actual < preAuthorized, budget is credited back. |
-
-### Response (200)
+**Success**
 
 ```json
 {
   "success": true,
+  "correlationId": "5f1c1a2e-...",
+  "...endpoint payload..."
+}
+```
+
+**Error**
+
+```json
+{
+  "success": false,
+  "errorCode": "BUDGET_EXCEEDED",
+  "message": "Governor budget exceeded for limit type: DML_Operations",
+  "correlationId": "5f1c1a2e-...",
+  "timestamp": "2026-09-15T10:00:00.000Z"
+}
+```
+
+| Code                    | HTTP | Meaning                                                                                      |
+| ----------------------- | ---- | -------------------------------------------------------------------------------------------- |
+| `INVALID_INPUT`         | 400  | Missing or malformed request data, unknown object or field, unsupported operator             |
+| `AGENT_NOT_FOUND`       | 404  | No credential resolved to a registration, or an unknown path                                 |
+| `AGENT_NOT_ACTIVE`      | 403  | The agent exists but is not Active (the proxy also admits Throttled agents)                  |
+| `ACCESS_DENIED`         | 403  | The calling user lacks access to the requested data, or is not allowed to read another agent |
+| `POLICY_VIOLATION`      | 403  | Denied by an `AgentGov_Policy__mdt` record, a restricted field, or a record cap              |
+| `BUDGET_EXCEEDED`       | 429  | The budget is Blocked or Exhausted                                                           |
+| `MAX_CONCURRENT_AGENTS` | 429  | The org's concurrent active-agent limit is reached                                           |
+| `RECORD_LOCKED`         | 409  | A higher-priority agent holds the record in this transaction                                 |
+| `CIRCUIT_BREAKER_OPEN`  | 503  | The agent's circuit breaker is OPEN                                                          |
+| `INTERNAL_ERROR`        | 500  | An unexpected failure; the details are logged under the `correlationId`, never returned      |
+
+---
+
+## POST /agentgov/register
+
+Registers an agent. No agent credential is required. New agents start `Inactive`; an
+administrator activates them with `AgentGovRegistryService.activateAgent`.
+
+**Body**
+
+| Field         | Type   | Required | Description                                                                     |
+| ------------- | ------ | -------- | ------------------------------------------------------------------------------- |
+| `agentName`   | String | Yes      | Display name                                                                    |
+| `agentType`   | String | Yes      | `Agentforce`, `MCP_External`, `Custom_Apex`, or `Flow_Based`                    |
+| `description` | String | No       | Purpose of the agent                                                            |
+| `apiKey`      | String | No       | A key of your choosing. Omit it and AgentGov generates one and returns it once. |
+| `ownerEmail`  | String | No       | Contact for the agent's owner                                                   |
+
+**Response (201)** when the key was generated:
+
+```json
+{
+  "success": true,
+  "correlationId": "...",
+  "registrationId": "a0B...",
+  "registrationNumber": "AGT-0007",
+  "status": "Inactive",
+  "apiKey": "agk_3f9c...e2",
+  "apiKeyPrefix": "agk_3f9c8a1b",
+  "message": "Agent registered. Store the apiKey now; only its hash is kept and it cannot be retrieved later. Activate the agent to enable it."
+}
+```
+
+When you supplied a key, the response carries `apiKeyPrefix` but not the key.
+
+```bash
+curl -X POST "$INSTANCE/services/apexrest/agentgov/register" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"agentName":"Lead Enrichment Agent","agentType":"MCP_External","ownerEmail":"owner@example.com"}'
+```
+
+---
+
+## POST /agentgov/authorize
+
+Runs the governance pipeline for one intended action and pre-charges the budget:
+circuit breaker, policy, conflict detection (when a `recordId` is given), and budget. The
+conflict check runs before the charge, so a request refused with `RECORD_LOCKED` costs the
+agent nothing. The agent then performs the action itself.
+
+**Body**
+
+| Field        | Type    | Required | Description                                                                                                                 |
+| ------------ | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `objectName` | String  | Yes      | Object API name                                                                                                             |
+| `operation`  | String  | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger`                                              |
+| `recordId`   | String  | No       | Record the action targets; enables conflict detection                                                                       |
+| `amount`     | Integer | No       | Units to pre-charge (default 1, minimum 1). `Query` charges SOQL, `API_Call` charges API calls, everything else charges DML |
+
+**Response (200)**
+
+```json
+{
+  "success": true,
+  "correlationId": "...",
+  "authorized": true,
+  "agentId": "a0B...",
   "budgetStatus": "Normal",
-  "remainingBudget": {
-    "apiCalls": 9997,
-    "soqlQueries": 4988,
-    "dmlOperations": 2996
-  }
+  "remainingBudget": { "apiCalls": 9842, "soqlQueries": 4991, "dmlOperations": 2987 },
+  "conflict": { "detected": false, "resolution": null }
+}
+```
+
+When `Is_Enabled__c` is unchecked the same shape is returned with `"governanceEnabled": false`.
+Nothing is charged and no check is run, so `remainingBudget` reflects a read rather than a
+consumption. Clients should keep reading `authorized`.
+
+A breaker whose cooldown has elapsed reopens itself when the request arrives, so the call becomes
+the single admitted probe. Inside the cooldown the agent is still refused with
+`AGENT_NOT_ACTIVE` (403).
+
+```bash
+curl -X POST "$INSTANCE/services/apexrest/agentgov/authorize" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"objectName":"Lead","operation":"Update","recordId":"00Q...","amount":10}'
+```
+
+Denials are written to the action log with status `Denied`.
+
+---
+
+## POST /agentgov/report
+
+Reports what the agent actually consumed and, optionally, the outcome of the work.
+
+Only usage **beyond** what was already pre-authorized is charged. Unused pre-authorization is
+**not** credited back: both figures come from the caller in the same request and the framework
+keeps no record of what an agent reserved, so honouring a credit would let any agent clear its
+own ledger. Budget corrections are an administrative action through
+`AgentGovBudgetManager.creditBudget`. The agent is denied with `BUDGET_EXCEEDED` if the
+reported usage leaves the budget Blocked or Exhausted.
+
+All counts must be zero or positive. A negative figure is rejected with `INVALID_INPUT` (400).
+
+**Body**
+
+| Field           | Type    | Required | Description                                                 |
+| --------------- | ------- | -------- | ----------------------------------------------------------- |
+| `actual`        | Object  | Yes      | `apiCalls`, `soqlQueries`, `dmlOperations` actually used    |
+| `preAuthorized` | Object  | No       | The same keys as sent to `/authorize`; caps what is charged |
+| `success`       | Boolean | No       | Outcome of the work, reported to the circuit breaker        |
+
+```bash
+curl -X POST "$INSTANCE/services/apexrest/agentgov/report" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{"actual":{"dmlOperations":7,"soqlQueries":2},"preAuthorized":{"dmlOperations":10},"success":true}'
+```
+
+Sending `success` is how an agent that uses `/authorize` closes a circuit breaker it tripped.
+A breaker in HALF_OPEN admits one probe; reporting `true` closes it and returns the agent to
+Active, and reporting `false` re-opens it with a doubled cooldown.
+
+**Response (200)**: `budgetStatus`, `remainingBudget`, and `circuitBreakerState`.
+
+---
+
+## POST /agentgov/rotate-key
+
+Issues a replacement API key for the calling agent. The previous key stops working
+immediately. Authenticate with the current key or the bound user.
+
+**Response (200)**
+
+```json
+{
+  "success": true,
+  "correlationId": "...",
+  "apiKey": "agk_...",
+  "apiKeyPrefix": "agk_9d2e4b7c",
+  "rotatedAt": "2026-09-15T10:00:00.000Z",
+  "message": "Store the new apiKey now; the previous key no longer authenticates."
 }
 ```
 
 ---
 
-## Governed Proxy API
+## GET /agentgov/budget/{registrationId}
 
-Instead of agents calling Salesforce's standard REST API directly (which AgentGov cannot track), the Proxy API executes CRUD operations on behalf of agents. Budget is consumed by the **actual number of records** processed.
+Returns the agent's budget for today, creating the row if this is the first read of the
+day. The caller must be that agent (key header or bound user) or hold the
+`AgentGov_Admin_Access` custom permission.
 
-**Base URL:** `https://<your-instance>.salesforce.com/services/apexrest/agentgov-proxy`
+**Response (200)**
+
+```json
+{
+  "success": true,
+  "correlationId": "...",
+  "agentId": "a0B...",
+  "budgetStatus": "Warning",
+  "allowed": true,
+  "remaining": { "apiCalls": 1580, "soqlQueries": 920, "dmlOperations": 450 },
+  "usagePercent": { "apiCalls": 84.2, "soqlQueries": 81.6, "dmlOperations": 85.0 }
+}
+```
+
+## GET /agentgov/health/{registrationId}
+
+Returns status and circuit breaker state, with the same access rule as `/budget`.
+
+```json
+{
+  "success": true,
+  "correlationId": "...",
+  "agentId": "a0B...",
+  "agentName": "Lead Enrichment Agent",
+  "status": "Active",
+  "circuitBreakerState": "CLOSED",
+  "failureCount": 0,
+  "lastFailure": null,
+  "cooldownUntil": null,
+  "lastActive": "2026-09-15T09:58:12.000Z"
+}
+```
+
+---
+
+## The governed proxy: /agentgov-proxy
+
+The proxy executes operations on the agent's behalf, so budget is charged by the real
+record count. Every endpoint runs: authentication → circuit breaker → policy (object,
+operation, field restrictions, record cap) → conflict detection (for writes with Ids) →
+field-level security check → budget → execution → audit log → breaker outcome.
+
+Everything runs in **user mode**: the token's user must have the object permissions,
+field-level security, and sharing access for the data involved. Missing access returns
+`ACCESS_DENIED` naming the fields, before anything is written. Active and Throttled agents
+may call the proxy (a Throttled agent is one whose breaker is probing recovery).
 
 ### POST /agentgov-proxy/query
 
-Executes a SOQL query. Consumes 1 SOQL query from budget.
+Runs a structured query. SOQL text is not accepted; a `query` property returns 400.
 
-```json
-{
-  "apiKey": "your-api-key",
-  "query": "SELECT Id, Name FROM Account WHERE Industry = 'Technology' LIMIT 10"
-}
+**Body**
+
+| Field        | Type    | Required | Description                                                                                                                                                                                                                           |
+| ------------ | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `objectName` | String  | Yes      | Object API name                                                                                                                                                                                                                       |
+| `fields`     | Array   | Yes      | Field API names on that object. Relationship paths (`Owner.Name`) and subqueries are not accepted.                                                                                                                                    |
+| `where`      | Array   | No       | Conditions `{ "field", "op", "value" }`, combined with AND. Operators: `=`, `!=`, `<`, `<=`, `>`, `>=`, `LIKE`, `IN`, `NOT IN`. `IN`/`NOT IN` take an array. Values are bound, never concatenated, and converted to the field's type. |
+| `orderBy`    | Object  | No       | `{ "field", "direction" }` with `ASC` (default) or `DESC`                                                                                                                                                                             |
+| `limit`      | Integer | No       | Rows to return. Default 200; never more than the policy's record cap or 2,000.                                                                                                                                                        |
+
+```bash
+curl -X POST "$INSTANCE/services/apexrest/agentgov-proxy/query" \
+  -H "Authorization: Bearer $TOKEN" -H "X-AgentGov-Key: $AGENT_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "objectName": "Account",
+    "fields": ["Id", "Name", "Industry"],
+    "where": [
+      { "field": "Industry", "op": "IN", "value": ["Energy", "Retail"] },
+      { "field": "CreatedDate", "op": ">=", "value": "2026-01-01T00:00:00.000Z" }
+    ],
+    "orderBy": { "field": "Name", "direction": "ASC" },
+    "limit": 50
+  }'
 ```
 
-**Response:** `{ "success": true, "totalSize": 10, "records": [...], "budgetStatus": "Normal", "remainingBudget": {...} }`
+**Response (200)**: `totalSize`, `records`, `budgetStatus`, `remainingBudget`. One SOQL
+query is charged.
 
 ### POST /agentgov-proxy/create
 
-Creates records. Budget consumed = number of records.
+**Body**: `objectName`, `records` (array of objects keyed by field API name). Unknown
+fields are rejected with 400; an `attributes` key is ignored so records copied from a
+query response can be resubmitted. Charges one DML unit per record.
+
+**Response (200)**
 
 ```json
 {
-  "apiKey": "your-api-key",
-  "objectName": "Lead",
-  "records": [
-    { "FirstName": "John", "LastName": "Doe", "Company": "Acme" },
-    { "FirstName": "Jane", "LastName": "Smith", "Company": "Globex" }
-  ]
+  "success": true,
+  "correlationId": "...",
+  "allSucceeded": true,
+  "recordsProcessed": 3,
+  "recordsSucceeded": 3,
+  "results": [
+    { "success": true, "id": "001..." },
+    { "success": true, "id": "001..." },
+    { "success": true, "id": "001..." }
+  ],
+  "budgetStatus": "Normal",
+  "remainingBudget": { "apiCalls": 10000, "soqlQueries": 5000, "dmlOperations": 2997 }
 }
 ```
 
-**Response:** `{ "success": true, "recordsProcessed": 2, "recordsSucceeded": 2, "results": [...], "budgetStatus": "Normal", "remainingBudget": {...} }`
+Per-record failures appear as `{ "success": false, "errors": ["..."] }`; the HTTP status
+stays 200 because the request itself was processed.
 
 ### POST /agentgov-proxy/update
 
-Updates records (each record must include `Id`). Budget consumed = number of records.
-
-```json
-{
-  "apiKey": "your-api-key",
-  "objectName": "Lead",
-  "records": [
-    { "Id": "00Q...", "Status": "Qualified" }
-  ]
-}
-```
+**Body**: `objectName`, `records`; every record must carry an `Id` that belongs to
+`objectName`. Records held by a higher-priority agent in the same transaction return
+`RECORD_LOCKED`.
 
 ### POST /agentgov-proxy/delete
 
-Deletes records by ID. Budget consumed = number of IDs.
-
-```json
-{
-  "apiKey": "your-api-key",
-  "objectName": "Lead",
-  "ids": ["00Q...", "00Q..."]
-}
-```
+**Body**: `objectName`, `ids` (array). Each Id must belong to `objectName`.
 
 ### POST /agentgov-proxy/upsert
 
-Upserts records. Optionally specify an external ID field.
-
-```json
-{
-  "apiKey": "your-api-key",
-  "objectName": "Lead",
-  "externalIdField": "External_Id__c",
-  "records": [
-    { "External_Id__c": "EXT-001", "FirstName": "John", "LastName": "Doe", "Company": "Acme" }
-  ]
-}
-```
-
-All proxy endpoints run the full governance pipeline (circuit breaker → policy → budget → conflict) before executing.
+**Body**: `objectName`, `records`, optional `externalIdField` (must be an External ID
+field). Results include `created` per record.
 
 ---
 
-## Rate Limiting
+## Rate limiting
 
-AgentGov does not impose its own rate limiting on REST API calls. However, Salesforce platform limits apply:
-
-- **Concurrent API requests:** 25 per org (or per user, depending on edition)
-- **Total API requests:** Based on your org's API request limit
-
-AgentGov's budget system tracks governor limits (SOQL, DML, API callouts) consumed by agents, not the number of REST API calls to AgentGov itself.
+AgentGov enforces daily budgets per agent, not per-minute rate limits. Salesforce's own
+API limits still apply to the OAuth session. Per-minute limits are on the roadmap.

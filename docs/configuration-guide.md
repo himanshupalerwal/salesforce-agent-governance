@@ -13,22 +13,24 @@ AgentGov uses a **Hierarchy Custom Setting** for org-level configuration. This a
 **Setup UI:** Setup > Custom Settings > AgentGov Settings > Manage
 
 **Apex:**
+
 ```apex
 AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
 ```
 
 ### Field Reference
 
-| Field API Name | Type | Default | Description |
-|----------------|------|---------|-------------|
-| `Is_Enabled__c` | Checkbox | `true` | Master kill switch. When unchecked, the entire governance framework is bypassed and all actions are allowed without checks. Useful during data migrations or emergency situations. |
-| `Default_Agent_Priority__c` | Number(2,0) | `5` | Default priority assigned to newly registered agents. Priority is used for conflict resolution -- lower numbers mean higher priority. Range: 1 (highest) to 10 (lowest). |
-| `Max_Concurrent_Agents__c` | Number(4,0) | `10` | Maximum number of agents that can be in Active status simultaneously. Prevents overwhelming the org with too many concurrent agents. Attempts to activate beyond this limit throw an error. |
-| `Circuit_Breaker_Failure_Threshold__c` | Number(3,0) | `5` | Number of consecutive failures before an agent's circuit breaker trips from CLOSED to OPEN. |
-| `Circuit_Breaker_Cooldown_Minutes__c` | Number(4,0) | `30` | Minutes an agent remains in OPEN state before transitioning to HALF_OPEN for a test request. Doubles on each re-trip (exponential backoff). |
-| `Log_Retention_Days__c` | Number(4,0) | `90` | Number of days to retain Action Log records. The AgentGovCleanup batch job deletes records older than this. |
-| `Enable_Conflict_Detection__c` | Checkbox | `true` | Enables in-memory record locking and priority-based conflict detection. When disabled, `checkForConflict()` always returns no conflict. |
-| `Enable_Real_Time_Events__c` | Checkbox | `true` | Enables publishing of Platform Events (AgentGov_Alert__e and AgentGov_Action_Event__e). Disable if you do not need real-time monitoring and want to reduce event bus usage. |
+| Field API Name                         | Type        | Default | Description                                                                                                                                                                                                                                                                 |
+| -------------------------------------- | ----------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Is_Enabled__c`                        | Checkbox    | `true`  | Master kill switch. When unchecked, policy, budget, circuit-breaker and conflict checks are all bypassed and actions are allowed. The audit trail keeps recording throughout, so activity during the bypass is still visible. Useful during data migrations or emergencies. |
+| `Default_Agent_Priority__c`            | Number(2,0) | `5`     | Default priority assigned to newly registered agents. Priority is used for conflict resolution -- lower numbers mean higher priority. Range: 1 (highest) to 10 (lowest).                                                                                                    |
+| `Max_Concurrent_Agents__c`             | Number(4,0) | `10`    | Maximum number of agents that can be in Active status simultaneously. Prevents overwhelming the org with too many concurrent agents. Attempts to activate beyond this limit throw an error.                                                                                 |
+| `Circuit_Breaker_Failure_Threshold__c` | Number(3,0) | `5`     | Number of consecutive failures before an agent's circuit breaker trips from CLOSED to OPEN.                                                                                                                                                                                 |
+| `Circuit_Breaker_Cooldown_Minutes__c`  | Number(4,0) | `30`    | Minutes an agent remains in OPEN state before a single probe request is admitted. Doubles when the probe fails, capped at one day.                                                                                                                                          |
+| `Log_Retention_Days__c`                | Number(4,0) | `90`    | Number of days to retain Action Log records. The AgentGovCleanup batch job deletes records older than this.                                                                                                                                                                 |
+| `Enable_Conflict_Detection__c`         | Checkbox    | `true`  | Enables in-memory record locking and priority-based conflict detection. When disabled, `checkForConflict()` always returns no conflict.                                                                                                                                     |
+| `Enable_Real_Time_Events__c`           | Checkbox    | `true`  | Enables publishing of Platform Events (AgentGov_Alert__e and AgentGov_Action_Event__e). When disabled, action logs are inserted directly and no alerts or emails are sent.                                                                                                  |
+| `Admin_Notification_Email__c`          | Email       | (none)  | Address that receives one email per delivered batch of alerts (budget thresholds, circuit breaker trips). Leave blank to disable alert emails.                                                                                                                              |
 
 ### Example: Emergency Bypass
 
@@ -60,6 +62,7 @@ Defines threshold configurations for each type of governor limit. These threshol
 **Setup UI:** Setup > Custom Metadata Types > AgentGov Limit Config > Manage Records
 
 **Apex:**
+
 ```apex
 List<AgentGov_Limit_Config__mdt> configs = AgentGovSelector.getLimitConfigs();
 AgentGov_Limit_Config__mdt apiConfig = AgentGovSelector.getLimitConfigByType('API_Calls');
@@ -67,20 +70,21 @@ AgentGov_Limit_Config__mdt apiConfig = AgentGovSelector.getLimitConfigByType('AP
 
 ### Field Reference
 
-| Field API Name | Type | Description |
-|----------------|------|-------------|
-| `Limit_Type__c` | Text(50) | The type of limit: `API_Calls`, `SOQL_Queries`, or `DML_Operations` |
-| `Warning_Threshold__c` | Number(5,2) | Percentage at which a Warning alert is fired. Default: 80. |
-| `Throttle_Threshold__c` | Number(5,2) | Percentage at which the agent is throttled and a Throttle alert fires. Default: 90. |
-| `Block_Threshold__c` | Number(5,2) | Percentage at which the agent is blocked and further requests are denied. Default: 95. |
+| Field API Name            | Type         | Description                                                                                                      |
+| ------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `Limit_Type__c`           | Text(50)     | The type of limit: `API_Calls`, `SOQL_Queries`, or `DML_Operations`                                              |
+| `Warning_Threshold__c`    | Number(5,2)  | Percentage at which a Warning alert is fired. Default: 80.                                                       |
+| `Throttle_Threshold__c`   | Number(5,2)  | Percentage at which the agent is throttled and a Throttle alert fires. Default: 90.                              |
+| `Block_Threshold__c`      | Number(5,2)  | Percentage at which the agent is blocked and further requests are denied. Default: 95.                           |
 | `Default_Daily_Budget__c` | Number(10,0) | Default daily budget allocation for this limit type. Overridden by per-agent values on AgentGov_Registration__c. |
-| `Is_Active__c` | Checkbox | Whether this configuration is active. Inactive configs are ignored. |
+| `Is_Active__c`            | Checkbox     | Whether this configuration is active. Inactive configs are ignored.                                              |
 
 ### Recommended Configuration
 
 Create three records:
 
 **API_Calls_Config:**
+
 ```
 Label:              API Calls Config
 Limit Type:         API_Calls
@@ -92,6 +96,7 @@ Is Active:          true
 ```
 
 **SOQL_Queries_Config:**
+
 ```
 Label:              SOQL Queries Config
 Limit Type:         SOQL_Queries
@@ -103,6 +108,7 @@ Is Active:          true
 ```
 
 **DML_Operations_Config:**
+
 ```
 Label:              DML Operations Config
 Limit Type:         DML_Operations
@@ -137,6 +143,7 @@ Defines access control policies that determine what each agent type can do. Poli
 **Setup UI:** Setup > Custom Metadata Types > AgentGov Policy > Manage Records
 
 **Apex:**
+
 ```apex
 List<AgentGov_Policy__mdt> policies = AgentGovSelector.getPolicies();
 List<AgentGov_Policy__mdt> agentforcePolicies =
@@ -145,15 +152,15 @@ List<AgentGov_Policy__mdt> agentforcePolicies =
 
 ### Field Reference
 
-| Field API Name | Type | Description |
-|----------------|------|-------------|
-| `Agent_Type__c` | Text(50) | Agent type: `Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`, or `All` |
-| `Object_Name__c` | Text(100) | Salesforce object API name (e.g., `Lead`, `Case`, `Account`) or `*` for all objects |
-| `Operation__c` | Text(50) | Operation: `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*` for all operations |
-| `Is_Allowed__c` | Checkbox | `true` = allow, `false` = deny. **Explicit deny always overrides allow.** |
-| `Field_Restrictions__c` | Long Text | Comma-separated list of field API names that are restricted (e.g., `SSN__c,CreditCard__c`) |
-| `Max_Records_Per_Transaction__c` | Number(6,0) | Maximum records the agent can process in a single transaction. If multiple policies match, the lowest value wins. |
-| `Description__c` | Long Text | Human-readable description of the policy's purpose |
+| Field API Name                   | Type        | Description                                                                                                                                                                     |
+| -------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Agent_Type__c`                  | Text(50)    | Agent type: `Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`, or `All`                                                                                                 |
+| `Object_Name__c`                 | Text(100)   | Salesforce object API name (e.g., `Lead`, `Case`, `Account`) or `*` for all objects                                                                                             |
+| `Operation__c`                   | Text(50)    | Operation: `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*` for all operations                                                               |
+| `Is_Allowed__c`                  | Checkbox    | `true` = allow, `false` = deny. **Explicit deny always overrides allow.**                                                                                                       |
+| `Field_Restrictions__c`          | Long Text   | Comma-separated list of field API names the agent may neither read nor write through the proxy (e.g., `SSN__c,CreditCard__c`). A request that names one is denied, not trimmed. |
+| `Max_Records_Per_Transaction__c` | Number(6,0) | Maximum records per proxy request, and the cap on `/query` results. If multiple policies match, the lowest value wins.                                                          |
+| `Description__c`                 | Long Text   | Human-readable description of the policy's purpose                                                                                                                              |
 
 ### Policy Evaluation Rules
 
@@ -161,7 +168,8 @@ List<AgentGov_Policy__mdt> agentforcePolicies =
 2. Within matching policies, `Object_Name__c` and `Operation__c` are checked (exact match or `*` wildcard).
 3. **Explicit deny overrides explicit allow.** If any matching policy has `Is_Allowed__c = false`, the action is denied.
 4. If no policies match, the action is **allowed by default**.
-5. Field restrictions and max records are collected from all matching allow policies.
+5. Field restrictions and max records are collected from all matching allow policies and enforced by the proxy endpoints. Apex callers enforce them with `AgentGovPolicyEngine.assertFieldsAllowed` and `assertRecordCount`.
+6. `Operation__c` must be one of the action types (`Query`, not `Read`); `AgentGovPolicyEngine.validatePolicies()` reports anything else.
 
 ### Common Policy Patterns
 
@@ -228,12 +236,14 @@ Record: Flow_Limit_Batch
 
 Beyond the org-level metadata, each agent has individual configuration on the `AgentGov_Registration__c` record:
 
-| Field | Description |
-|-------|-------------|
-| `Priority__c` | Agent priority for conflict resolution (1 = highest, 10 = lowest) |
-| `Daily_API_Budget__c` | Daily API call budget (overrides metadata default) |
-| `Daily_SOQL_Budget__c` | Daily SOQL query budget (overrides metadata default) |
-| `Daily_DML_Budget__c` | Daily DML operation budget (overrides metadata default) |
+| Field                                          | Description                                                                               |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `Priority__c`                                  | Agent priority for conflict resolution (1 = highest, 10 = lowest)                         |
+| `Daily_API_Budget__c`                          | Daily API call budget (overrides metadata default)                                        |
+| `Daily_SOQL_Budget__c`                         | Daily SOQL query budget (overrides metadata default)                                      |
+| `Daily_DML_Budget__c`                          | Daily DML operation budget (overrides metadata default)                                   |
+| `Agent_User__c`                                | The Salesforce user the agent runs as; REST calls by that user authenticate without a key |
+| `API_Key_Prefix__c`, `API_Key_Last_Rotated__c` | Read-only view of the current key (the key itself is stored only as a hash)               |
 
 To give a critical agent a larger budget:
 
@@ -264,6 +274,7 @@ if (!issues.isEmpty()) {
 ```
 
 This checks for:
+
 - Blank Object_Name__c
 - Blank Operation__c
 - Invalid operation values (not in the valid set and not a wildcard)

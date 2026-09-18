@@ -27,12 +27,12 @@ No. AgentGov is 100% Salesforce-native. It uses only standard Salesforce platfor
 
 AgentGov supports four agent types:
 
-| Type | Description |
-|------|-------------|
-| `Agentforce` | Salesforce Agentforce AI agents |
+| Type           | Description                                  |
+| -------------- | -------------------------------------------- |
+| `Agentforce`   | Salesforce Agentforce AI agents              |
 | `MCP_External` | External AI models connected via MCP or REST |
-| `Custom_Apex` | Custom Apex-based automation agents |
-| `Flow_Based` | Salesforce Flow-based automation agents |
+| `Custom_Apex`  | Custom Apex-based automation agents          |
+| `Flow_Based`   | Salesforce Flow-based automation agents      |
 
 You can apply different policies and budgets to each type.
 
@@ -50,7 +50,7 @@ Each agent has a daily budget for three resource types: API Calls, SOQL Queries,
 
 ### When do budgets reset?
 
-Budgets reset at midnight, triggered by the `AgentGovDailyReset` scheduled job. If this job is not scheduled, budgets will not reset automatically. New budget records are created for the new day; old records remain for historical analysis.
+A budget row is created per agent per day on first use, so an agent is never blocked by yesterday's usage even with no job scheduled. The `AgentGovDailyReset` job creates the day's rows up front, which keeps the dashboards populated before any agent acts and makes the reset time predictable. Old rows remain for historical analysis.
 
 ### Can I give different budgets to different agents?
 
@@ -58,7 +58,7 @@ Yes. Each agent's `AgentGov_Registration__c` record has `Daily_API_Budget__c`, `
 
 ### What happens when an agent exceeds its budget?
 
-At 80% usage (configurable), a Warning platform event is fired. At 90%, a Throttle event fires. At 95%, the agent is Blocked and further requests are denied with a `BUDGET_EXCEEDED` error. At 100%, the budget is Exhausted.
+At 80% usage (configurable), a Warning platform event is fired. At 90%, a Throttle event fires. At 95%, the agent is Blocked and further requests are denied with a `BUDGET_EXCEEDED` error. At 100%, the budget is Exhausted. The status is the most severe status across the three limit types, so an agent that has exhausted one type is denied every operation until a credit or the daily reset. The consumption that crossed the line is recorded before the denial is returned.
 
 ### Does AgentGov track actual Salesforce governor limits?
 
@@ -82,7 +82,7 @@ The circuit breaker is a resilience pattern that automatically disables agents t
 
 - **CLOSED:** Normal operation. Failures are counted.
 - **OPEN:** Agent is blocked. All requests denied. Waiting for cooldown.
-- **HALF_OPEN:** One test request is allowed. Success closes the breaker; failure re-opens it.
+- **HALF_OPEN:** Exactly one probe request is admitted; others are denied until it reports. Success closes the breaker; failure re-opens it with a doubled cooldown, capped at one day.
 
 ### How many failures before the circuit breaker trips?
 
@@ -90,18 +90,19 @@ By default, 5 consecutive failures. This is configurable via `AgentGov_Settings_
 
 ### What counts as a "failure"?
 
-Any `AgentGovCircuitBreaker.recordFailure(agentId)` call counts as a failure. In the invocable action flow (`AgentGovRegisterAction`), failures are recorded automatically when non-budget exceptions occur. Budget exceeded errors do not count as circuit breaker failures (the agent is not "broken" -- it is just over budget).
+Any `AgentGovCircuitBreaker.recordFailure(agentId)` call counts as a failure. The proxy records a failure when every record in a write fails. Governance denials (policy, budget, conflict) are not failures: the agent is not broken, it was refused.
 
 ### Can I manually reset a circuit breaker?
 
 Yes:
+
 ```apex
 AgentGovCircuitBreaker.resetBreaker(agentId);
 ```
 
-### What is exponential backoff?
+### How does the retry cooldown grow?
 
-When an agent's test request (in HALF_OPEN state) fails, the circuit breaker re-opens with a doubled cooldown period. If the base cooldown is 30 minutes, subsequent trips will be 60 minutes, then 120 minutes, and so on. This prevents a persistently broken agent from consuming resources with frequent test requests.
+When an agent's probe request (in HALF_OPEN state) fails, the circuit breaker re-opens with twice the configured base cooldown rather than the base itself. It is a fixed doubling, not a compounding backoff: a repeatedly failing agent waits twice the base before each new probe, never longer. The result is capped at one day, which only binds if the base cooldown is set above twelve hours.
 
 ---
 
@@ -110,6 +111,7 @@ When an agent's test request (in HALF_OPEN state) fails, the circuit breaker re-
 ### How are policies evaluated?
 
 Policies are matched in this order:
+
 1. Find all policies where `Agent_Type__c` matches the agent's type or is `All`.
 2. Within those, find policies where `Object_Name__c` and `Operation__c` match (exact or wildcard `*`).
 3. If any matching policy has `Is_Allowed__c = false`, the action is denied (deny always wins).
@@ -117,11 +119,11 @@ Policies are matched in this order:
 
 ### Can I restrict specific fields?
 
-Yes. Set the `Field_Restrictions__c` field on a policy to a comma-separated list of field API names. The `PolicyResult` object will include these in the `restrictedFields` set. Your agent code is responsible for honoring these restrictions -- AgentGov does not automatically strip fields from DML operations.
+Yes. Set the `Field_Restrictions__c` field on a policy to a comma-separated list of field API names. The proxy endpoints enforce them: a request that reads or writes a restricted field is denied with `POLICY_VIOLATION`, not silently trimmed. Apex callers enforce them with `AgentGovPolicyEngine.assertFieldsAllowed`.
 
 ### Do policies apply to REST API calls?
 
-Yes. The `/authorize` endpoint runs the full policy evaluation pipeline.
+Yes. `/authorize` and every proxy endpoint run the full policy evaluation, and the proxy additionally enforces field restrictions and record caps.
 
 ---
 
@@ -145,7 +147,7 @@ Yes. Set `Enable_Conflict_Detection__c = false` in `AgentGov_Settings__c`. When 
 
 ### How do I authenticate REST API calls?
 
-Use standard Salesforce OAuth 2.0 authentication. The recommended flow for server-to-server integration is the Client Credentials Flow or JWT Bearer Flow. Include the access token in the `Authorization: Bearer <token>` header.
+Two layers. First, a Salesforce OAuth 2.0 access token from an External Client App (Connected Apps can no longer be created in most orgs), in the `Authorization: Bearer <token>` header; the token's user needs the `AgentGov_Agent` permission set. Second, the agent identity: the `X-AgentGov-Key` header, or nothing at all when the token's user is bound to the registration through `Agent_User__c`. Keys are stored only as SHA-256 hashes. See the REST API reference.
 
 ### What is the difference between /register and /authorize?
 
@@ -167,13 +169,13 @@ AgentGov adds a small amount of latency for the governance checks (typically 10-
 ### How many SOQL queries does AgentGov consume per call?
 
 In a typical `/authorize` call:
-- 1 query for the registration (by API key)
-- 1 query for today's budget (with FOR UPDATE)
-- 0 queries for settings (cached)
-- 0 queries for policies (cached from metadata)
 
-Total: approximately 2 SOQL queries per authorization. Subsequent calls in the same transaction benefit from caching.
+- 1 query to resolve the registration (by key hash or bound user) and 1 to load it
+- 1 query for the policy metadata and 1 for the limit configuration (both cached for the rest of the transaction)
+- 1 locking query for today's budget, plus 1 for the active session counters
+
+Around five or six queries on a cold transaction, most of them cached afterwards. The Flow actions are bulk-safe: 200 requests in one batch cost the same handful of queries.
 
 ### Can AgentGov handle high concurrency?
 
-Budget consumption uses `FOR UPDATE` to prevent race conditions on budget records. The in-memory lock table handles conflict detection within a single transaction. For true cross-transaction concurrency at scale, consider implementing additional locking mechanisms at the application layer.
+Budget consumption locks the budget row with `FOR UPDATE`, and the unique `Budget_Key__c` guarantees that two transactions racing to create the day's first budget cannot both succeed. The half-open circuit breaker admits one probe at a time under the same kind of lock. Conflict detection between agents is still per transaction; cross-transaction locks are on the roadmap.

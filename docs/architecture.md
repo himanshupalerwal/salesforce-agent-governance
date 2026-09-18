@@ -1,6 +1,7 @@
 # Architecture Overview
 
-This document describes the architecture of the AgentGov framework, including system context, component design, data model, and request lifecycle.
+This document describes the architecture of the AgentGov framework: system context,
+components and their security posture, the data model, and the request lifecycles.
 
 ---
 
@@ -10,21 +11,39 @@ This document describes the architecture of the AgentGov framework, including sy
 C4Context
     title AgentGov System Context
 
-    Person(admin, "Salesforce Admin", "Configures agents, policies, and limits")
+    Person(admin, "Salesforce Admin", "Configures agents, policies, limits, and alerts")
     Person(dev, "Developer", "Builds agents and integrations")
 
     System(agentgov, "AgentGov Framework", "Salesforce-native governance for AI agents")
 
-    System_Ext(agentforce, "Agentforce", "Salesforce native AI agents")
-    System_Ext(mcp, "MCP Server", "External AI model via MCP protocol")
+    System_Ext(agentforce, "Agentforce", "Salesforce native AI agents, running as Agent Users")
+    System_Ext(mcp, "MCP Server", "External AI model via the Model Context Protocol")
     System_Ext(external, "External System", "Third-party APIs and services")
 
-    Rel(admin, agentgov, "Configures via Setup UI")
-    Rel(dev, agentgov, "Integrates via Apex / REST")
-    Rel(agentforce, agentgov, "Registers actions via Apex / Invocable")
-    Rel(mcp, agentgov, "Registers actions via REST API")
-    Rel(agentgov, external, "Monitors callouts to")
+    Rel(admin, agentgov, "Configures via Setup and the AgentGov app")
+    Rel(dev, agentgov, "Integrates via Apex, Flow, and REST")
+    Rel(agentforce, agentgov, "Governed through Flow actions and AgentGovContext")
+    Rel(mcp, agentgov, "Calls the governed proxy over REST")
+    Rel(agentgov, external, "Charges callouts to the agent's budget")
 ```
+
+---
+
+## Security model
+
+Since API version 67.0, database operations run in user mode unless a class says otherwise.
+AgentGov makes that decision explicit for every code path:
+
+| Layer                                                                               | Sharing             | Access mode   | Reason                                                                                                                                                                                                                                                         |
+| ----------------------------------------------------------------------------------- | ------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AgentGovSelector`, `AgentGovDml`, `AgentGovCleanup`                                | `without sharing`   | `SYSTEM_MODE` | The framework's ledger must be readable and writable whoever triggered the action. Agent Users and integration users hold no access to AgentGov objects. Policy metadata is read here too, so a caller without metadata access cannot make policies disappear. |
+| `AgentGovProxyApi` (via `AgentGovQueryBuilder`)                                     | `with sharing`      | `USER_MODE`   | Work done on an agent's behalf against customer data respects the calling user's object permissions, field-level security, and sharing.                                                                                                                        |
+| `AgentGovDashboardController`                                                       | `with sharing`      | `USER_MODE`   | People see only what they may see.                                                                                                                                                                                                                             |
+| Service classes (budget, breaker, policy, registry, context, trigger handler, jobs) | `inherited sharing` | none directly | They touch no data themselves; reads go through the selector, writes through `AgentGovDml`.                                                                                                                                                                    |
+| Platform-event triggers                                                             | not declarable      | system        | Platform rule; the handlers write only framework records.                                                                                                                                                                                                      |
+
+REST callers are identified by an API key hash (`X-AgentGov-Key`) or by the Salesforce user
+bound to the registration (`Agent_User__c`). Nothing an agent sends is executed as SOQL.
 
 ---
 
@@ -33,94 +52,99 @@ C4Context
 ```mermaid
 flowchart TB
     subgraph EntryPoints["Entry Points"]
-        REST["AgentGovRestApi\n(REST Resource)"]
-        PROXY["AgentGovProxyApi\n(Governed CRUD Proxy)"]
-        CTX["AgentGovContext\n(Apex Limits Measurement)"]
-        INV["Invocable Actions\n(Flow Integration)"]
-        APEX["Direct Apex\n(Custom Code)"]
+        REST["AgentGovRestApi\n/register /authorize /report\n/rotate-key /budget /health"]
+        PROXY["AgentGovProxyApi\n/query /create /update\n/delete /upsert"]
+        CTX["AgentGovContext\n(Limits measurement)"]
+        INV["Invocable Actions\n(5 Flow actions)"]
+        LWC["Lightning Web Components\n(dashboards)"]
     end
 
-    subgraph CoreServices["Core Services"]
-        REG["AgentGovRegistryService\nAgent registration, activation,\nsession management"]
-        BM["AgentGovBudgetManager\nBudget allocation, consumption,\nthreshold alerts"]
-        CB["AgentGovCircuitBreaker\nHealth monitoring,\nfailure tracking, auto-disable"]
-        PE["AgentGovPolicyEngine\nAccess control evaluation,\nfield restrictions"]
-        CR["AgentGovConflictResolver\nRecord locking,\npriority-based resolution"]
+    subgraph RestSupport["REST Support"]
+        AUTH["AgentGovRestAuth\nkey hash / user binding"]
+        RESP["AgentGovRestResponder\nenvelope, correlation id"]
+        QB["AgentGovQueryBuilder\nstructured query → bound SOQL"]
     end
 
-    subgraph DataLayer["Data Access Layer"]
-        SEL["AgentGovSelector\nCentralized SOQL,\ncaching, security enforcement"]
+    subgraph CoreServices["Core Services (inherited sharing)"]
+        REG["AgentGovRegistryService"]
+        BM["AgentGovBudgetManager"]
+        CB["AgentGovCircuitBreaker"]
+        PE["AgentGovPolicyEngine"]
+        CR["AgentGovConflictResolver"]
+        TH["AgentGovTriggerHandler\naudit trail, alerts"]
     end
 
-    subgraph BackgroundJobs["Background Jobs"]
-        DR["AgentGovDailyReset\n(Schedulable)"]
-        HC["AgentGovHealthCheck\n(Schedulable)"]
-        CL["AgentGovCleanup\n(Batchable)"]
+    subgraph DataLayer["Framework Data Layer (system mode)"]
+        SEL["AgentGovSelector\nreads + caching"]
+        DML["AgentGovDml\nwrites + publish"]
     end
 
-    subgraph SharedInfra["Shared Infrastructure"]
-        CONST["AgentGovConstants\nAll constants and\nerror messages"]
-        EX["AgentGovException\nTyped error codes\nwith HTTP mappings"]
-        TH["AgentGovTriggerHandler\nAction logging"]
+    subgraph UserData["Customer Data (user mode)"]
+        DC["AgentGovDashboardController"]
+        SF["Database.* with USER_MODE"]
     end
 
-    REST --> REG
-    REST --> BM
+    subgraph Jobs["Background Jobs"]
+        DR["AgentGovDailyReset"]
+        HC["AgentGovHealthCheck"]
+        CL["AgentGovCleanup"]
+    end
+
+    REST --> AUTH
+    REST --> RESP
+    PROXY --> AUTH
+    PROXY --> RESP
+    PROXY --> QB
+    QB --> SF
+    PROXY --> SF
     REST --> CB
     REST --> PE
+    REST --> BM
     REST --> CR
-
     PROXY --> CB
     PROXY --> PE
     PROXY --> BM
     PROXY --> CR
-
     CTX --> BM
-
-    INV --> REG
-    INV --> BM
     INV --> CB
     INV --> PE
-
-    APEX --> REG
-    APEX --> BM
-    APEX --> CB
-    APEX --> PE
-    APEX --> CR
-
+    INV --> BM
+    INV --> TH
+    LWC --> DC
     REG --> SEL
+    REG --> DML
     BM --> SEL
+    BM --> DML
     CB --> SEL
+    CB --> DML
     PE --> SEL
-    CR --> SEL
-
+    CR --> DML
+    TH --> DML
     DR --> BM
-    HC --> SEL
-    CL --> SEL
-
-    REG -.-> CONST
-    BM -.-> CONST
-    CB -.-> CONST
-    PE -.-> CONST
-    CR -.-> CONST
+    HC --> CB
+    CL --> DML
 ```
 
 ### Component Responsibilities
 
-| Component | Responsibility |
-|-----------|---------------|
-| **AgentGovRegistryService** | Agent CRUD, activation/deactivation, session lifecycle |
-| **AgentGovBudgetManager** | Daily budget creation, consumption tracking, threshold alerts via platform events |
-| **AgentGovCircuitBreaker** | CLOSED/OPEN/HALF_OPEN state machine, failure counting, cooldown with exponential backoff |
-| **AgentGovPolicyEngine** | Metadata-driven policy evaluation, wildcard matching, field restrictions |
-| **AgentGovConflictResolver** | In-memory record locking, priority-based conflict resolution, conflict logging |
-| **AgentGovSelector** | All SOQL queries, per-transaction caching, `WITH SECURITY_ENFORCED` |
-| **AgentGovRestApi** | REST endpoints for external agent integration (`/register`, `/authorize`, `/report`) |
-| **AgentGovProxyApi** | Governed CRUD proxy — executes DML/SOQL on behalf of agents with real budget tracking |
-| **AgentGovContext** | Transaction-level measurement for Apex agents using `Limits` class |
-| **AgentGovReportUsage** | Invocable action for Flows to report actual resource consumption |
-| **AgentGovConstants** | Centralized string literals, default values, valid type sets |
-| **AgentGovException** | Typed exceptions with error codes mapped to HTTP status codes |
+| Component                                    | Responsibility                                                                                          |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| **AgentGovRegistryService**                  | Registration, activation, key issuance, agent-user binding, session lifecycle                           |
+| **AgentGovBudgetManager**                    | Daily budget rows, single and bulk consumption, credits, threshold alerts                               |
+| **AgentGovCircuitBreaker**                   | CLOSED/OPEN/HALF_OPEN state machine with a single probe and capped backoff                              |
+| **AgentGovPolicyEngine**                     | Metadata-driven evaluation plus enforcement of field restrictions and record caps                       |
+| **AgentGovConflictResolver**                 | In-transaction record locks resolved by priority; conflict logging                                      |
+| **AgentGovContext**                          | `Limits`-based measurement for Apex agents, with nesting                                                |
+| **AgentGovTriggerHandler**                   | Action events to log rows, rejected-row recovery, alert emails, framework `System` entries, budget keys |
+| **AgentGovSelector**                         | All framework reads in system mode, cached per transaction                                              |
+| **AgentGovDml**                              | All framework writes in system mode, with result inspection                                             |
+| **AgentGovRestApi**                          | Governance endpoints                                                                                    |
+| **AgentGovProxyApi**                         | Governed CRUD and query on the agent's behalf, in user mode                                             |
+| **AgentGovRestAuth**                         | Credential resolution, key hashing, owner-or-admin guard                                                |
+| **AgentGovRestResponder**                    | Response envelope and correlation ids; internal errors logged, never echoed                             |
+| **AgentGovQueryBuilder**                     | Structured query validation and compilation with typed binds                                            |
+| **AgentGovDashboardController**              | User-mode reads for the Lightning components                                                            |
+| **AgentGovConstants**, **AgentGovException** | Vocabulary and typed errors mapped to HTTP status codes                                                 |
 
 ---
 
@@ -134,7 +158,11 @@ erDiagram
         String Agent_Type__c
         String Status__c
         String Description__c
-        String API_Key__c
+        String API_Key_Hash__c "unique, SHA-256"
+        String API_Key_Prefix__c
+        DateTime API_Key_Last_Rotated__c
+        String API_Key__c "deprecated"
+        Id Agent_User__c FK "User"
         String Owner_Email__c
         Decimal Priority__c
         Decimal Daily_API_Budget__c
@@ -144,6 +172,7 @@ erDiagram
         Decimal Failure_Count__c
         DateTime Last_Failure__c
         DateTime Cooldown_Until__c
+        DateTime Half_Open_Probe_At__c
         DateTime Last_Active__c
     }
 
@@ -163,6 +192,7 @@ erDiagram
         Id Id PK
         Id Agent_Registration__c FK
         Date Budget_Date__c
+        String Budget_Key__c "unique: registration + date"
         Decimal API_Calls_Allocated__c
         Decimal API_Calls_Consumed__c
         Decimal SOQL_Queries_Allocated__c
@@ -175,10 +205,12 @@ erDiagram
     AgentGov_Action_Log__c {
         Id Id PK
         Id Agent_Registration__c FK
-        String Action_Type__c
+        Id Agent_Session__c FK
+        String Action_Type__c "includes Report and System"
         String Object_Name__c
         String Record_Id__c
         String Status__c
+        String Details__c
         String Error_Message__c
         Decimal Execution_Time_Ms__c
         DateTime Timestamp__c
@@ -206,6 +238,7 @@ erDiagram
         Decimal Log_Retention_Days__c
         Boolean Enable_Conflict_Detection__c
         Boolean Enable_Real_Time_Events__c
+        String Admin_Notification_Email__c
     }
 
     AgentGov_Limit_Config__mdt {
@@ -235,131 +268,92 @@ erDiagram
 
 ### Relationships
 
-- **Registration to Session**: One-to-many. Each agent can have many sessions over time, but only one active session at a time.
-- **Registration to Budget**: One-to-many. One budget record per agent per day.
-- **Registration to Action Log**: One-to-many. Every action performed by an agent creates a log record.
-- **Registration to Conflict Log**: Many-to-many via Agent_1__c and Agent_2__c lookup fields.
+- **Registration to Session**: one-to-many; one active session at a time.
+- **Registration to Budget**: one-to-many; exactly one row per agent per day, guaranteed by
+  `Budget_Key__c`.
+- **Registration to Action Log**: one-to-many. Rows the database rejects are kept as
+  `System` entries with the original values.
+- **Registration to Conflict Log**: many-to-many via `Agent_1__c` and `Agent_2__c`.
+- **Registration to User**: `Agent_User__c` identifies the user the agent runs as.
+
+Field history is tracked on registration status, breaker state, key rotation, and agent
+user, and on budget status.
 
 ---
 
-## Request Lifecycle Sequence Diagram
+## Request Lifecycle: /authorize
 
 ```mermaid
 sequenceDiagram
     participant Agent as AI Agent
     participant REST as AgentGovRestApi
+    participant AUTH as RestAuth
     participant CB as CircuitBreaker
     participant PE as PolicyEngine
     participant BM as BudgetManager
     participant CR as ConflictResolver
-    participant SEL as Selector
-    participant EVT as Platform Events
+    participant TH as TriggerHandler
 
-    Agent->>REST: POST /authorize (apiKey, object, operation, recordId)
-    REST->>SEL: getRegistrationByApiKey(apiKey)
-    SEL-->>REST: Registration record
-
-    alt Agent not found or not active
-        REST-->>Agent: 403/404 Error
+    Agent->>REST: POST /authorize + X-AgentGov-Key (object, operation, recordId, amount)
+    REST->>AUTH: resolveRegistration(request, body)
+    AUTH-->>REST: registration (by key hash or bound user)
+    alt Not found / not Active
+        REST-->>Agent: 404 / 403 envelope
     end
-
     REST->>CB: allowRequest(agentId)
-    CB->>SEL: getRegistrationById(agentId)
-    SEL-->>CB: Registration (with CB state)
-
-    alt Circuit Breaker OPEN
-        CB-->>REST: false
-        REST-->>Agent: 503 Circuit Breaker Open
+    alt Breaker OPEN
+        REST-->>Agent: 503 CIRCUIT_BREAKER_OPEN
     end
-
-    CB-->>REST: true
-
     REST->>PE: evaluatePolicy(agentId, object, operation)
-    PE->>SEL: getPoliciesForAgentType(type)
-    SEL-->>PE: Matching policies
-
-    alt Policy Violation
-        PE-->>REST: {allowed: false, reason: "..."}
-        REST->>EVT: Publish Action Event (DENIED)
-        REST-->>Agent: 403 Policy Violation
+    alt Denied
+        REST->>TH: log Denied
+        REST-->>Agent: 403 POLICY_VIOLATION
     end
-
-    PE-->>REST: {allowed: true}
-
-    REST->>BM: consumeBudget(agentId, limitType, amount)
-    BM->>SEL: getTodaysBudgetForUpdate(agentId)
-    SEL-->>BM: Budget record (locked)
-    BM->>BM: Calculate usage percentage
-
-    alt Budget Exceeded
-        BM->>EVT: Publish Alert (BLOCK)
-        BM-->>REST: AgentGovException
-        REST-->>Agent: 429 Budget Exceeded
-    end
-
-    BM-->>REST: BudgetResult
-
     REST->>CR: checkForConflict(agentId, recordId, object)
-    CR->>CR: Check in-memory lock table
-
-    alt Record Locked by Higher Priority
-        CR->>CR: Log conflict
-        CR-->>REST: {hasConflict: true, winner: otherAgent}
-        REST-->>Agent: 409 Record Locked
+    alt Higher-priority holder
+        REST->>TH: log Denied
+        REST-->>Agent: 409 RECORD_LOCKED
     end
-
-    CR-->>REST: {hasConflict: false}
-
-    REST->>EVT: Publish Action Event (SUCCESS)
-    REST-->>Agent: 200 {authorized: true, budget: {...}}
+    REST->>BM: consumeBudget(agentId, limitType, amount)
+    Note over BM: row locked FOR UPDATE, written before any denial
+    alt Blocked / Exhausted
+        REST->>TH: log Denied
+        REST-->>Agent: 429 BUDGET_EXCEEDED
+    end
+    REST->>TH: log Success
+    REST-->>Agent: 200 {authorized, budgetStatus, remainingBudget, conflict}
 ```
 
----
-
-## Proxy API Flow (Dynamic Budget Tracking)
-
-When agents use the Proxy API instead of `/authorize`, the flow includes **actual DML execution** and budget is consumed by **record count**:
+## Request Lifecycle: the proxy
 
 ```mermaid
 sequenceDiagram
     participant Agent as MCP Agent
     participant PROXY as AgentGovProxyApi
-    participant CB as CircuitBreaker
+    participant QB as QueryBuilder
     participant PE as PolicyEngine
     participant BM as BudgetManager
-    participant SF as Salesforce DML
+    participant SF as Database (USER_MODE)
 
-    Agent->>PROXY: POST /agentgov-proxy/create (apiKey, objectName, 5 records)
-    PROXY->>PROXY: Authenticate via apiKey
-    PROXY->>CB: allowRequest(agentId)
-    CB-->>PROXY: true (CLOSED)
-    PROXY->>PE: evaluatePolicy(agentId, "Lead", "Create")
-    PE-->>PROXY: {allowed: true}
-    PROXY->>BM: consumeBudget(agentId, "DML_Operations", 5)
-    Note over BM: Budget consumed by ACTUAL<br/>record count (5), not hardcoded 1
-    BM-->>PROXY: BudgetResult
-    PROXY->>SF: Database.insert(5 Lead records)
-    SF-->>PROXY: SaveResult[] (3 success, 2 failed)
-    PROXY->>CB: recordSuccess(agentId)
-    PROXY-->>Agent: {recordsProcessed: 5, recordsSucceeded: 3, budgetStatus: "Normal"}
+    Agent->>PROXY: POST /query {objectName, fields, where, orderBy, limit}
+    PROXY->>PROXY: authenticate, circuit breaker
+    PROXY->>PE: evaluatePolicy(agentId, object, Query)
+    PE-->>PROXY: allowed, restrictedFields, maxRecords
+    PROXY->>QB: parse + describe + build (bound values, LIMIT = min(requested, cap, 2000))
+    PROXY->>PE: assertFieldsAllowed(referenced fields)
+    PROXY->>BM: consumeBudget(agentId, SOQL_Queries, 1)
+    PROXY->>SF: Database.queryWithBinds(soql, binds, USER_MODE)
+    SF-->>PROXY: records (or ACCESS_DENIED)
+    PROXY-->>Agent: 200 {totalSize, records, budgetStatus, remainingBudget}
 ```
 
-For **Apex agents**, `AgentGovContext` measures actual `Limits` class delta:
+Writes follow the same shape: policy record cap and field restrictions, conflict detection
+for records with Ids, `Security.stripInaccessible` to deny inaccessible fields before
+anything is written, budget charged by record count, then `Database.insert/update/upsert/delete`
+in user mode with per-record results.
 
-```mermaid
-sequenceDiagram
-    participant Code as Apex Agent Code
-    participant CTX as AgentGovContext
-    participant BM as BudgetManager
-
-    Code->>CTX: startTracking(agentId)
-    Note over CTX: Captures Limits.getQueries()=5<br/>Limits.getDMLStatements()=2
-    Code->>Code: Execute 3 SOQL queries + 4 DML statements
-    Code->>CTX: stopTracking()
-    Note over CTX: Captures Limits.getQueries()=8<br/>Limits.getDMLStatements()=6<br/>Delta: SOQL=3, DML=4
-    CTX->>BM: consumeBudget(agentId, {SOQL: 3, DML: 4})
-    BM-->>CTX: BudgetResult (actual consumption recorded)
-```
+For **Apex agents**, `AgentGovContext` measures the `Limits` delta between `startTracking`
+and `stopTracking` and charges it; nested contexts charge each agent for its own work.
 
 ---
 
@@ -374,55 +368,44 @@ stateDiagram-v2
     CLOSED --> OPEN : recordFailure() [count >= threshold]
 
     OPEN --> OPEN : allowRequest() → false
-    OPEN --> HALF_OPEN : allowRequest() [cooldown elapsed]
+    OPEN --> HALF_OPEN : allowRequest() or health check [cooldown elapsed]
 
-    HALF_OPEN --> CLOSED : recordSuccess() → reset failures
-    HALF_OPEN --> OPEN : recordFailure() → 2x cooldown
-
-    note right of CLOSED
-        Normal operation.
-        Failure count tracked.
-        All requests pass through.
-    end note
-
-    note right of OPEN
-        Agent blocked.
-        Status set to Blocked.
-        Cooldown timer running.
-    end note
-
-    note left of HALF_OPEN
-        One test request allowed.
-        Status set to Throttled.
-        Success closes breaker.
-        Failure re-opens with
-        doubled cooldown.
-    end note
+    HALF_OPEN --> HALF_OPEN : allowRequest() → one probe admitted, others denied
+    HALF_OPEN --> CLOSED : recordSuccess() → failures reset
+    HALF_OPEN --> OPEN : recordFailure() → cooldown x2 (capped at 24h)
 ```
 
-### State Transitions
+| From      | To        | Trigger                                                  | Side effects                                              |
+| --------- | --------- | -------------------------------------------------------- | --------------------------------------------------------- |
+| CLOSED    | OPEN      | `recordFailure()` at the threshold                       | Status Blocked, `Cooldown_Until__c` set, alert published  |
+| OPEN      | HALF_OPEN | `allowRequest()` or `AgentGovHealthCheck` after cooldown | Status Throttled; the admitting request becomes the probe |
+| HALF_OPEN | CLOSED    | `recordSuccess()`                                        | Failures reset, probe cleared, status Active              |
+| HALF_OPEN | OPEN      | `recordFailure()`                                        | Cooldown doubled, capped at one day, alert published      |
 
-| From | To | Trigger | Side Effects |
-|------|----|---------|--------------|
-| CLOSED | OPEN | `recordFailure()` when `Failure_Count__c >= threshold` | Status set to Blocked, Cooldown_Until__c set, Alert event fired |
-| OPEN | HALF_OPEN | `allowRequest()` when `DateTime.now() >= Cooldown_Until__c` | Status set to Throttled |
-| HALF_OPEN | CLOSED | `recordSuccess()` | Failure count reset to 0, Status set to Active |
-| HALF_OPEN | OPEN | `recordFailure()` | Cooldown doubled (exponential backoff) |
+The proxy and the Flow actions report outcomes automatically. Agents that use `/authorize`
+report their own by including `"success": true` or `false` in the body of the subsequent
+`POST /agentgov/report` call, which maps onto `recordSuccess()` / `recordFailure()`. The
+response carries `circuitBreakerState` so the agent can see the result of its probe.
 
-> **Note:** The Governed Proxy API (`AgentGovProxyApi`) automatically calls `recordSuccess()` or `recordFailure()` based on DML results. Agents using `/authorize` must call these methods themselves.
+`/authorize` admits Throttled agents deliberately: Throttled is the status a HALF_OPEN breaker
+carries, and the breaker itself decides whether a given call is the single admitted probe.
 
 ---
 
 ## Design Principles
 
-1. **Security First**: All SOQL uses `WITH SECURITY_ENFORCED`. All classes use `with sharing`. FLS is enforced at the selector layer.
-
-2. **Bulkification**: All invocable actions accept and return `List<>`. Budget operations use `FOR UPDATE` to prevent race conditions.
-
-3. **Caching**: The `AgentGovSelector` caches settings, metadata, and registration records per transaction to minimize SOQL consumption.
-
-4. **Fail-Safe Defaults**: If Custom Settings are not configured, sensible defaults are used (from `AgentGovConstants`). If the framework is disabled, all actions are allowed.
-
-5. **Separation of Concerns**: Entry points (REST, Invocable, Apex) are thin wrappers. Business logic lives in service classes. Data access is centralized in the Selector.
-
-6. **Observability**: Platform Events provide real-time visibility. Action Logs and Conflict Logs provide historical audit trails. Budget status is always available via API.
+1. **Explicit access modes.** Framework bookkeeping runs in system mode through two
+   classes; everything on an agent's behalf runs in user mode. No class relies on the
+   platform default.
+2. **Nothing from the caller is executed.** Queries are compiled from structured input with
+   bound values; object and field names are validated against describe metadata.
+3. **Deny loudly, never trim silently.** Restricted fields, inaccessible fields, and record
+   caps produce a 403 that names the problem.
+4. **The ledger is written first.** Consumption that crosses a threshold is persisted before
+   the denial is raised; audit rows the database rejects are kept as `System` entries.
+5. **Bulk by default.** Every invocable action and service method handles collections with a
+   fixed number of queries and DML statements.
+6. **Fail-safe defaults.** Missing settings fall back to constants; a disabled framework
+   allows everything and says so.
+7. **Observability.** Platform events for live dashboards and integrations, action and
+   conflict logs for history, correlation ids on every REST response.
