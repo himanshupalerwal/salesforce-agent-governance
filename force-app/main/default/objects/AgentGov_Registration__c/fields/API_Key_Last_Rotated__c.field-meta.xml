@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>API_Key_Last_Rotated__c</fullName>
+    <label>API Key Last Rotated</label>
+    <type>DateTime</type>
+    <required>false</required>
+    <externalId>false</externalId>
+    <trackHistory>true</trackHistory>
+    <description>When the agent's API key was last issued or rotated.</description>
+</CustomField>

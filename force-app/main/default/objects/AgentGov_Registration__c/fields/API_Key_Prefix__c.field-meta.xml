@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>API_Key_Prefix__c</fullName>
+    <label>API Key Prefix</label>
+    <type>Text</type>
+    <length>12</length>
+    <required>false</required>
+    <unique>false</unique>
+    <externalId>false</externalId>
+    <description>The first characters of the agent's API key, so an administrator can recognise which key is in use without the framework storing the key.</description>
+</CustomField>

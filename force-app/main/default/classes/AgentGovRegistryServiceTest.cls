@@ -1,5 +1,10 @@
+/**
+ * @description Tests for AgentGovRegistryService: registration, credentials, activation, and sessions.
+ */
 @IsTest
 private class AgentGovRegistryServiceTest {
+    /** @description A caller-supplied key long enough that its stored prefix does not reveal it. */
+    private static final String SUPPLIED_KEY = 'agk_registry_service_test_key_001';
 
     @TestSetup
     static void setup() {
@@ -7,162 +12,185 @@ private class AgentGovRegistryServiceTest {
     }
 
     @IsTest
-    static void testRegisterAgent() {
+    static void registerStoresHashedKeyAndStartsInactive() {
         Test.startTest();
         AgentGov_Registration__c reg = AgentGovRegistryService.registerAgent(
-            'New Agent', 'Agentforce', 'Test description', 'key-001', 'test@test.com'
+            'New Agent',
+            'Agentforce',
+            'Test description',
+            SUPPLIED_KEY,
+            'owner@example.com'
         );
         Test.stopTest();
 
-        System.assertNotEquals(null, reg.Id, 'Should create a registration');
-        System.assertEquals('New Agent', reg.Agent_Name__c);
-        System.assertEquals(AgentGovConstants.STATUS_INACTIVE, reg.Status__c, 'New agents should start as Inactive');
+        AgentGov_Registration__c stored = [
+            SELECT Agent_Name__c, Status__c, API_Key__c, API_Key_Hash__c, API_Key_Prefix__c
+            FROM AgentGov_Registration__c
+            WHERE Id = :reg.Id
+        ];
+        Assert.areEqual('New Agent', stored.Agent_Name__c);
+        Assert.areEqual(AgentGovConstants.STATUS_INACTIVE, stored.Status__c);
+        Assert.isNull(stored.API_Key__c, 'Plaintext keys are never stored');
+        Assert.areEqual(AgentGovRestAuth.hashKey(SUPPLIED_KEY), stored.API_Key_Hash__c);
+        // The prefix is readable by dashboard users, so it must never be the whole key.
+        Assert.areEqual(
+            SUPPLIED_KEY.substring(0, AgentGovConstants.API_KEY_IDENTIFIER_LENGTH),
+            stored.API_Key_Prefix__c,
+            'Only the identifying prefix is stored'
+        );
+        Assert.isTrue(
+            stored.API_Key_Prefix__c.length() < SUPPLIED_KEY.length(),
+            'The stored prefix is shorter than the key it identifies'
+        );
     }
 
     @IsTest
-    static void testRegisterAgentInvalidName() {
+    static void registerRejectsAKeyShortEnoughToBeRevealedByItsPrefix() {
         Test.startTest();
+        try {
+            AgentGovRegistryService.registerAgent('Short Key Agent', 'Agentforce', null, 'key-001', null);
+            Assert.fail('A key shorter than the minimum must be refused');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+        }
+        Test.stopTest();
+
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Registration__c WHERE Agent_Name__c = 'Short Key Agent'],
+            'No registration is created when the key is refused'
+        );
+    }
+
+    @IsTest
+    static void registerRejectsInvalidInput() {
         try {
             AgentGovRegistryService.registerAgent('', 'Agentforce', null, null, null);
-            System.assert(false, 'Should have thrown exception');
+            Assert.fail('Blank name must be rejected');
         } catch (AgentGovException e) {
-            System.assertEquals(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
         }
-        Test.stopTest();
-    }
-
-    @IsTest
-    static void testRegisterAgentInvalidType() {
-        Test.startTest();
         try {
             AgentGovRegistryService.registerAgent('Agent', 'InvalidType', null, null, null);
-            System.assert(false, 'Should have thrown exception');
+            Assert.fail('Unknown type must be rejected');
         } catch (AgentGovException e) {
-            System.assertEquals(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
         }
-        Test.stopTest();
     }
 
     @IsTest
-    static void testActivateAgent() {
-        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', true);
+    static void issueApiKeyReplacesPreviousKey() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistrationWithApiKey(
+            'Keyed',
+            'Agentforce',
+            'first'
+        );
+
+        String issued = AgentGovRegistryService.issueApiKey(reg.Id);
+
+        AgentGov_Registration__c stored = [
+            SELECT API_Key_Hash__c, API_Key_Last_Rotated__c
+            FROM AgentGov_Registration__c
+            WHERE Id = :reg.Id
+        ];
+        Assert.areEqual(AgentGovRestAuth.hashKey(issued), stored.API_Key_Hash__c);
+        Assert.areNotEqual(AgentGovRestAuth.hashKey('first'), stored.API_Key_Hash__c);
+        Assert.isNotNull(stored.API_Key_Last_Rotated__c);
+    }
+
+    @IsTest
+    static void bindAgentUser() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Bound', 'Agentforce', true);
+
+        AgentGovRegistryService.bindAgentUser(reg.Id, UserInfo.getUserId());
+
+        Assert.areEqual(
+            UserInfo.getUserId(),
+            [SELECT Agent_User__c FROM AgentGov_Registration__c WHERE Id = :reg.Id].Agent_User__c
+        );
+    }
+
+    @IsTest
+    static void activateAndDeactivate() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', false);
         reg.Status__c = AgentGovConstants.STATUS_INACTIVE;
-        update reg;
-        AgentGovSelector.clearCache();
+        insert reg;
 
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovRegistryService.activateAgent(reg.Id);
-        Test.stopTest();
+        AgentGov_Registration__c activated = AgentGovRegistryService.activateAgent(reg.Id);
+        Assert.areEqual(AgentGovConstants.STATUS_ACTIVE, activated.Status__c);
+        Assert.isNotNull(activated.Last_Active__c);
 
-        System.assertEquals(AgentGovConstants.STATUS_ACTIVE, result.Status__c);
-    }
-
-    @IsTest
-    static void testActivateAgentNotFound() {
-        Test.startTest();
-        try {
-            // Use a fake but valid-format ID
-            AgentGovRegistryService.activateAgent('a00000000000001AAA');
-            System.assert(false, 'Should have thrown exception');
-        } catch (AgentGovException e) {
-            System.assertEquals(AgentGovException.ErrorCode.AGENT_NOT_FOUND, e.getErrorCode());
-        }
-        Test.stopTest();
-    }
-
-    @IsTest
-    static void testDeactivateAgent() {
-        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', true);
         AgentGovTestDataFactory.createSession(reg.Id, true);
-
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovRegistryService.deactivateAgent(reg.Id);
-        Test.stopTest();
-
-        System.assertEquals(AgentGovConstants.STATUS_INACTIVE, result.Status__c);
-        // Verify session was terminated
-        AgentGov_Session__c session = [SELECT Status__c FROM AgentGov_Session__c WHERE Agent_Registration__c = :reg.Id LIMIT 1];
-        System.assertEquals(AgentGovConstants.SESSION_TERMINATED, session.Status__c);
+        AgentGov_Registration__c deactivated = AgentGovRegistryService.deactivateAgent(reg.Id);
+        Assert.areEqual(AgentGovConstants.STATUS_INACTIVE, deactivated.Status__c);
+        Assert.areEqual(
+            AgentGovConstants.SESSION_TERMINATED,
+            [SELECT Status__c FROM AgentGov_Session__c WHERE Agent_Registration__c = :reg.Id].Status__c,
+            'Deactivation ends the active session'
+        );
     }
 
     @IsTest
-    static void testStartSession() {
+    static void unknownAgentIsRejected() {
+        Id unknownId = AgentGov_Registration__c.SObjectType.getDescribe().getKeyPrefix() + '000000000001AAA';
+        try {
+            AgentGovRegistryService.activateAgent(unknownId);
+            Assert.fail('Unknown agent must be rejected');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.AGENT_NOT_FOUND, e.getErrorCode());
+        }
+        Assert.isNull(AgentGovRegistryService.getAgent(unknownId));
+    }
+
+    @IsTest
+    static void sessionsStartAndEnd() {
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', true);
 
-        Test.startTest();
         AgentGov_Session__c session = AgentGovRegistryService.startSession(reg.Id);
-        Test.stopTest();
+        Assert.areEqual(AgentGovConstants.SESSION_ACTIVE, session.Status__c);
 
-        System.assertNotEquals(null, session.Id);
-        System.assertEquals(AgentGovConstants.SESSION_ACTIVE, session.Status__c);
+        AgentGov_Session__c ended = AgentGovRegistryService.endSession(session.Id);
+        Assert.areEqual(AgentGovConstants.SESSION_COMPLETED, ended.Status__c);
+        Assert.isNotNull(ended.Session_End__c);
+
+        try {
+            AgentGovRegistryService.endSession(null);
+            Assert.fail('Unknown session must be rejected');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovConstants.ERR_SESSION_NOT_ACTIVE, e.getMessage());
+        }
     }
 
     @IsTest
-    static void testStartSessionInactiveAgent() {
-        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', true);
+    static void inactiveAgentCannotStartSession() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', false);
         reg.Status__c = AgentGovConstants.STATUS_INACTIVE;
-        update reg;
-        AgentGovSelector.clearCache();
+        insert reg;
 
-        Test.startTest();
         try {
             AgentGovRegistryService.startSession(reg.Id);
-            System.assert(false, 'Should have thrown exception');
+            Assert.fail('Inactive agents cannot start sessions');
         } catch (AgentGovException e) {
-            System.assertEquals(AgentGovException.ErrorCode.AGENT_NOT_ACTIVE, e.getErrorCode());
+            Assert.areEqual(AgentGovException.ErrorCode.AGENT_NOT_ACTIVE, e.getErrorCode());
         }
-        Test.stopTest();
     }
 
     @IsTest
-    static void testEndSession() {
-        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', true);
-        AgentGov_Session__c session = AgentGovTestDataFactory.createSession(reg.Id, true);
-
-        Test.startTest();
-        AgentGov_Session__c result = AgentGovRegistryService.endSession(session.Id);
-        Test.stopTest();
-
-        System.assertEquals(AgentGovConstants.SESSION_COMPLETED, result.Status__c);
-        System.assertNotEquals(null, result.Session_End__c);
-    }
-
-    @IsTest
-    static void testGetAgent() {
-        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Test', 'Agentforce', true);
-
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovRegistryService.getAgent(reg.Id);
-        Test.stopTest();
-
-        System.assertNotEquals(null, result);
-        System.assertEquals('Test', result.Agent_Name__c);
-    }
-
-    @IsTest
-    static void testMaxConcurrentAgents() {
-        // Set max to 1
+    static void concurrentAgentLimitIsEnforced() {
         AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
         settings.Max_Concurrent_Agents__c = 1;
         update settings;
         AgentGovSelector.clearCache();
-
-        // First agent is already active from createRegistration
         AgentGovTestDataFactory.createRegistration('Agent 1', 'Agentforce', true);
+        AgentGov_Registration__c second = AgentGovTestDataFactory.createRegistration('Agent 2', 'Custom_Apex', false);
+        second.Status__c = AgentGovConstants.STATUS_INACTIVE;
+        insert second;
 
-        // Try to activate a second
-        AgentGov_Registration__c reg2 = AgentGovTestDataFactory.createRegistration('Agent 2', 'Custom_Apex', false);
-        reg2.Status__c = AgentGovConstants.STATUS_INACTIVE;
-        insert reg2;
-        AgentGovSelector.clearCache();
-
-        Test.startTest();
         try {
-            AgentGovRegistryService.activateAgent(reg2.Id);
-            System.assert(false, 'Should have thrown exception for max concurrent');
+            AgentGovRegistryService.activateAgent(second.Id);
+            Assert.fail('The concurrent limit must be enforced');
         } catch (AgentGovException e) {
-            System.assertEquals(AgentGovException.ErrorCode.MAX_CONCURRENT_AGENTS, e.getErrorCode());
+            Assert.areEqual(AgentGovException.ErrorCode.MAX_CONCURRENT_AGENTS, e.getErrorCode());
         }
-        Test.stopTest();
     }
 }

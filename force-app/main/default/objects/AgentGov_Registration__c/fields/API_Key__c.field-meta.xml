@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<CustomField xmlns="http://soap.sforce.com/2006/metadataAPI">
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>API_Key__c</fullName>
     <label>API Key</label>
     <type>Text</type>
@@ -8,5 +8,5 @@
     <unique>true</unique>
     <externalId>true</externalId>
     <caseSensitive>false</caseSensitive>
-    <description>Unique API key for MCP agent identification</description>
+    <description>Deprecated since v1.2: keys are stored as a hash in API_Key_Hash__c. This field is only read to upgrade keys created by earlier releases and is cleared on first use. It will be removed in v1.3.</description>
 </CustomField>
