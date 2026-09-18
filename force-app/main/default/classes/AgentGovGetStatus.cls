@@ -1,14 +1,18 @@
 /**
- * @description Invocable action to get agent health status from Flows.
- * @author Himanshu Palerwal
+ * @description Invocable action that reports an agent's status and circuit breaker state.
+ *              Bulk-safe: all requests in a batch are served by one registration read.
+ *
+ *              Security posture: with sharing. Registration reads run in system mode
+ *              through AgentGovSelector.
  */
 public with sharing class AgentGovGetStatus {
-
+    /** @description Request for one agent. */
     public class Request {
         @InvocableVariable(label='Agent Registration ID' required=true)
         public Id registrationId;
     }
 
+    /** @description Health snapshot for one agent. */
     public class Result {
         @InvocableVariable(label='Agent Name')
         public String agentName;
@@ -24,27 +28,40 @@ public with sharing class AgentGovGetStatus {
         public String errorMessage;
     }
 
-    @InvocableMethod(label='Get Agent Status' description='Gets the current health status of an agent' category='AgentGov')
+    /**
+     * @description Reads the status of each requested agent.
+     * @param requests Requests in Flow order
+     * @return Results in the same order
+     */
+    @InvocableMethod(
+        label='Get Agent Status'
+        description='Gets the current health status of an agent'
+        category='AgentGov'
+    )
     public static List<Result> getStatus(List<Request> requests) {
         List<Result> results = new List<Result>();
-        for (Request req : requests) {
+        Set<Id> registrationIds = new Set<Id>();
+        for (Request request : requests) {
+            if (request.registrationId != null) {
+                registrationIds.add(request.registrationId);
+            }
+        }
+        Map<Id, AgentGov_Registration__c> registrations = AgentGovSelector.getRegistrationsByIds(registrationIds);
+
+        for (Request request : requests) {
             Result result = new Result();
-            try {
-                AgentGov_Registration__c reg = AgentGovSelector.getRegistrationById(req.registrationId);
-                if (reg == null) {
-                    result.errorMessage = AgentGovConstants.ERR_AGENT_NOT_FOUND;
-                    result.isHealthy = false;
-                } else {
-                    result.agentName = reg.Agent_Name__c;
-                    result.agentStatus = reg.Status__c;
-                    result.circuitBreakerState = reg.Circuit_Breaker_State__c;
-                    result.failureCount = reg.Failure_Count__c;
-                    result.isHealthy = reg.Status__c == AgentGovConstants.STATUS_ACTIVE
-                        && reg.Circuit_Breaker_State__c == AgentGovConstants.CB_CLOSED;
-                }
-            } catch (Exception e) {
+            AgentGov_Registration__c registration = registrations.get(request.registrationId);
+            if (registration == null) {
                 result.isHealthy = false;
-                result.errorMessage = e.getMessage();
+                result.errorMessage = AgentGovConstants.ERR_AGENT_NOT_FOUND;
+            } else {
+                result.agentName = registration.Agent_Name__c;
+                result.agentStatus = registration.Status__c;
+                result.circuitBreakerState = registration.Circuit_Breaker_State__c;
+                result.failureCount = registration.Failure_Count__c;
+                result.isHealthy =
+                    registration.Status__c == AgentGovConstants.STATUS_ACTIVE &&
+                    registration.Circuit_Breaker_State__c == AgentGovConstants.CB_CLOSED;
             }
             results.add(result);
         }
