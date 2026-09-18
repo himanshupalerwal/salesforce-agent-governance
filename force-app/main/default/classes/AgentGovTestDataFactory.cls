@@ -1,12 +1,14 @@
 /**
  * @description Test data factory for the AgentGov framework.
- *              Provides reusable methods to create test data for all custom objects.
- * @author Himanshu Palerwal
+ *              Provides reusable builders for every custom object plus a minimal-permission
+ *              user for tests that must prove the framework works without object access.
  */
 @IsTest
 public class AgentGovTestDataFactory {
+    /** @description Profile used for the restricted test user. Falls back to Standard User when absent. */
+    private static final String MINIMUM_ACCESS_PROFILE = 'Minimum Access - Salesforce';
 
-    /** @description Creates and inserts an agent registration with default values. */
+    /** @description Creates an agent registration with default values. */
     public static AgentGov_Registration__c createRegistration(String agentName, String agentType, Boolean doInsert) {
         AgentGov_Registration__c reg = new AgentGov_Registration__c(
             Agent_Name__c = agentName,
@@ -18,7 +20,7 @@ public class AgentGovTestDataFactory {
             Daily_DML_Budget__c = AgentGovConstants.DEFAULT_DML_BUDGET,
             Circuit_Breaker_State__c = AgentGovConstants.CB_CLOSED,
             Failure_Count__c = 0,
-            Owner_Email__c = 'test@agentgov.test'
+            Owner_Email__c = 'agentgov-test@example.com'
         );
         if (doInsert) {
             insert reg;
@@ -26,20 +28,37 @@ public class AgentGovTestDataFactory {
         return reg;
     }
 
-    /** @description Creates an agent registration with a specific API key. */
-    public static AgentGov_Registration__c createRegistrationWithApiKey(String agentName, String agentType, String apiKey) {
+    /** @description Creates an agent registration whose API key is stored hashed, as in production. */
+    public static AgentGov_Registration__c createRegistrationWithApiKey(
+        String agentName,
+        String agentType,
+        String apiKey
+    ) {
+        AgentGov_Registration__c reg = createRegistration(agentName, agentType, false);
+        AgentGovRestAuth.applyKey(reg, apiKey);
+        insert reg;
+        return reg;
+    }
+
+    /** @description Creates an agent registration that still carries a pre-v1.2 plaintext key. */
+    public static AgentGov_Registration__c createRegistrationWithLegacyKey(
+        String agentName,
+        String agentType,
+        String apiKey
+    ) {
         AgentGov_Registration__c reg = createRegistration(agentName, agentType, false);
         reg.API_Key__c = apiKey;
         insert reg;
         return reg;
     }
 
-    /** @description Creates multiple agent registrations. */
+    /** @description Creates several agent registrations with hashed keys test-key-0, test-key-1, and so on. */
     public static List<AgentGov_Registration__c> createRegistrations(Integer count, String agentType) {
         List<AgentGov_Registration__c> registrations = new List<AgentGov_Registration__c>();
         for (Integer i = 0; i < count; i++) {
-            registrations.add(createRegistration('Test Agent ' + i, agentType, false));
-            registrations[i].API_Key__c = 'test-key-' + i;
+            AgentGov_Registration__c reg = createRegistration('Test Agent ' + i, agentType, false);
+            AgentGovRestAuth.applyKey(reg, 'test-key-' + i);
+            registrations.add(reg);
         }
         insert registrations;
         return registrations;
@@ -62,7 +81,7 @@ public class AgentGovTestDataFactory {
         return session;
     }
 
-    /** @description Creates a budget for an agent for today. */
+    /** @description Creates today's budget for an agent with the default allocations. */
     public static AgentGov_Budget__c createBudget(Id registrationId, Boolean doInsert) {
         AgentGov_Budget__c budget = new AgentGov_Budget__c(
             Agent_Registration__c = registrationId,
@@ -81,8 +100,13 @@ public class AgentGovTestDataFactory {
         return budget;
     }
 
-    /** @description Creates a budget with custom allocation. */
-    public static AgentGov_Budget__c createBudgetWithAllocation(Id registrationId, Integer apiCalls, Integer soqlQueries, Integer dmlOps) {
+    /** @description Creates today's budget with custom allocations. */
+    public static AgentGov_Budget__c createBudgetWithAllocation(
+        Id registrationId,
+        Integer apiCalls,
+        Integer soqlQueries,
+        Integer dmlOps
+    ) {
         AgentGov_Budget__c budget = createBudget(registrationId, false);
         budget.API_Calls_Allocated__c = apiCalls;
         budget.SOQL_Queries_Allocated__c = soqlQueries;
@@ -92,8 +116,14 @@ public class AgentGovTestDataFactory {
     }
 
     /** @description Creates an action log entry. */
-    public static AgentGov_Action_Log__c createActionLog(Id registrationId, Id sessionId, String actionType, String status, Boolean doInsert) {
-        AgentGov_Action_Log__c log = new AgentGov_Action_Log__c(
+    public static AgentGov_Action_Log__c createActionLog(
+        Id registrationId,
+        Id sessionId,
+        String actionType,
+        String status,
+        Boolean doInsert
+    ) {
+        AgentGov_Action_Log__c entry = new AgentGov_Action_Log__c(
             Agent_Registration__c = registrationId,
             Agent_Session__c = sessionId,
             Action_Type__c = actionType,
@@ -103,9 +133,9 @@ public class AgentGovTestDataFactory {
             Execution_Time_Ms__c = 50
         );
         if (doInsert) {
-            insert log;
+            insert entry;
         }
-        return log;
+        return entry;
     }
 
     /** @description Creates a conflict log entry. */
@@ -148,5 +178,45 @@ public class AgentGovTestDataFactory {
         settings.Is_Enabled__c = false;
         update settings;
         return settings;
+    }
+
+    /**
+     * @description Creates a user with the least-privileged standard profile available and
+     *              assigns the given permission sets. Runs inside System.runAs to avoid the
+     *              mixed-DML restriction between setup and non-setup objects.
+     * @param permissionSetNames API names of permission sets to assign; may be empty
+     * @return The inserted user
+     */
+    public static User createRestrictedUser(List<String> permissionSetNames) {
+        List<Profile> profiles = [SELECT Id FROM Profile WHERE Name = :MINIMUM_ACCESS_PROFILE LIMIT 1];
+        if (profiles.isEmpty()) {
+            profiles = [SELECT Id FROM Profile WHERE Name = 'Standard User' LIMIT 1];
+        }
+        String uniqueness = String.valueOf(Crypto.getRandomInteger()).replace('-', '');
+        User restricted = new User(
+            ProfileId = profiles[0].Id,
+            FirstName = 'Restricted',
+            LastName = 'Agent',
+            Alias = 'ragt' + uniqueness.left(4),
+            Username = 'restricted.agent.' + uniqueness + '@agentgov.example',
+            Email = 'restricted.agent@agentgov.example',
+            EmailEncodingKey = 'UTF-8',
+            LanguageLocaleKey = 'en_US',
+            LocaleSidKey = 'en_US',
+            TimeZoneSidKey = 'America/Los_Angeles'
+        );
+        System.runAs(new User(Id = UserInfo.getUserId())) {
+            insert restricted;
+            if (permissionSetNames != null && !permissionSetNames.isEmpty()) {
+                List<PermissionSetAssignment> assignments = new List<PermissionSetAssignment>();
+                for (PermissionSet permissionSet : [SELECT Id FROM PermissionSet WHERE Name IN :permissionSetNames]) {
+                    assignments.add(
+                        new PermissionSetAssignment(AssigneeId = restricted.Id, PermissionSetId = permissionSet.Id)
+                    );
+                }
+                insert assignments;
+            }
+        }
+        return restricted;
     }
 }
