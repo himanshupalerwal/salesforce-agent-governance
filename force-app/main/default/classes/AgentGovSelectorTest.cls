@@ -1,6 +1,8 @@
+/**
+ * @description Tests for AgentGovSelector: settings defaults, caching, and the bulk lookups.
+ */
 @IsTest
 private class AgentGovSelectorTest {
-
     @TestSetup
     static void setup() {
         AgentGovTestDataFactory.createSettings();
@@ -9,230 +11,147 @@ private class AgentGovSelectorTest {
         AgentGovTestDataFactory.createBudget(reg.Id, true);
     }
 
-    @IsTest
-    static void testGetSettings() {
-        Test.startTest();
-        AgentGov_Settings__c settings = AgentGovSelector.getSettings();
-        Test.stopTest();
-
-        System.assertNotEquals(null, settings, 'Settings should not be null');
-        System.assertEquals(true, settings.Is_Enabled__c, 'Framework should be enabled');
+    private static AgentGov_Registration__c primaryAgent() {
+        return [SELECT Id FROM AgentGov_Registration__c WHERE Agent_Name__c = 'Test Agent'];
     }
 
     @IsTest
-    static void testGetSettingsDefaultsWhenNoneExist() {
+    static void settingsAreReadAndDefaultedWhenAbsent() {
+        Assert.isTrue(AgentGovSelector.getSettings().Is_Enabled__c);
+        Assert.isTrue(AgentGovSelector.isFrameworkEnabled());
+        Assert.isTrue(AgentGovSelector.isRealTimeEventsEnabled());
+
         delete [SELECT Id FROM AgentGov_Settings__c];
         AgentGovSelector.clearCache();
 
-        Test.startTest();
-        AgentGov_Settings__c settings = AgentGovSelector.getSettings();
-        Test.stopTest();
-
-        System.assertNotEquals(null, settings, 'Should return defaults when no settings exist');
+        AgentGov_Settings__c defaults = AgentGovSelector.getSettings();
+        Assert.isNull(defaults.Id, 'Defaults are not persisted');
+        Assert.areEqual(AgentGovConstants.DEFAULT_MAX_CONCURRENT_AGENTS, defaults.Max_Concurrent_Agents__c);
     }
 
     @IsTest
-    static void testIsFrameworkEnabled() {
-        Test.startTest();
-        Boolean enabled = AgentGovSelector.isFrameworkEnabled();
-        Test.stopTest();
-
-        System.assertEquals(true, enabled, 'Framework should be enabled');
+    static void metadataIsReadInSystemMode() {
+        Assert.isFalse(AgentGovSelector.getLimitConfigs().isEmpty(), 'Shipped limit configurations are visible');
+        Assert.isNotNull(AgentGovSelector.getLimitConfigByType(AgentGovConstants.LIMIT_API_CALLS));
+        Assert.isNull(AgentGovSelector.getLimitConfigByType('Bogus'));
+        Assert.isFalse(AgentGovSelector.getPolicies().isEmpty(), 'Shipped policies are visible');
+        Assert.isFalse(AgentGovSelector.getPoliciesForAgentType(AgentGovConstants.AGENT_TYPE_MCP_EXTERNAL).isEmpty());
     }
 
     @IsTest
-    static void testGetLimitConfigs() {
+    static void registrationsAreCachedAndLoadedInBulk() {
+        Id agentId = primaryAgent().Id;
+        AgentGov_Registration__c other = AgentGovTestDataFactory.createRegistration('Other', 'Custom_Apex', true);
+
         Test.startTest();
-        List<AgentGov_Limit_Config__mdt> configs = AgentGovSelector.getLimitConfigs();
+        AgentGovSelector.getRegistrationById(agentId);
+        Integer afterFirst = Limits.getQueries();
+        AgentGovSelector.getRegistrationById(agentId);
+        Integer afterSecond = Limits.getQueries();
+        Map<Id, AgentGov_Registration__c> both = AgentGovSelector.getRegistrationsByIds(
+            new Set<Id>{ agentId, other.Id, null }
+        );
         Test.stopTest();
 
-        // Custom Metadata may or may not be present in test context
-        System.assertNotEquals(null, configs, 'Should return a list (possibly empty)');
+        Assert.areEqual(afterFirst, afterSecond, 'The second read is served from cache');
+        Assert.areEqual(2, both.size());
+        Assert.isNull(AgentGovSelector.getRegistrationById(null));
     }
 
     @IsTest
-    static void testGetRegistrationById() {
-        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
-
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovSelector.getRegistrationById(reg.Id);
-        Test.stopTest();
-
-        System.assertNotEquals(null, result, 'Should find the registration');
-        System.assertEquals('Test Agent', result.Agent_Name__c, 'Agent name should match');
+    static void registrationsCanBeLockedForUpdate() {
+        Map<Id, AgentGov_Registration__c> locked = AgentGovSelector.getRegistrationsForUpdate(
+            new Set<Id>{ primaryAgent().Id }
+        );
+        Assert.areEqual(1, locked.size());
+        Assert.isTrue(AgentGovSelector.getRegistrationsForUpdate(new Set<Id>()).isEmpty());
     }
 
     @IsTest
-    static void testGetRegistrationByIdNull() {
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovSelector.getRegistrationById(null);
-        Test.stopTest();
+    static void lookupsByHashLegacyKeyAndUser() {
+        AgentGov_Registration__c hashed = AgentGovTestDataFactory.createRegistrationWithApiKey(
+            'Hashed',
+            'Agentforce',
+            'k1'
+        );
+        AgentGov_Registration__c legacy = AgentGovTestDataFactory.createRegistrationWithLegacyKey(
+            'Legacy',
+            'Agentforce',
+            'k2'
+        );
+        AgentGov_Registration__c bound = AgentGovTestDataFactory.createRegistration('Bound', 'Agentforce', false);
+        bound.Agent_User__c = UserInfo.getUserId();
+        insert bound;
 
-        System.assertEquals(null, result, 'Should return null for null ID');
+        Assert.areEqual(hashed.Id, AgentGovSelector.getRegistrationByApiKeyHash(AgentGovRestAuth.hashKey('k1')).Id);
+        Assert.isNull(AgentGovSelector.getRegistrationByApiKeyHash(''));
+        Assert.areEqual(legacy.Id, AgentGovSelector.getRegistrationByLegacyApiKey('k2').Id);
+        Assert.isNull(AgentGovSelector.getRegistrationByLegacyApiKey(null));
+        Assert.areEqual(bound.Id, AgentGovSelector.getRegistrationByAgentUser(UserInfo.getUserId()).Id);
+        Assert.isNull(AgentGovSelector.getRegistrationByAgentUser(null));
     }
 
     @IsTest
-    static void testGetRegistrationByApiKey() {
-        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
-        reg.API_Key__c = 'test-api-key-selector';
+    static void cacheRegistrationReplacesCachedCopy() {
+        AgentGov_Registration__c reg = primaryAgent();
+        AgentGovSelector.getRegistrationById(reg.Id);
+        reg.Agent_Name__c = 'Renamed In Memory';
+
+        AgentGovSelector.cacheRegistration(reg);
+
+        Assert.areEqual('Renamed In Memory', AgentGovSelector.getRegistrationById(reg.Id).Agent_Name__c);
+    }
+
+    @IsTest
+    static void activeRegistrationsAndCounts() {
+        Assert.areEqual(1, AgentGovSelector.getActiveRegistrations().size());
+        Assert.areEqual(1, AgentGovSelector.getActiveAgentCount());
+    }
+
+    @IsTest
+    static void budgetsAreReadWithAndWithoutLock() {
+        Id agentId = primaryAgent().Id;
+        Assert.isNotNull(AgentGovSelector.getTodaysBudget(agentId));
+        Assert.isNotNull(AgentGovSelector.getTodaysBudgetForUpdate(agentId));
+        Assert.isTrue(AgentGovSelector.getTodaysBudgets(new Set<Id>()).isEmpty());
+        Assert.isTrue(AgentGovSelector.getTodaysBudgetsForUpdate(null).isEmpty());
+    }
+
+    @IsTest
+    static void sessionsAreReadByAgentAndById() {
+        Id agentId = primaryAgent().Id;
+        AgentGov_Session__c active = AgentGovSelector.getActiveSession(agentId);
+        Assert.isNotNull(active);
+        Assert.areEqual(active.Id, AgentGovSelector.getSessionById(active.Id).Id);
+        Assert.isNull(AgentGovSelector.getSessionById(null));
+        Assert.isTrue(AgentGovSelector.getActiveSessionsByAgent(new Set<Id>()).isEmpty());
+
+        // Orphan detection is time-based, so the session is aged explicitly rather than
+        // relying on the difference between the setup and test transactions.
+        AgentGov_Session__c stale = AgentGovTestDataFactory.createSession(agentId, false);
+        stale.Session_Start__c = DateTime.now().addHours(-48);
+        insert stale;
+        List<AgentGov_Session__c> orphans = AgentGovSelector.getOrphanedSessions(24);
+        Assert.areEqual(1, orphans.size(), 'Only the session older than the cutoff is orphaned');
+        Assert.areEqual(stale.Id, orphans[0].Id);
+    }
+
+    @IsTest
+    static void openAgentsPastCooldownAndRecentLogs() {
+        AgentGov_Registration__c reg = primaryAgent();
+        reg.Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN;
+        reg.Cooldown_Until__c = DateTime.now().addMinutes(-5);
         update reg;
-        AgentGovSelector.clearCache();
-
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovSelector.getRegistrationByApiKey('test-api-key-selector');
-        Test.stopTest();
-
-        System.assertNotEquals(null, result, 'Should find by API key');
-    }
-
-    @IsTest
-    static void testGetRegistrationByApiKeyBlank() {
-        Test.startTest();
-        AgentGov_Registration__c result = AgentGovSelector.getRegistrationByApiKey('');
-        Test.stopTest();
-
-        System.assertEquals(null, result, 'Should return null for blank key');
-    }
-
-    @IsTest
-    static void testGetActiveRegistrations() {
-        Test.startTest();
-        List<AgentGov_Registration__c> results = AgentGovSelector.getActiveRegistrations();
-        Test.stopTest();
-
-        System.assertEquals(1, results.size(), 'Should find 1 active agent');
-    }
-
-    @IsTest
-    static void testGetAllRegistrations() {
-        Test.startTest();
-        List<AgentGov_Registration__c> results = AgentGovSelector.getAllRegistrations();
-        Test.stopTest();
-
-        System.assert(results.size() >= 1, 'Should find at least 1 registration');
-    }
-
-    @IsTest
-    static void testGetTodaysBudget() {
-        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
-
-        Test.startTest();
-        AgentGov_Budget__c budget = AgentGovSelector.getTodaysBudget(reg.Id);
-        Test.stopTest();
-
-        System.assertNotEquals(null, budget, 'Should find today\'s budget');
-    }
-
-    @IsTest
-    static void testGetTodaysBudgetForUpdate() {
-        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
-
-        Test.startTest();
-        AgentGov_Budget__c budget = AgentGovSelector.getTodaysBudgetForUpdate(reg.Id);
-        Test.stopTest();
-
-        System.assertNotEquals(null, budget, 'Should find budget with FOR UPDATE');
-    }
-
-    @IsTest
-    static void testGetActiveSession() {
-        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
-
-        Test.startTest();
         AgentGov_Session__c session = AgentGovSelector.getActiveSession(reg.Id);
-        Test.stopTest();
+        AgentGovTestDataFactory.createActionLog(
+            reg.Id,
+            session.Id,
+            AgentGovConstants.ACTION_QUERY,
+            AgentGovConstants.ACTION_SUCCESS,
+            true
+        );
 
-        System.assertNotEquals(null, session, 'Should find active session');
-    }
-
-    @IsTest
-    static void testGetOrphanedSessions() {
-        Test.startTest();
-        List<AgentGov_Session__c> results = AgentGovSelector.getOrphanedSessions(0);
-        Test.stopTest();
-
-        System.assertNotEquals(null, results, 'Should return a list');
-    }
-
-    @IsTest
-    static void testGetActiveAgentCount() {
-        Test.startTest();
-        Integer count = AgentGovSelector.getActiveAgentCount();
-        Test.stopTest();
-
-        System.assertEquals(1, count, 'Should count 1 active agent');
-    }
-
-    @IsTest
-    static void testGetAllTodaysBudgets() {
-        Test.startTest();
-        List<AgentGov_Budget__c> budgets = AgentGovSelector.getAllTodaysBudgets();
-        Test.stopTest();
-
-        System.assertEquals(1, budgets.size(), 'Should find 1 budget for today');
-    }
-
-    @IsTest
-    static void testGetRecentActionLogs() {
-        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
-        AgentGov_Session__c session = [SELECT Id FROM AgentGov_Session__c LIMIT 1];
-        AgentGovTestDataFactory.createActionLog(reg.Id, session.Id, 'Query', 'Success', true);
-
-        Test.startTest();
-        List<AgentGov_Action_Log__c> logs = AgentGovSelector.getRecentActionLogs(reg.Id, 10);
-        Test.stopTest();
-
-        System.assertEquals(1, logs.size(), 'Should find 1 action log');
-    }
-
-    @IsTest
-    static void testGetRecentConflictLogs() {
-        List<AgentGov_Registration__c> agents = AgentGovTestDataFactory.createRegistrations(2, 'Custom_Apex');
-        AgentGovTestDataFactory.createConflictLog(agents[0].Id, agents[1].Id, true);
-
-        Test.startTest();
-        List<AgentGov_Conflict_Log__c> conflicts = AgentGovSelector.getRecentConflictLogs(10);
-        Test.stopTest();
-
-        System.assert(conflicts.size() >= 1, 'Should find at least 1 conflict log');
-    }
-
-    @IsTest
-    static void testClearCache() {
-        // Just verify it doesn't throw
-        Test.startTest();
-        AgentGovSelector.clearCache();
-        Test.stopTest();
-
-        // Re-query after cache clear
-        AgentGov_Settings__c settings = AgentGovSelector.getSettings();
-        System.assertNotEquals(null, settings, 'Should still return settings after cache clear');
-    }
-
-    @IsTest
-    static void testGetPolicies() {
-        Test.startTest();
-        List<AgentGov_Policy__mdt> policies = AgentGovSelector.getPolicies();
-        Test.stopTest();
-
-        System.assertNotEquals(null, policies, 'Should return a list');
-    }
-
-    @IsTest
-    static void testGetOpenAgentsPastCooldown() {
-        Test.startTest();
-        List<AgentGov_Registration__c> agents = AgentGovSelector.getOpenAgentsPastCooldown();
-        Test.stopTest();
-
-        System.assertNotEquals(null, agents, 'Should return a list');
-    }
-
-    @IsTest
-    static void testGetHalfOpenAgentsPastCooldown() {
-        Test.startTest();
-        List<AgentGov_Registration__c> agents = AgentGovSelector.getHalfOpenAgentsPastCooldown();
-        Test.stopTest();
-
-        System.assertNotEquals(null, agents, 'Should return a list');
+        Assert.areEqual(1, AgentGovSelector.getOpenAgentsPastCooldown().size());
+        Assert.areEqual(1, AgentGovSelector.getRecentActionLogs(reg.Id, 10).size());
     }
 }
