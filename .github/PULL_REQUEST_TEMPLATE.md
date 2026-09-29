@@ -13,7 +13,7 @@ What this change does and why.
 
 ## Testing
 
-How you verified the change (Apex tests, Jest, manual steps in a scratch org).
+How you verified the change (Apex tests, Jest, the end-to-end suite, manual steps in a scratch org).
 
 ## Checklist
 
@@ -26,4 +26,6 @@ How you verified the change (Apex tests, Jest, manual steps in a scratch org).
 - [ ] Tests use the `Assert` class and `AgentGovTestDataFactory`, and assert behavior
 - [ ] `npm run lint`, `npm run prettier:verify`, and `npm run test:unit:coverage` pass
 - [ ] Apex tests pass in a scratch org with coverage at or above 85%
+- [ ] Every new behavior a caller or an administrator can observe has a check in `e2e/`
+- [ ] `npm run e2e -- --target-org <scratch-alias>` passes
 - [ ] `CHANGELOG.md` and the relevant docs are updated
