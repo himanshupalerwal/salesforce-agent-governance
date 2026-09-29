@@ -1,0 +1,421 @@
+<template>
+    <div class="ag-toolbar">
+        <p class="ag-meta status-line">{statusLine}</p>
+        <lightning-button
+            class="refresh-button"
+            label={refreshLabel}
+            icon-name="utility:refresh"
+            disabled={refreshing}
+            onclick={handleRefresh}
+        ></lightning-button>
+    </div>
+    <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
+
+    <template lwc:if={errorMessage}>
+        <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+            <span class="slds-assistive-text">Error</span>
+            <h2 class="error-message">{errorMessage}</h2>
+        </div>
+    </template>
+
+    <template lwc:if={summariesLoaded}>
+        <dl class="ag-kpi-grid kpi-grid ag-fade-in">
+            <template for:each={kpis} for:item="kpi">
+                <div key={kpi.key} class={kpi.tileClass} data-key={kpi.key}>
+                    <dt class="ag-kpi__head kpi-label">
+                        <lightning-icon icon-name={kpi.icon} size="x-small" class="kpi-icon"></lightning-icon>
+                        <span>{kpi.label}</span>
+                    </dt>
+                    <dd class={kpi.valueClass}>{kpi.displayValue}</dd>
+                    <template lwc:if={kpi.actionLabel}>
+                        <dd class="kpi-action">
+                            <button type="button" class="ag-kpi__action" data-key={kpi.key} onclick={handleKpiSelect}>
+                                {kpi.actionLabel}
+                            </button>
+                        </dd>
+                    </template>
+                </div>
+            </template>
+        </dl>
+
+        <section class="slds-card ag-card overview-card attention-card" aria-labelledby="attention-heading">
+            <div class="slds-card__header slds-grid">
+                <header class="slds-media slds-media_center slds-has-flexi-truncate">
+                    <div class="slds-media__figure">
+                        <lightning-icon icon-name="standard:incident" size="small"></lightning-icon>
+                    </div>
+                    <div class="slds-media__body">
+                        <h2
+                            id="attention-heading"
+                            class="slds-card__header-title ag-section-heading"
+                            tabindex="-1"
+                            lwc:ref="attentionHeading"
+                        >
+                            Needs attention<span class="slds-assistive-text"> (</span
+                            ><span class={attentionCountClass}>{attentionCount}</span
+                            ><span class="slds-assistive-text">)</span>
+                        </h2>
+                    </div>
+                </header>
+                <template lwc:if={hasAttention}>
+                    <div class="slds-no-flex">
+                        <lightning-button
+                            variant="base"
+                            label="Open in agent list"
+                            onclick={handleViewAttention}
+                        ></lightning-button>
+                    </div>
+                </template>
+            </div>
+            <div class="slds-card__body slds-card__body_inner">
+                <template lwc:if={hasAttention}>
+                    <div class="slds-scrollable_x">
+                        <table class="slds-table slds-table_cell-buffer slds-table_bordered attention-table">
+                            <caption class="slds-assistive-text">
+                                Agents whose circuit breaker is not closed, or whose budget is blocked or exhausted
+                            </caption>
+                            <thead>
+                                <tr class="slds-line-height_reset">
+                                    <th scope="col"><div class="slds-truncate">Agent</div></th>
+                                    <th scope="col"><div class="slds-truncate">Circuit breaker</div></th>
+                                    <th scope="col"><div class="slds-truncate">Budget today</div></th>
+                                    <th scope="col" class="ag-num"><div class="slds-truncate">Failures</div></th>
+                                    <th scope="col"><span class="slds-assistive-text">Actions</span></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template for:each={visibleAttentionRows} for:item="row">
+                                    <tr key={row.id} class="attention-row" data-id={row.id}>
+                                        <th scope="row">
+                                            <a
+                                                class="agent-link"
+                                                href={row.url}
+                                                data-record-id={row.id}
+                                                onclick={handleRecordLink}
+                                                >{row.name}</a
+                                            >
+                                        </th>
+                                        <td>
+                                            <span class={row.breakerPillClass}>{row.breakerLabel}</span>
+                                            <template lwc:if={row.breakerDetail}>
+                                                <div class="ag-meta slds-m-top_xx-small breaker-detail">
+                                                    {row.breakerDetail}
+                                                </div>
+                                            </template>
+                                        </td>
+                                        <td>
+                                            <span class="budget-text">
+                                                <template lwc:if={row.hasBudget}>
+                                                    <span class={row.budgetPillClass}>{row.budgetLabel}</span>
+                                                    <span class="ag-meta slds-m-left_x-small">{row.budgetUsed}</span>
+                                                </template>
+                                                <template lwc:else>
+                                                    <span class="ag-meta">No usage today</span>
+                                                </template>
+                                            </span>
+                                        </td>
+                                        <td class="ag-num failures">{row.failures}</td>
+                                        <td class="slds-text-align_right row-actions">
+                                            <template lwc:if={row.showReset}>
+                                                <lightning-button
+                                                    class="reset-button"
+                                                    label="Reset breaker"
+                                                    data-id={row.id}
+                                                    disabled={actionInProgress}
+                                                    onclick={handleReset}
+                                                ></lightning-button>
+                                            </template>
+                                            <template lwc:if={row.showCredit}>
+                                                <lightning-button
+                                                    class="slds-m-left_x-small credit-button"
+                                                    label="Credit budget"
+                                                    data-id={row.id}
+                                                    disabled={actionInProgress}
+                                                    onclick={handleCredit}
+                                                ></lightning-button>
+                                            </template>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                    <template lwc:if={moreAttention}>
+                        <div class="ag-footer-link">
+                            <lightning-button
+                                variant="base"
+                                class="more-attention"
+                                label={moreAttentionLabel}
+                                onclick={handleViewAttention}
+                            ></lightning-button>
+                        </div>
+                    </template>
+                </template>
+                <template lwc:else>
+                    <div class="ag-empty empty-state attention-empty">
+                        <span class="ag-empty__icon">
+                            <lightning-icon
+                                icon-name={attentionEmpty.icon}
+                                variant={attentionEmpty.variant}
+                                size="small"
+                            ></lightning-icon>
+                        </span>
+                        <p class="ag-empty__title">{attentionEmpty.title}</p>
+                        <p class="ag-empty__text">{attentionEmpty.text}</p>
+                    </div>
+                </template>
+            </div>
+        </section>
+    </template>
+    <template lwc:else>
+        <div class="ag-kpi-grid" aria-busy="true">
+            <span class="ag-skeleton ag-skeleton_tile"></span>
+            <span class="ag-skeleton ag-skeleton_tile"></span>
+            <span class="ag-skeleton ag-skeleton_tile"></span>
+            <span class="ag-skeleton ag-skeleton_tile"></span>
+            <span class="ag-skeleton ag-skeleton_tile"></span>
+            <span class="ag-skeleton ag-skeleton_tile"></span>
+        </div>
+        <div class="slds-card ag-card overview-card loading-card" aria-busy="true">
+            <div class="slds-card__body slds-card__body_inner slds-p-vertical_medium">
+                <span class="ag-skeleton ag-skeleton_title"></span>
+                <span class="ag-skeleton"></span>
+                <span class="ag-skeleton ag-skeleton_short"></span>
+            </div>
+            <span class="slds-assistive-text">Loading agents</span>
+        </div>
+    </template>
+
+    <section class="slds-card ag-card overview-card sessions-card" aria-labelledby="sessions-heading">
+        <div class="slds-card__header slds-grid">
+            <header class="slds-media slds-media_center slds-has-flexi-truncate">
+                <div class="slds-media__figure">
+                    <lightning-icon icon-name="standard:live_chat" size="small"></lightning-icon>
+                </div>
+                <div class="slds-media__body">
+                    <h2
+                        id="sessions-heading"
+                        class="slds-card__header-title ag-section-heading"
+                        tabindex="-1"
+                        lwc:ref="sessionsHeading"
+                    >
+                        Live sessions<span class="slds-assistive-text"> (</span
+                        ><span class="ag-count">{sessionCount}</span><span class="slds-assistive-text">)</span>
+                    </h2>
+                </div>
+            </header>
+        </div>
+        <div class="slds-card__body slds-card__body_inner">
+            <template lwc:if={sessionsLoaded}>
+                <template lwc:if={hasSessions}>
+                    <div class="slds-scrollable_x ag-fade-in">
+                        <table class="slds-table slds-table_cell-buffer slds-table_bordered sessions-table">
+                            <caption class="slds-assistive-text">
+                                Live agent sessions and the resources they have used
+                            </caption>
+                            <thead>
+                                <tr class="slds-line-height_reset">
+                                    <th scope="col"><div class="slds-truncate">Agent</div></th>
+                                    <th scope="col"><div class="slds-truncate">Started</div></th>
+                                    <th scope="col"><div class="slds-truncate">Last activity</div></th>
+                                    <th scope="col" class="ag-num"><div class="slds-truncate">Actions</div></th>
+                                    <th scope="col" class="ag-num"><div class="slds-truncate">API calls</div></th>
+                                    <th scope="col" class="ag-num"><div class="slds-truncate">SOQL queries</div></th>
+                                    <th scope="col" class="ag-num"><div class="slds-truncate">DML statements</div></th>
+                                    <template lwc:if={showSessionActions}>
+                                        <th scope="col"><span class="slds-assistive-text">Session actions</span></th>
+                                    </template>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template for:each={visibleSessionRows} for:item="session">
+                                    <tr key={session.id} class="session-row">
+                                        <th scope="row">
+                                            <a
+                                                class="agent-link"
+                                                href={session.url}
+                                                data-record-id={session.agentId}
+                                                onclick={handleRecordLink}
+                                                >{session.agentName}</a
+                                            >
+                                        </th>
+                                        <td class="ag-nowrap" title={session.startedExact}>{session.started}</td>
+                                        <td class="ag-nowrap" title={session.lastActivityExact}>
+                                            {session.lastActivity}
+                                        </td>
+                                        <td class="ag-num">{session.actions}</td>
+                                        <td class="ag-num">{session.apiCalls}</td>
+                                        <td class="ag-num">{session.soqlQueries}</td>
+                                        <td class="ag-num">{session.dmlStatements}</td>
+                                        <template lwc:if={session.showEnd}>
+                                            <td class="slds-text-align_right">
+                                                <lightning-button
+                                                    class="end-session-button"
+                                                    label="End session"
+                                                    data-id={session.id}
+                                                    disabled={actionInProgress}
+                                                    onclick={handleEndSession}
+                                                ></lightning-button>
+                                            </td>
+                                        </template>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                    <template lwc:if={moreSessions}>
+                        <p class="ag-meta ag-footer-link more-sessions">{moreSessionsLabel}</p>
+                    </template>
+                </template>
+                <template lwc:else>
+                    <div class="ag-empty empty-state sessions-empty">
+                        <span class="ag-empty__icon">
+                            <lightning-icon icon-name="utility:clock" size="small"></lightning-icon>
+                        </span>
+                        <p class="ag-empty__title">No live sessions</p>
+                        <p class="ag-empty__text">
+                            A session opens with an agent's first governed action and stays live while the agent keeps
+                            working within the idle window.
+                        </p>
+                    </div>
+                </template>
+            </template>
+            <template lwc:else>
+                <div class="slds-p-vertical_small" aria-busy="true">
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading sessions</span>
+                </div>
+            </template>
+        </div>
+    </section>
+
+    <div class="ag-split overview-split">
+        <section class="slds-card ag-card overview-card usage-card" aria-labelledby="usage-heading">
+            <div class="slds-card__header slds-grid">
+                <header class="slds-media slds-media_center slds-has-flexi-truncate">
+                    <div class="slds-media__figure">
+                        <lightning-icon icon-name="standard:dashboard" size="small"></lightning-icon>
+                    </div>
+                    <div class="slds-media__body">
+                        <h2 id="usage-heading" class="slds-card__header-title">Budget usage today</h2>
+                    </div>
+                </header>
+            </div>
+            <div class="slds-card__body slds-card__body_inner">
+                <template lwc:if={hasUsage}>
+                    <p class="ag-meta slds-m-bottom_small">
+                        The busiest agents, by their most-used limit as a share of the daily allocation.
+                    </p>
+                    <ul class="usage-list ag-fade-in">
+                        <template for:each={usageRows} for:item="usage">
+                            <li key={usage.id} class="usage-row">
+                                <div class="usage-head">
+                                    <a
+                                        class="agent-link slds-truncate"
+                                        href={usage.url}
+                                        data-record-id={usage.id}
+                                        onclick={handleRecordLink}
+                                        >{usage.name}</a
+                                    >
+                                    <span class="usage-figure">
+                                        <span class={usage.statusPillClass}>{usage.statusLabel}</span>
+                                        <span class="ag-num usage-status">{usage.percent}%</span>
+                                    </span>
+                                </div>
+                                <div
+                                    class="ag-bar-track"
+                                    role="progressbar"
+                                    aria-valuemin="0"
+                                    aria-valuemax="100"
+                                    aria-valuenow={usage.percent}
+                                    aria-label={usage.ariaLabel}
+                                >
+                                    <div class={usage.barClass} style={usage.barStyle}></div>
+                                </div>
+                            </li>
+                        </template>
+                    </ul>
+                    <template lwc:if={usageTruncated}>
+                        <div class="ag-footer-link">
+                            <lightning-button
+                                variant="base"
+                                label="View every agent in the agent list"
+                                data-key="total"
+                                onclick={handleKpiSelect}
+                            ></lightning-button>
+                        </div>
+                    </template>
+                </template>
+                <template lwc:else>
+                    <div class="ag-empty empty-state usage-empty">
+                        <span class="ag-empty__icon">
+                            <lightning-icon icon-name="utility:chart" size="small"></lightning-icon>
+                        </span>
+                        <p class="ag-empty__title">No usage yet today</p>
+                        <p class="ag-empty__text">Bars appear here as agents use their daily budgets.</p>
+                    </div>
+                </template>
+            </div>
+        </section>
+
+        <section class="slds-card ag-card overview-card alerts-card" aria-labelledby="alerts-heading">
+            <div class="slds-card__header slds-grid">
+                <header class="slds-media slds-media_center slds-has-flexi-truncate">
+                    <div class="slds-media__figure">
+                        <lightning-icon icon-name="standard:custom_notification" size="small"></lightning-icon>
+                    </div>
+                    <div class="slds-media__body">
+                        <h2 id="alerts-heading" class="slds-card__header-title">Recent alerts</h2>
+                    </div>
+                </header>
+            </div>
+            <div class="slds-card__body slds-card__body_inner">
+                <template lwc:if={alertsLoaded}>
+                    <template lwc:if={hasAlerts}>
+                        <ul class="alert-list ag-fade-in">
+                            <template for:each={alertRows} for:item="alert">
+                                <li key={alert.id} class="alert-row">
+                                    <div class="alert-head">
+                                        <span class={alert.pillClass}>{alert.label}</span>
+                                        <template lwc:if={alert.hasAgent}>
+                                            <a
+                                                class="agent-link slds-truncate"
+                                                href={alert.url}
+                                                data-record-id={alert.agentId}
+                                                onclick={handleRecordLink}
+                                                >{alert.agentName}</a
+                                            >
+                                        </template>
+                                        <span class="ag-meta alert-time" title={alert.exactTime}>{alert.time}</span>
+                                    </div>
+                                    <p class="alert-text">{alert.text}</p>
+                                </li>
+                            </template>
+                        </ul>
+                    </template>
+                    <template lwc:else>
+                        <div class="ag-empty empty-state alerts-empty">
+                            <span class="ag-empty__icon">
+                                <lightning-icon icon-name="utility:notification" size="small"></lightning-icon>
+                            </span>
+                            <p class="ag-empty__title">No alerts yet</p>
+                            <p class="ag-empty__text">
+                                An alert is raised when a budget crosses a threshold or a circuit breaker trips.
+                            </p>
+                        </div>
+                    </template>
+                </template>
+                <template lwc:else>
+                    <div class="slds-p-vertical_small" aria-busy="true">
+                        <span class="ag-skeleton"></span>
+                        <span class="ag-skeleton ag-skeleton_short"></span>
+                        <span class="slds-assistive-text">Loading alerts</span>
+                    </div>
+                </template>
+            </div>
+        </section>
+    </div>
+
+    <c-agent-gov-usage-history days={historyDays} lwc:ref="history"></c-agent-gov-usage-history>
+</template>

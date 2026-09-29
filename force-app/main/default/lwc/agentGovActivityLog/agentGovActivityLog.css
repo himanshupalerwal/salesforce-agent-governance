@@ -1,0 +1,29 @@
+@import 'c/agentGovStyles';
+
+/* Colors come from SLDS 2 global styling hooks with SLDS 1 fallbacks. */
+:host {
+    display: block;
+}
+.loading-region {
+    min-height: 4rem;
+}
+.reason-cell {
+    min-width: 16rem;
+    max-width: 40rem;
+}
+.reason {
+    display: -webkit-box;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+}
+.correlation-button {
+    margin-top: var(--slds-g-spacing-1, 0.25rem);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+.log-record {
+    overflow-wrap: anywhere;
+}

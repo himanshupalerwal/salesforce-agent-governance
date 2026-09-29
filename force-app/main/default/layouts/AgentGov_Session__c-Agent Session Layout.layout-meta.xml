@@ -18,6 +18,10 @@
                 <behavior>Edit</behavior>
                 <field>Session_Start__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Readonly</behavior>
+                <field>Last_Activity__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>
@@ -27,6 +31,14 @@
             <layoutItems>
                 <behavior>Edit</behavior>
                 <field>Session_End__c</field>
+            </layoutItems>
+            <layoutItems>
+                <behavior>Readonly</behavior>
+                <field>End_Reason__c</field>
+            </layoutItems>
+            <layoutItems>
+                <behavior>Readonly</behavior>
+                <field>Duration_Minutes__c</field>
             </layoutItems>
         </layoutColumns>
         <style>TwoColumnsLeftToRight</style>
@@ -68,6 +80,10 @@
                 <behavior>Readonly</behavior>
                 <field>CreatedById</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Readonly</behavior>
+                <field>Active_Session_Key__c</field>
+            </layoutItems>
         </layoutColumns>
         <layoutColumns>
             <layoutItems>
@@ -77,8 +93,24 @@
         </layoutColumns>
         <style>TwoColumnsLeftToRight</style>
     </layoutSections>
+    <platformActionList>
+        <actionListContext>Record</actionListContext>
+        <platformActionListItems>
+            <actionName>Edit</actionName>
+            <actionType>StandardButton</actionType>
+            <sortOrder>0</sortOrder>
+        </platformActionListItems>
+    </platformActionList>
     <relatedLists>
+        <fields>NAME</fields>
+        <fields>Action_Type__c</fields>
+        <fields>Status__c</fields>
+        <fields>Object_Name__c</fields>
+        <fields>Execution_Time_Ms__c</fields>
+        <fields>Timestamp__c</fields>
         <relatedList>AgentGov_Action_Log__c.Agent_Session__c</relatedList>
+        <sortField>Timestamp__c</sortField>
+        <sortOrder>Desc</sortOrder>
     </relatedLists>
     <showEmailCheckbox>false</showEmailCheckbox>
     <showRunAssignmentRulesCheckbox>false</showRunAssignmentRulesCheckbox>

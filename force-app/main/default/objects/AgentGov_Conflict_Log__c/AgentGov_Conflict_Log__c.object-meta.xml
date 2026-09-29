@@ -15,6 +15,22 @@
         <type>AutoNumber</type>
     </nameField>
     <pluralLabel>Agent Conflict Logs</pluralLabel>
+    <searchLayouts>
+        <customTabListAdditionalFields>Agent_1__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Agent_2__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Object_Name__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Resolution__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Severity__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Timestamp__c</customTabListAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_1__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_2__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Object_Name__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Timestamp__c</lookupDialogsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_1__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_2__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Object_Name__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Timestamp__c</searchResultsAdditionalFields>
+    </searchLayouts>
     <sharingModel>ReadWrite</sharingModel>
     <visibility>Public</visibility>
 </CustomObject>

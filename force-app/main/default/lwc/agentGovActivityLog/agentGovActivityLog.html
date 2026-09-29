@@ -1,0 +1,182 @@
+<template>
+    <lightning-card class="ag-card" icon-name="standard:timesheet" data-focus-request={focusToken}>
+        <span slot="title" class="log-heading" tabindex="-1" lwc:ref="heading">{heading}</span>
+        <div slot="actions" class="slds-grid slds-grid_vertical-align-center">
+            <span class="ag-meta slds-m-right_small last-updated">{lastUpdatedLabel}</span>
+            <lightning-button
+                class="refresh-button"
+                label={refreshLabel}
+                icon-name="utility:refresh"
+                disabled={refreshing}
+                onclick={handleRefresh}
+            ></lightning-button>
+        </div>
+        <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
+
+        <div class="slds-p-horizontal_medium">
+            <div class="slds-grid slds-wrap slds-gutters_x-small slds-m-bottom_small filters">
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-2 slds-large-size_1-of-4">
+                    <lightning-combobox
+                        class="status-filter"
+                        name="status"
+                        label="Status"
+                        value={selectedStatus}
+                        options={statusOptions}
+                        onchange={handleStatusChange}
+                    ></lightning-combobox>
+                </div>
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-2 slds-large-size_1-of-4">
+                    <lightning-combobox
+                        class="type-filter"
+                        name="actionType"
+                        label="Action type"
+                        value={selectedType}
+                        options={typeOptions}
+                        onchange={handleTypeChange}
+                    ></lightning-combobox>
+                </div>
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-2 slds-large-size_1-of-4">
+                    <lightning-combobox
+                        class="window-filter"
+                        name="window"
+                        label="Time window"
+                        value={selectedWindow}
+                        options={windowOptions}
+                        onchange={handleWindowChange}
+                    ></lightning-combobox>
+                </div>
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-2 slds-large-size_1-of-4">
+                    <lightning-input
+                        class="correlation-filter"
+                        type="search"
+                        name="correlation"
+                        label="Correlation id"
+                        placeholder="Enter an id, then press Enter"
+                        value={correlationDraft}
+                        onchange={handleCorrelationInput}
+                        oncommit={handleCorrelationCommit}
+                    ></lightning-input>
+                </div>
+            </div>
+
+            <template lwc:if={errorMessage}>
+                <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                    <span class="slds-assistive-text">Error</span>
+                    <h2 class="error-message">{errorMessage}</h2>
+                </div>
+            </template>
+
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small loading-region" aria-busy="true">
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading activity</span>
+                </div>
+            </template>
+            <template lwc:else>
+                <div class="slds-grid slds-grid_align-spread slds-grid_vertical-align-center slds-m-bottom_x-small">
+                    <p class="ag-meta summary">{summary}</p>
+                    <template lwc:if={hasFilters}>
+                        <lightning-button
+                            class="clear-filters"
+                            variant="base"
+                            label="Clear filters"
+                            onclick={handleClearFilters}
+                        ></lightning-button>
+                    </template>
+                </div>
+                <template lwc:if={hasRows}>
+                    <div class="ag-table-frame ag-fade-in">
+                        <table class="slds-table slds-table_cell-buffer slds-table_bordered log-table">
+                            <caption class="slds-assistive-text">
+                                {heading}, newest first
+                            </caption>
+                            <thead>
+                                <tr class="slds-line-height_reset">
+                                    <th scope="col"><div class="slds-truncate">Time</div></th>
+                                    <template lwc:if={showAgentColumn}>
+                                        <th scope="col"><div class="slds-truncate">Agent</div></th>
+                                    </template>
+                                    <th scope="col"><div class="slds-truncate">Action</div></th>
+                                    <th scope="col"><div class="slds-truncate">Status</div></th>
+                                    <th scope="col"><div class="slds-truncate">Object</div></th>
+                                    <th scope="col"><div class="slds-truncate">Record</div></th>
+                                    <th scope="col" class="ag-num"><div class="slds-truncate">Duration (ms)</div></th>
+                                    <th scope="col"><div class="slds-truncate">Reason</div></th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <template for:each={displayRows} for:item="row">
+                                    <tr key={row.id} class="log-row">
+                                        <th scope="row" class="log-time ag-nowrap" title={row.exactTime}>
+                                            <a
+                                                href={row.url}
+                                                data-record-id={row.id}
+                                                data-object="AgentGov_Action_Log__c"
+                                                onclick={handleRecordLink}
+                                                >{row.time}</a
+                                            >
+                                        </th>
+                                        <template lwc:if={row.showAgent}>
+                                            <td class="log-agent">
+                                                <template lwc:if={row.hasAgent}>
+                                                    <a
+                                                        class="agent-link"
+                                                        href={row.agentUrl}
+                                                        data-record-id={row.agentId}
+                                                        onclick={handleRecordLink}
+                                                        >{row.agentName}</a
+                                                    >
+                                                </template>
+                                            </td>
+                                        </template>
+                                        <td class="log-action">{row.action}</td>
+                                        <td>
+                                            <span class={row.statusPillClass}>{row.status}</span>
+                                        </td>
+                                        <td class="log-object">{row.objectName}</td>
+                                        <td class="slds-cell-wrap ag-meta log-record">{row.recordId}</td>
+                                        <td class="ag-num log-duration">{row.duration}</td>
+                                        <td class="slds-cell-wrap reason-cell">
+                                            <p class="reason">{row.reason}</p>
+                                            <template lwc:if={row.correlationId}>
+                                                <button
+                                                    class="slds-button correlation-button"
+                                                    title={row.correlationTitle}
+                                                    data-correlation={row.correlationId}
+                                                    onclick={handleCorrelationClick}
+                                                >
+                                                    Request {row.correlationLabel}
+                                                </button>
+                                            </template>
+                                        </td>
+                                    </tr>
+                                </template>
+                            </tbody>
+                        </table>
+                    </div>
+                    <template lwc:if={hasMore}>
+                        <div class="slds-align_absolute-center slds-m-vertical_small">
+                            <lightning-button
+                                class="load-more"
+                                label={loadMoreLabel}
+                                disabled={loadingMore}
+                                onclick={handleLoadMore}
+                            ></lightning-button>
+                        </div>
+                    </template>
+                </template>
+                <template lwc:else>
+                    <div class="ag-empty empty-state">
+                        <span class="ag-empty__icon">
+                            <lightning-icon icon-name="utility:search" size="small"></lightning-icon>
+                        </span>
+                        <p class="ag-empty__title">No matching activity</p>
+                        <p class="ag-empty__text">Try a longer time window, or clear the filters.</p>
+                    </div>
+                </template>
+            </template>
+        </div>
+    </lightning-card>
+</template>

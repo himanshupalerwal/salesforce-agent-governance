@@ -143,20 +143,69 @@
         </layoutColumns>
         <style>TwoColumnsLeftToRight</style>
     </layoutSections>
+    <platformActionList>
+        <actionListContext>Record</actionListContext>
+        <platformActionListItems>
+            <actionName>Edit</actionName>
+            <actionType>StandardButton</actionType>
+            <sortOrder>0</sortOrder>
+        </platformActionListItems>
+    </platformActionList>
     <relatedLists>
+        <fields>NAME</fields>
+        <fields>Status__c</fields>
+        <fields>Session_Start__c</fields>
+        <fields>Last_Activity__c</fields>
+        <fields>Actions_Count__c</fields>
+        <fields>End_Reason__c</fields>
         <relatedList>AgentGov_Session__c.Agent_Registration__c</relatedList>
+        <sortField>Session_Start__c</sortField>
+        <sortOrder>Desc</sortOrder>
     </relatedLists>
     <relatedLists>
+        <fields>NAME</fields>
+        <fields>Budget_Date__c</fields>
+        <fields>Budget_Status__c</fields>
+        <fields>Peak_Usage_Percent__c</fields>
+        <fields>API_Calls_Consumed__c</fields>
+        <fields>SOQL_Queries_Consumed__c</fields>
+        <fields>DML_Operations_Consumed__c</fields>
         <relatedList>AgentGov_Budget__c.Agent_Registration__c</relatedList>
+        <sortField>Budget_Date__c</sortField>
+        <sortOrder>Desc</sortOrder>
     </relatedLists>
     <relatedLists>
+        <fields>NAME</fields>
+        <fields>Action_Type__c</fields>
+        <fields>Status__c</fields>
+        <fields>Object_Name__c</fields>
+        <fields>Execution_Time_Ms__c</fields>
+        <fields>Timestamp__c</fields>
         <relatedList>AgentGov_Action_Log__c.Agent_Registration__c</relatedList>
+        <sortField>Timestamp__c</sortField>
+        <sortOrder>Desc</sortOrder>
     </relatedLists>
     <relatedLists>
+        <fields>NAME</fields>
+        <fields>Agent_2__c</fields>
+        <fields>Object_Name__c</fields>
+        <fields>Conflict_Type__c</fields>
+        <fields>Resolution__c</fields>
+        <fields>Timestamp__c</fields>
         <relatedList>AgentGov_Conflict_Log__c.Agent_1__c</relatedList>
+        <sortField>Timestamp__c</sortField>
+        <sortOrder>Desc</sortOrder>
     </relatedLists>
     <relatedLists>
+        <fields>NAME</fields>
+        <fields>Agent_1__c</fields>
+        <fields>Object_Name__c</fields>
+        <fields>Conflict_Type__c</fields>
+        <fields>Resolution__c</fields>
+        <fields>Timestamp__c</fields>
         <relatedList>AgentGov_Conflict_Log__c.Agent_2__c</relatedList>
+        <sortField>Timestamp__c</sortField>
+        <sortOrder>Desc</sortOrder>
     </relatedLists>
     <showEmailCheckbox>false</showEmailCheckbox>
     <showRunAssignmentRulesCheckbox>false</showRunAssignmentRulesCheckbox>
