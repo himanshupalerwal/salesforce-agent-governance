@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>67.0</apiVersion>
+    <isExposed>false</isExposed>
+    <masterLabel>AgentGov Credit Budget</masterLabel>
+    <description>Dialog that credits usage back to an agent's budget for today.</description>
+</LightningComponentBundle>

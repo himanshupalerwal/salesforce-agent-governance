@@ -1,3 +1,5 @@
+@import 'c/agentGovStyles';
+
 :host {
     display: block;
 }

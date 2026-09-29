@@ -11,20 +11,25 @@
                         ></lightning-icon>
                     </div>
                     <div class="slds-media__body">
-                        <h1 class="slds-page-header__title">AgentGov Dashboard</h1>
-                        <p class="slds-text-body_small slds-text-color_weak">AI Agent Governance Overview</p>
+                        <h1 class="slds-page-header__title">AgentGov dashboard</h1>
+                        <p class="ag-meta">AI agent governance overview</p>
                     </div>
                 </div>
             </div>
             <div class="slds-page-header__col-actions">
-                <span class="slds-text-body_small slds-text-color_weak slds-m-right_small" aria-live="polite"
-                    >{liveUpdatesLabel}</span
+                <div class="slds-grid slds-grid_vertical-align-center">
+                    <span class={liveUpdatesClass} aria-live="polite">{liveUpdatesLabel}</span>
+                    <span class="ag-meta slds-m-right_small last-updated">{lastUpdatedLabel}</span>
+                    <lightning-button
+                        label={refreshLabel}
+                        icon-name="utility:refresh"
+                        disabled={refreshing}
+                        onclick={handleRefresh}
+                    ></lightning-button>
+                </div>
+                <span class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true"
+                    >{announcement}</span
                 >
-                <lightning-button
-                    label="Refresh"
-                    icon-name="utility:refresh"
-                    onclick={handleRefresh}
-                ></lightning-button>
             </div>
         </div>
     </div>
@@ -41,177 +46,218 @@
     </template>
 
     <template lwc:if={isLoading}>
-        <div class="slds-is-relative loading-region" aria-busy="true">
-            <lightning-spinner alternative-text="Loading dashboard" size="medium"></lightning-spinner>
+        <div aria-busy="true">
+            <div class="ag-kpi-grid">
+                <span class="ag-skeleton ag-skeleton_tile"></span>
+                <span class="ag-skeleton ag-skeleton_tile"></span>
+                <span class="ag-skeleton ag-skeleton_tile"></span>
+                <span class="ag-skeleton ag-skeleton_tile"></span>
+                <span class="ag-skeleton ag-skeleton_tile"></span>
+                <span class="ag-skeleton ag-skeleton_tile"></span>
+            </div>
+            <div class="slds-card ag-card">
+                <div class="slds-card__body slds-card__body_inner slds-p-vertical_medium">
+                    <span class="ag-skeleton ag-skeleton_title"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                </div>
+            </div>
+            <span class="slds-assistive-text">Loading dashboard</span>
         </div>
     </template>
     <template lwc:else>
-        <div class="slds-grid slds-wrap slds-gutters slds-m-bottom_small">
-            <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
-                <lightning-card>
-                    <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Total Agents</p>
-                        <p class="slds-text-heading_large">{totalAgents}</p>
+        <div class="ag-fade-in">
+            <dl class="ag-kpi-grid kpi-grid">
+                <template for:each={kpis} for:item="kpi">
+                    <div key={kpi.key} class={kpi.tileClass} data-key={kpi.key}>
+                        <dt class="ag-kpi__head kpi-label">
+                            <lightning-icon
+                                icon-name={kpi.icon}
+                                size="x-small"
+                                variant={kpi.iconVariant}
+                            ></lightning-icon>
+                            <span>{kpi.label}</span>
+                        </dt>
+                        <dd class="ag-kpi__value kpi-value">{kpi.value}</dd>
                     </div>
-                </lightning-card>
-            </div>
-            <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
-                <lightning-card>
-                    <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Active Agents</p>
-                        <p class="slds-text-heading_large slds-text-color_success">{activeAgents}</p>
-                    </div>
-                </lightning-card>
-            </div>
-            <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
-                <lightning-card>
-                    <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Actions Today</p>
-                        <p class="slds-text-heading_large">{actionsToday}</p>
-                    </div>
-                </lightning-card>
-            </div>
-        </div>
+                </template>
+            </dl>
 
-        <div class="slds-grid slds-wrap slds-gutters slds-m-bottom_medium">
-            <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
-                <lightning-card>
-                    <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Active Sessions</p>
-                        <p class="slds-text-heading_large">{activeSessions}</p>
-                    </div>
-                </lightning-card>
-            </div>
-            <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
-                <lightning-card>
-                    <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Avg Budget Used</p>
-                        <p class="slds-text-heading_large">{avgBudgetUtilization}%</p>
-                    </div>
-                </lightning-card>
-            </div>
-            <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
-                <lightning-card>
-                    <div class="slds-p-around_medium slds-text-align_center">
-                        <p class="slds-text-title_caps">Circuit Breakers Tripped</p>
-                        <p class={trippedBreakersClass}>{trippedBreakers}</p>
-                    </div>
-                </lightning-card>
-            </div>
-        </div>
-
-        <lightning-card title="Governor Budget Usage" icon-name="standard:dashboard">
-            <div class="slds-p-around_medium">
-                <template lwc:if={hasBudgets}>
-                    <template for:each={budgets} for:item="budget">
-                        <div key={budget.Id} class="slds-m-bottom_small budget-row">
-                            <div class="slds-grid slds-grid_align-spread slds-m-bottom_xx-small">
-                                <span class="slds-text-body_regular">{budget.agentName}</span>
-                                <span class={budget.statusClass}>{budget.Budget_Status__c}</span>
+            <lightning-card class="ag-card" title="Governor budget usage" icon-name="standard:dashboard">
+                <div class="slds-p-around_medium">
+                    <template lwc:if={hasBudgets}>
+                        <p class="ag-meta slds-m-bottom_small">
+                            Each bar is the agent's most-used limit as a share of its daily allocation, the figure its
+                            budget status is decided on.
+                        </p>
+                        <template for:each={budgets} for:item="budget">
+                            <div key={budget.Id} class="slds-m-bottom_small budget-row">
+                                <div
+                                    class="slds-grid slds-grid_align-spread slds-grid_vertical-align-center slds-m-bottom_xx-small"
+                                >
+                                    <a
+                                        class="slds-text-body_regular"
+                                        href={budget.agentUrl}
+                                        data-record-id={budget.Agent_Registration__c}
+                                        onclick={handleRecordLink}
+                                        >{budget.agentName}</a
+                                    >
+                                    <span class={budget.statusPillClass}>{budget.Budget_Status__c}</span>
+                                </div>
+                                <div
+                                    class="ag-bar-track"
+                                    role="progressbar"
+                                    aria-valuemin="0"
+                                    aria-valuemax="100"
+                                    aria-valuenow={budget.peakPercent}
+                                    aria-label={budget.ariaLabel}
+                                >
+                                    <div class={budget.barClass} style={budget.barStyle}>
+                                        <span class="slds-assistive-text">{budget.peakPercent}%</span>
+                                    </div>
+                                </div>
+                                <div class="slds-grid ag-meta slds-m-top_xx-small">
+                                    <span class="slds-col">API: {budget.apiPercent}%</span>
+                                    <span class="slds-col">SOQL: {budget.soqlPercent}%</span>
+                                    <span class="slds-col">DML: {budget.dmlPercent}%</span>
+                                </div>
                             </div>
-                            <div
-                                class="slds-progress-bar"
-                                role="progressbar"
-                                aria-valuemin="0"
-                                aria-valuemax="100"
-                                aria-valuenow={budget.avgPercent}
-                                aria-label={budget.ariaLabel}
-                            >
-                                <span class={budget.barClass} style={budget.barStyle}>
-                                    <span class="slds-assistive-text">{budget.avgPercent}%</span>
-                                </span>
-                            </div>
-                            <div class="slds-grid slds-text-body_small slds-text-color_weak slds-m-top_xx-small">
-                                <span class="slds-col">API: {budget.apiPercent}%</span>
-                                <span class="slds-col">SOQL: {budget.soqlPercent}%</span>
-                                <span class="slds-col">DML: {budget.dmlPercent}%</span>
-                            </div>
+                        </template>
+                    </template>
+                    <template lwc:else>
+                        <div class="ag-empty empty-state">
+                            <span class="ag-empty__icon">
+                                <lightning-icon icon-name="utility:chart" size="small"></lightning-icon>
+                            </span>
+                            <p class="ag-empty__title">No usage yet today</p>
+                            <p class="ag-empty__text">No budget data available for today.</p>
                         </div>
                     </template>
-                </template>
-                <template lwc:else>
-                    <div class="slds-text-align_center slds-text-color_weak slds-p-around_medium empty-state">
-                        No budget data available for today.
-                    </div>
-                </template>
-            </div>
-        </lightning-card>
-
-        <template lwc:if={hasSessions}>
-            <lightning-card title="Active Sessions" icon-name="standard:live_chat" class="slds-m-top_medium">
-                <div class="slds-p-around_medium slds-scrollable_x">
-                    <table class="slds-table slds-table_cell-buffer slds-table_bordered">
-                        <caption class="slds-assistive-text">
-                            Active agent sessions and their resource usage
-                        </caption>
-                        <thead>
-                            <tr class="slds-line-height_reset">
-                                <th scope="col"><div class="slds-truncate">Agent</div></th>
-                                <th scope="col"><div class="slds-truncate">Started</div></th>
-                                <th scope="col"><div class="slds-truncate">API Calls</div></th>
-                                <th scope="col"><div class="slds-truncate">SOQL Queries</div></th>
-                                <th scope="col"><div class="slds-truncate">DML Ops</div></th>
-                                <th scope="col"><div class="slds-truncate">Actions</div></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <template for:each={sessions} for:item="session">
-                                <tr key={session.Id}>
-                                    <td><div class="slds-truncate">{session.agentName}</div></td>
-                                    <td><div class="slds-truncate">{session.formattedStart}</div></td>
-                                    <td><div class="slds-truncate">{session.API_Calls_Used__c}</div></td>
-                                    <td><div class="slds-truncate">{session.SOQL_Queries_Used__c}</div></td>
-                                    <td><div class="slds-truncate">{session.DML_Statements_Used__c}</div></td>
-                                    <td><div class="slds-truncate">{session.Actions_Count__c}</div></td>
-                                </tr>
-                            </template>
-                        </tbody>
-                    </table>
                 </div>
             </lightning-card>
-        </template>
 
-        <lightning-card title="Recent Conflicts" icon-name="standard:case" class="slds-m-top_medium">
-            <div class="slds-p-around_medium">
-                <template lwc:if={hasConflicts}>
-                    <div class="slds-scrollable_x">
-                        <table class="slds-table slds-table_cell-buffer slds-table_bordered">
-                            <caption class="slds-assistive-text">
-                                Recent conflicts between agents
-                            </caption>
-                            <thead>
-                                <tr class="slds-line-height_reset">
-                                    <th scope="col"><div class="slds-truncate">Time</div></th>
-                                    <th scope="col"><div class="slds-truncate">Agent 1</div></th>
-                                    <th scope="col"><div class="slds-truncate">Agent 2</div></th>
-                                    <th scope="col"><div class="slds-truncate">Object</div></th>
-                                    <th scope="col"><div class="slds-truncate">Type</div></th>
-                                    <th scope="col"><div class="slds-truncate">Resolution</div></th>
-                                    <th scope="col"><div class="slds-truncate">Severity</div></th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <template for:each={conflicts} for:item="conflict">
-                                    <tr key={conflict.Id}>
-                                        <td><div class="slds-truncate">{conflict.formattedTime}</div></td>
-                                        <td><div class="slds-truncate">{conflict.agent1Name}</div></td>
-                                        <td><div class="slds-truncate">{conflict.agent2Name}</div></td>
-                                        <td><div class="slds-truncate">{conflict.Object_Name__c}</div></td>
-                                        <td><div class="slds-truncate">{conflict.Conflict_Type__c}</div></td>
-                                        <td><div class="slds-truncate">{conflict.Resolution__c}</div></td>
-                                        <td><span class={conflict.severityClass}>{conflict.Severity__c}</span></td>
+            <lightning-card class="ag-card slds-m-top_medium" title="Active sessions" icon-name="standard:live_chat">
+                <div class="slds-p-around_medium">
+                    <template lwc:if={hasSessions}>
+                        <div class="slds-scrollable_x">
+                            <table class="slds-table slds-table_cell-buffer slds-table_bordered">
+                                <caption class="slds-assistive-text">
+                                    Active agent sessions and their resource usage
+                                </caption>
+                                <thead>
+                                    <tr class="slds-line-height_reset">
+                                        <th scope="col"><div class="slds-truncate">Agent</div></th>
+                                        <th scope="col"><div class="slds-truncate">Started</div></th>
+                                        <th scope="col"><div class="slds-truncate">Last activity</div></th>
+                                        <th scope="col" class="ag-num"><div class="slds-truncate">API calls</div></th>
+                                        <th scope="col" class="ag-num">
+                                            <div class="slds-truncate">SOQL queries</div>
+                                        </th>
+                                        <th scope="col" class="ag-num"><div class="slds-truncate">DML ops</div></th>
+                                        <th scope="col" class="ag-num"><div class="slds-truncate">Actions</div></th>
                                     </tr>
-                                </template>
-                            </tbody>
-                        </table>
-                    </div>
-                </template>
-                <template lwc:else>
-                    <div class="slds-text-align_center slds-text-color_weak slds-p-around_medium empty-state">
-                        No conflicts detected.
-                    </div>
-                </template>
-            </div>
-        </lightning-card>
+                                </thead>
+                                <tbody>
+                                    <template for:each={sessions} for:item="session">
+                                        <tr key={session.Id}>
+                                            <th scope="row">
+                                                <a
+                                                    href={session.agentUrl}
+                                                    data-record-id={session.Agent_Registration__c}
+                                                    onclick={handleRecordLink}
+                                                    >{session.agentName}</a
+                                                >
+                                            </th>
+                                            <td><div class="slds-truncate">{session.formattedStart}</div></td>
+                                            <td><div class="slds-truncate">{session.formattedLastActivity}</div></td>
+                                            <td class="ag-num">{session.apiCalls}</td>
+                                            <td class="ag-num">{session.soqlQueries}</td>
+                                            <td class="ag-num">{session.dmlStatements}</td>
+                                            <td class="ag-num">{session.actions}</td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </template>
+                    <template lwc:else>
+                        <div class="ag-empty empty-state">
+                            <span class="ag-empty__icon">
+                                <lightning-icon icon-name="utility:clock" size="small"></lightning-icon>
+                            </span>
+                            <p class="ag-empty__title">No live sessions</p>
+                            <p class="ag-empty__text">No agent has a live session right now.</p>
+                        </div>
+                    </template>
+                </div>
+            </lightning-card>
+
+            <lightning-card class="ag-card slds-m-top_medium" title="Recent conflicts" icon-name="standard:case">
+                <div class="slds-p-around_medium">
+                    <template lwc:if={hasConflicts}>
+                        <div class="slds-scrollable_x">
+                            <table class="slds-table slds-table_cell-buffer slds-table_bordered">
+                                <caption class="slds-assistive-text">
+                                    Recent conflicts between agents
+                                </caption>
+                                <thead>
+                                    <tr class="slds-line-height_reset">
+                                        <th scope="col"><div class="slds-truncate">Time</div></th>
+                                        <th scope="col"><div class="slds-truncate">Agent 1</div></th>
+                                        <th scope="col"><div class="slds-truncate">Agent 2</div></th>
+                                        <th scope="col"><div class="slds-truncate">Object</div></th>
+                                        <th scope="col"><div class="slds-truncate">Type</div></th>
+                                        <th scope="col"><div class="slds-truncate">Resolution</div></th>
+                                        <th scope="col"><div class="slds-truncate">Severity</div></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <template for:each={conflicts} for:item="conflict">
+                                        <tr key={conflict.Id}>
+                                            <td><div class="slds-truncate">{conflict.formattedTime}</div></td>
+                                            <td>
+                                                <a
+                                                    href={conflict.agent1Url}
+                                                    data-record-id={conflict.Agent_1__c}
+                                                    onclick={handleRecordLink}
+                                                    >{conflict.agent1Name}</a
+                                                >
+                                            </td>
+                                            <td>
+                                                <a
+                                                    href={conflict.agent2Url}
+                                                    data-record-id={conflict.Agent_2__c}
+                                                    onclick={handleRecordLink}
+                                                    >{conflict.agent2Name}</a
+                                                >
+                                            </td>
+                                            <td><div class="slds-truncate">{conflict.Object_Name__c}</div></td>
+                                            <td><div class="slds-truncate">{conflict.Conflict_Type__c}</div></td>
+                                            <td><div class="slds-truncate">{conflict.Resolution__c}</div></td>
+                                            <td>
+                                                <span class={conflict.severityPillClass}>{conflict.Severity__c}</span>
+                                            </td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                        </div>
+                    </template>
+                    <template lwc:else>
+                        <div class="ag-empty empty-state">
+                            <span class="ag-empty__icon">
+                                <lightning-icon
+                                    icon-name="utility:success"
+                                    variant="success"
+                                    size="small"
+                                ></lightning-icon>
+                            </span>
+                            <p class="ag-empty__title">All clear</p>
+                            <p class="ag-empty__text">No conflicts detected.</p>
+                        </div>
+                    </template>
+                </div>
+            </lightning-card>
+        </div>
     </template>
 </template>

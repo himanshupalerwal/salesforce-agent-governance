@@ -1,0 +1,106 @@
+@import 'c/agentGovStyles';
+
+/* Colors come from SLDS 2 global styling hooks with SLDS 1 fallbacks. */
+:host {
+    display: block;
+}
+.loading-region {
+    min-height: 4rem;
+}
+.agent-panel,
+.activity {
+    display: block;
+    margin-bottom: var(--slds-g-spacing-4, 1rem);
+}
+.panel-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--slds-g-spacing-3, 0.75rem);
+}
+.panel-identity {
+    display: flex;
+    align-items: center;
+    gap: var(--slds-g-spacing-3, 0.75rem);
+    min-width: 0;
+}
+.panel-title {
+    min-width: 0;
+}
+.panel-heading {
+    font-size: var(--slds-g-font-scale-3, 1.125rem);
+}
+.panel-heading:focus {
+    outline: 2px solid var(--slds-g-color-border-accent-1, #0176d3);
+    outline-offset: 2px;
+}
+.panel-toolbar {
+    display: flex;
+    align-items: center;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+}
+.state-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    margin: 0 0 var(--slds-g-spacing-4, 1rem);
+    padding: 0;
+    list-style: none;
+}
+/* Four sections in a two by two grid, stacked on a phone. */
+.panel-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--slds-g-spacing-4, 1rem) var(--slds-g-spacing-5, 1.5rem);
+}
+@media (max-width: 40em) {
+    .panel-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+.panel-section {
+    min-width: 0;
+    padding-top: var(--slds-g-spacing-3, 0.75rem);
+    border-top: 1px solid var(--slds-g-color-border-1, #e5e5e5);
+}
+.panel-section__title {
+    margin-bottom: var(--slds-g-spacing-2, 0.5rem);
+    color: var(--slds-g-color-on-surface-1, #5c5c5c);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+    font-weight: var(--slds-g-font-weight-bold, 700);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.usage-bar + .usage-bar {
+    margin-top: var(--slds-g-spacing-2, 0.5rem);
+}
+.usage-bar__head {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: var(--slds-g-spacing-1, 0.25rem);
+    font-size: var(--slds-g-font-scale-neg-1, 0.8125rem);
+}
+.facts {
+    display: grid;
+    grid-template-columns: minmax(6rem, max-content) 1fr;
+    gap: var(--slds-g-spacing-2, 0.5rem) var(--slds-g-spacing-4, 1rem);
+    align-items: center;
+    margin: 0;
+}
+.facts dt {
+    color: var(--slds-g-color-on-surface-1, #5c5c5c);
+}
+.facts dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+.panel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    margin-top: var(--slds-g-spacing-4, 1rem);
+    padding-top: var(--slds-g-spacing-3, 0.75rem);
+    border-top: 1px solid var(--slds-g-color-border-1, #e5e5e5);
+}

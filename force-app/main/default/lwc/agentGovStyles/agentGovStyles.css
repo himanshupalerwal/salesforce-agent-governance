@@ -1,0 +1,376 @@
+/*
+ * The shared look of the AgentGov console: state pills, KPI tiles, table details, empty and
+ * loading states, and motion. Import it at the top of a component's stylesheet with
+ * @import 'c/agentGovStyles';
+ *
+ * Colours, spacing and radii come from SLDS 2 global styling hooks. The fallbacks are SLDS 1
+ * values, so the console looks the same in orgs that have not turned SLDS 2 on.
+ */
+
+/* --- State pills: a tinted label with a dot, never colour alone --- */
+
+.ag-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    max-width: 100%;
+    padding: 0.0625rem 0.5rem;
+    border-radius: 999px;
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+    color: var(--slds-g-color-neutral-base-30, #444444);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+    font-weight: var(--slds-g-font-weight-bold, 700);
+    line-height: 1.25rem;
+    white-space: nowrap;
+}
+.ag-pill::before {
+    content: '';
+    flex: none;
+    width: 0.4375rem;
+    height: 0.4375rem;
+    border-radius: 50%;
+    background-color: currentColor;
+}
+.ag-pill_success {
+    background-color: var(--slds-g-color-palette-green-95, #ebf7e6);
+    color: var(--slds-g-color-palette-green-30, #2e844a);
+}
+.ag-pill_warning {
+    background-color: var(--slds-g-color-palette-yellow-95, #fef1cd);
+    color: var(--slds-g-color-palette-orange-30, #8c4b02);
+}
+.ag-pill_error {
+    background-color: var(--slds-g-color-palette-red-95, #fef1ee);
+    color: var(--slds-g-color-palette-red-40, #ba0517);
+}
+.ag-pill_info {
+    background-color: var(--slds-g-color-palette-blue-95, #eef4ff);
+    color: var(--slds-g-color-palette-blue-40, #0b5cab);
+}
+.ag-pill_neutral {
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+    color: var(--slds-g-color-neutral-base-30, #444444);
+}
+.ag-count {
+    display: inline-block;
+    min-width: 1.5rem;
+    margin-left: var(--slds-g-spacing-2, 0.5rem);
+    padding: 0 0.4375rem;
+    border-radius: 999px;
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+    color: var(--slds-g-color-neutral-base-30, #444444);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+    font-weight: var(--slds-g-font-weight-bold, 700);
+    line-height: 1.25rem;
+    text-align: center;
+    vertical-align: middle;
+    font-variant-numeric: tabular-nums;
+}
+.ag-count_alert {
+    background-color: var(--slds-g-color-palette-red-95, #fef1ee);
+    color: var(--slds-g-color-palette-red-40, #ba0517);
+}
+
+/* --- KPI tiles: the whole tile is the click target, through a stretched button --- */
+
+.ag-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(10.5rem, 1fr));
+    gap: var(--slds-g-spacing-3, 0.75rem);
+    margin: 0 0 var(--slds-g-spacing-4, 1rem);
+}
+.ag-kpi {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--slds-g-spacing-1, 0.25rem);
+    min-width: 0;
+    padding: var(--slds-g-spacing-3, 0.75rem) var(--slds-g-spacing-4, 1rem);
+    border: 1px solid var(--slds-g-color-border-1, #e5e5e5);
+    border-radius: var(--slds-g-radius-border-3, 0.5rem);
+    background-color: var(--slds-g-color-surface-container-1, #ffffff);
+    transition:
+        box-shadow 160ms ease,
+        border-color 160ms ease,
+        transform 160ms ease;
+}
+.ag-kpi::before {
+    content: '';
+    position: absolute;
+    top: var(--slds-g-spacing-3, 0.75rem);
+    bottom: var(--slds-g-spacing-3, 0.75rem);
+    left: -1px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background-color: transparent;
+}
+.ag-kpi_alert::before {
+    background-color: var(--slds-g-color-error-1, #ba0517);
+}
+.ag-kpi_warning::before {
+    background-color: var(--slds-g-color-warning-1, #dd7a01);
+}
+.ag-kpi_action:hover {
+    border-color: var(--slds-g-color-border-2, #c9c9c9);
+    box-shadow: 0 2px 8px rgba(3, 45, 96, 0.08);
+    transform: translateY(-1px);
+}
+.ag-kpi_action:focus-within {
+    outline: 2px solid var(--slds-g-color-border-accent-1, #0176d3);
+    outline-offset: 2px;
+}
+.ag-kpi__head {
+    display: flex;
+    align-items: center;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    margin: 0;
+    color: var(--slds-g-color-on-surface-2, #444444);
+    font-size: var(--slds-g-font-scale-neg-1, 0.8125rem);
+}
+.ag-kpi__value {
+    margin: 0;
+    color: var(--slds-g-color-on-surface-3, #181818);
+    font-size: var(--slds-g-font-scale-6, 1.75rem);
+    font-weight: var(--slds-g-font-weight-bold, 700);
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+}
+.ag-kpi_alert .ag-kpi__value {
+    color: var(--slds-g-color-error-1, #ba0517);
+}
+.ag-kpi__action {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--slds-g-color-accent-2, #0176d3);
+    font: inherit;
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+    text-align: left;
+    cursor: pointer;
+}
+.ag-kpi__action::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+}
+.ag-kpi__action:focus {
+    outline: none;
+}
+
+/* --- Cards and sections --- */
+
+.ag-card {
+    border-radius: var(--slds-g-radius-border-3, 0.5rem);
+}
+.ag-section-heading {
+    display: inline-flex;
+    align-items: center;
+}
+.ag-section-heading:focus {
+    outline: 2px solid var(--slds-g-color-border-accent-1, #0176d3);
+    outline-offset: 2px;
+}
+.ag-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    margin-bottom: var(--slds-g-spacing-3, 0.75rem);
+}
+.ag-meta {
+    color: var(--slds-g-color-on-surface-1, #5c5c5c);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+}
+.ag-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+}
+.ag-live::before {
+    content: '';
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background-color: var(--slds-g-color-neutral-base-60, #939393);
+}
+.ag-live_on::before {
+    background-color: var(--slds-g-color-success-1, #2e844a);
+    box-shadow: 0 0 0 0 rgba(46, 132, 74, 0.45);
+    animation: ag-pulse 2.4s ease-out infinite;
+}
+.ag-footer-link {
+    display: flex;
+    justify-content: center;
+    padding-top: var(--slds-g-spacing-2, 0.5rem);
+}
+
+/* --- Two panels side by side on wide screens, stacked below 48rem. A grid gap instead of
+   negative gutter margins, which pushed the page wider than the window. --- */
+
+.ag-split {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
+    gap: var(--slds-g-spacing-4, 1rem);
+    align-items: start;
+}
+/* SLDS spaces a card that follows another card; in a grid that margin no longer collapses. */
+.ag-split > .slds-card {
+    margin: 0;
+}
+
+/* --- Tables --- */
+
+.ag-num {
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.ag-nowrap {
+    white-space: nowrap;
+}
+.ag-table-frame {
+    max-height: 30rem;
+    overflow: auto;
+    border: 1px solid var(--slds-g-color-border-1, #e5e5e5);
+    border-radius: var(--slds-g-radius-border-2, 0.25rem);
+}
+.ag-table-frame .slds-table {
+    border: 0;
+}
+.ag-table-frame thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background-color: var(--slds-g-color-surface-container-2, #f3f3f3);
+    box-shadow: inset 0 -1px 0 var(--slds-g-color-border-1, #e5e5e5);
+}
+.ag-datatable-frame {
+    height: 30rem;
+}
+.ag-bar-track {
+    height: 0.375rem;
+    overflow: hidden;
+    border-radius: 999px;
+    background-color: var(--slds-g-color-neutral-base-90, #e5e5e5);
+}
+.ag-bar {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 400ms cubic-bezier(0.2, 0, 0, 1);
+}
+.ag-bar_normal {
+    background-color: var(--slds-g-color-success-1, #2e844a);
+}
+.ag-bar_warning {
+    background-color: var(--slds-g-color-warning-1, #dd7a01);
+}
+.ag-bar_danger {
+    background-color: var(--slds-g-color-error-1, #ba0517);
+}
+
+/* --- Empty and loading states --- */
+
+.ag-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    padding: var(--slds-g-spacing-5, 1.5rem) var(--slds-g-spacing-4, 1rem);
+    color: var(--slds-g-color-on-surface-1, #5c5c5c);
+    text-align: center;
+}
+.ag-empty__icon {
+    display: inline-flex;
+    padding: var(--slds-g-spacing-2, 0.5rem);
+    border-radius: 50%;
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+}
+.ag-empty__title {
+    color: var(--slds-g-color-on-surface-3, #181818);
+    font-weight: var(--slds-g-font-weight-bold, 700);
+}
+.ag-empty__text {
+    max-width: 32rem;
+}
+.ag-skeleton {
+    display: block;
+    height: 0.75rem;
+    border-radius: var(--slds-g-radius-border-1, 0.25rem);
+    background: linear-gradient(
+        90deg,
+        var(--slds-g-color-neutral-base-95, #f3f3f3) 25%,
+        var(--slds-g-color-neutral-base-90, #e5e5e5) 37%,
+        var(--slds-g-color-neutral-base-95, #f3f3f3) 63%
+    );
+    background-size: 400% 100%;
+    animation: ag-shimmer 1.4s ease infinite;
+}
+.ag-skeleton + .ag-skeleton {
+    margin-top: var(--slds-g-spacing-3, 0.75rem);
+}
+/* Placeholder tiles sit in a grid, which spaces them itself. */
+.ag-kpi-grid > .ag-skeleton + .ag-skeleton {
+    margin-top: 0;
+}
+.ag-skeleton_title {
+    width: 40%;
+    height: 1rem;
+}
+.ag-skeleton_short {
+    width: 60%;
+}
+.ag-skeleton_tile {
+    height: 5.25rem;
+    border-radius: var(--slds-g-radius-border-3, 0.5rem);
+}
+.ag-fade-in {
+    animation: ag-fade-in 200ms ease-out both;
+}
+
+@keyframes ag-shimmer {
+    0% {
+        background-position: 100% 50%;
+    }
+    100% {
+        background-position: 0 50%;
+    }
+}
+@keyframes ag-fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(2px);
+    }
+    to {
+        opacity: 1;
+        transform: none;
+    }
+}
+@keyframes ag-pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(46, 132, 74, 0.45);
+    }
+    70% {
+        box-shadow: 0 0 0 0.375rem rgba(46, 132, 74, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(46, 132, 74, 0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ag-kpi,
+    .ag-bar {
+        transition: none;
+    }
+    .ag-kpi_action:hover {
+        transform: none;
+    }
+    .ag-skeleton,
+    .ag-fade-in,
+    .ag-live_on::before {
+        animation: none;
+    }
+}

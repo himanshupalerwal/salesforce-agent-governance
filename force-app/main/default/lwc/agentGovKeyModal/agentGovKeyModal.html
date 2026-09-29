@@ -1,0 +1,41 @@
+<template>
+    <lightning-modal-header label="New API key"></lightning-modal-header>
+    <lightning-modal-body>
+        <div class="slds-notify slds-notify_alert slds-alert_warning slds-m-bottom_medium" role="alert">
+            <span class="slds-assistive-text">Warning</span>
+            <h2 class="key-warning">Copy this key now. It will not be shown again.</h2>
+        </div>
+        <p class="slds-m-bottom_small">
+            The previous key for <strong>{agentName}</strong> has stopped working. Give this key to the integration that
+            runs the agent before you close this window.
+        </p>
+        <template lwc:if={hasKey}>
+            <div class="slds-form-element">
+                <label class="slds-form-element__label" for="new-api-key">API key</label>
+                <div class="slds-form-element__control key-row">
+                    <input
+                        id="new-api-key"
+                        type="text"
+                        class="slds-input key-input"
+                        value={key}
+                        readonly
+                        autocomplete="off"
+                        spellcheck="false"
+                        lwc:ref="keyInput"
+                        onfocus={handleKeyFocus}
+                    />
+                    <lightning-button
+                        class="slds-m-left_x-small copy-button"
+                        label="Copy"
+                        icon-name="utility:copy"
+                        onclick={handleCopy}
+                    ></lightning-button>
+                </div>
+            </div>
+        </template>
+        <p class="slds-m-top_x-small slds-text-body_small copy-status" aria-live="polite">{copyStatus}</p>
+    </lightning-modal-body>
+    <lightning-modal-footer>
+        <lightning-button variant="brand" label="Done" class="done-button" onclick={handleDone}></lightning-button>
+    </lightning-modal-footer>
+</template>

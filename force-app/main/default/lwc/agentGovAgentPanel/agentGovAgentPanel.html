@@ -1,0 +1,172 @@
+<template>
+    <section class="slds-card ag-card agent-panel" aria-labelledby="panel-heading">
+        <div class="slds-card__header panel-header">
+            <div class="panel-identity">
+                <lightning-icon icon-name="standard:bot" size="medium"></lightning-icon>
+                <div class="panel-title">
+                    <h2
+                        id="panel-heading"
+                        class="slds-card__header-title slds-truncate panel-heading"
+                        tabindex="-1"
+                        lwc:ref="heading"
+                    >
+                        {heading}
+                    </h2>
+                    <p class="ag-meta slds-truncate panel-subtitle">{subtitle}</p>
+                </div>
+            </div>
+            <div class="panel-toolbar">
+                <span class="ag-meta last-updated">{lastUpdatedLabel}</span>
+                <lightning-button-icon
+                    class="refresh-button"
+                    icon-name="utility:refresh"
+                    variant="border-filled"
+                    alternative-text={refreshLabel}
+                    title={refreshLabel}
+                    disabled={refreshing}
+                    onclick={handleRefresh}
+                ></lightning-button-icon>
+            </div>
+        </div>
+        <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
+
+        <div class="slds-card__body slds-card__body_inner">
+            <template lwc:if={errorMessage}>
+                <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                    <span class="slds-assistive-text">Error</span>
+                    <h2 class="error-message">{errorMessage}</h2>
+                </div>
+            </template>
+
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small loading-region" aria-busy="true">
+                    <span class="ag-skeleton ag-skeleton_title"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading governance details</span>
+                </div>
+            </template>
+            <template lwc:elseif={hasSummary}>
+                <ul class="state-strip ag-fade-in" aria-label="Current state">
+                    <li><span class={statusPillClass}>{summary.status}</span></li>
+                    <li><span class={breakerPillClass}>{breakerPillLabel}</span></li>
+                    <template lwc:if={hasBudget}>
+                        <li><span class={budget.pillClass}>{budgetPillLabel}</span></li>
+                    </template>
+                    <template lwc:if={hasSession}>
+                        <li><span class="ag-pill ag-pill_info">Session live</span></li>
+                    </template>
+                </ul>
+
+                <div class="panel-grid ag-fade-in">
+                    <section class="panel-section" aria-labelledby="usage-title">
+                        <h3 id="usage-title" class="panel-section__title">Usage today</h3>
+                        <template lwc:if={hasBudget}>
+                            <p class="ag-meta slds-m-bottom_x-small budget-status">
+                                {budget.label}, peak {budget.peak}% of the daily allocation
+                            </p>
+                            <template for:each={usageBars} for:item="bar">
+                                <div key={bar.key} class="usage-bar">
+                                    <div class="usage-bar__head">
+                                        <span>{bar.label}</span>
+                                        <span class="ag-num">{bar.percent}%</span>
+                                    </div>
+                                    <div
+                                        class="ag-bar-track"
+                                        role="progressbar"
+                                        aria-valuemin="0"
+                                        aria-valuemax="100"
+                                        aria-valuenow={bar.percent}
+                                        aria-label={bar.ariaLabel}
+                                    >
+                                        <div class={bar.barClass} style={bar.barStyle}></div>
+                                    </div>
+                                </div>
+                            </template>
+                        </template>
+                        <template lwc:else>
+                            <p class="ag-meta no-budget">No usage recorded today.</p>
+                        </template>
+                    </section>
+
+                    <section class="panel-section" aria-labelledby="breaker-title">
+                        <h3 id="breaker-title" class="panel-section__title">Circuit breaker</h3>
+                        <dl class="facts">
+                            <dt>State</dt>
+                            <dd><span class={breakerLabelClass}>{breaker.label}</span></dd>
+                            <template lwc:if={breaker.detail}>
+                                <dt>Next step</dt>
+                                <dd class="breaker-detail">{breaker.detail}</dd>
+                            </template>
+                            <dt>Failures</dt>
+                            <dd class="ag-num failure-count">{failureCount}</dd>
+                        </dl>
+                    </section>
+
+                    <section class="panel-section" aria-labelledby="session-title">
+                        <h3 id="session-title" class="panel-section__title">Live session</h3>
+                        <template lwc:if={hasSession}>
+                            <p class="live-session">
+                                <a
+                                    href={session.url}
+                                    data-record-id={session.id}
+                                    data-object="AgentGov_Session__c"
+                                    onclick={handleRecordLink}
+                                    >Open the live session</a
+                                >, {session.actions} actions so far.
+                            </p>
+                        </template>
+                        <template lwc:else>
+                            <p class="ag-meta no-session">
+                                No live session. The agent's next governed action opens one.
+                            </p>
+                        </template>
+                    </section>
+
+                    <section class="panel-section" aria-labelledby="credentials-title">
+                        <h3 id="credentials-title" class="panel-section__title">Credentials</h3>
+                        <dl class="facts">
+                            <dt>API key</dt>
+                            <dd class="key-prefix">{keyPrefix}</dd>
+                            <dt>Last rotated</dt>
+                            <dd class="key-rotated">{keyLastRotated}</dd>
+                            <dt>Agent User</dt>
+                            <dd class="bound-user">{boundToUser}</dd>
+                        </dl>
+                    </section>
+                </div>
+
+                <template lwc:if={hasActions}>
+                    <div class="panel-actions" role="group" aria-label="Agent actions">
+                        <template for:each={actions} for:item="action">
+                            <lightning-button
+                                key={action.name}
+                                class="action-button"
+                                label={action.label}
+                                variant={action.variant}
+                                data-action={action.name}
+                                disabled={action.disabled}
+                                onclick={handleAction}
+                            ></lightning-button>
+                        </template>
+                    </div>
+                </template>
+            </template>
+            <template lwc:else>
+                <div class="ag-empty not-found">
+                    <span class="ag-empty__icon">
+                        <lightning-icon icon-name="utility:lock" size="small"></lightning-icon>
+                    </span>
+                    <p class="ag-empty__title">Details unavailable</p>
+                    <p class="ag-empty__text">
+                        This agent's governance details could not be loaded. It may have been deleted, or you may not
+                        have access to it.
+                    </p>
+                </div>
+            </template>
+        </div>
+    </section>
+
+    <c-agent-gov-activity-log class="activity" record-id={recordId} lwc:ref="activity"></c-agent-gov-activity-log>
+    <c-agent-gov-usage-history class="history" record-id={recordId} lwc:ref="history"></c-agent-gov-usage-history>
+</template>

@@ -4,6 +4,15 @@
         <actionName>Accept</actionName>
         <type>Default</type>
     </actionOverrides>
+    <actionOverrides>
+        <actionName>View</actionName>
+        <comment>Opens the agent's governance panel above the record details.</comment>
+        <content>AgentGov_Agent_Record_Page</content>
+        <formFactor>Large</formFactor>
+        <skipRecordTypeSelect>false</skipRecordTypeSelect>
+        <type>Flexipage</type>
+    </actionOverrides>
+    <compactLayoutAssignment>AgentGov_Agent_Highlights</compactLayoutAssignment>
     <deploymentStatus>Deployed</deploymentStatus>
     <description>Registers AI agents (Agentforce, MCP, Custom, Flow-based) operating within the Salesforce org for governance tracking.</description>
     <enableActivities>true</enableActivities>
@@ -20,6 +29,20 @@
         <type>AutoNumber</type>
     </nameField>
     <pluralLabel>Agent Registrations</pluralLabel>
+    <searchLayouts>
+        <customTabListAdditionalFields>Agent_Name__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Agent_Type__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Status__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Circuit_Breaker_State__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Priority__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Last_Active__c</customTabListAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_Name__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_Type__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Status__c</lookupDialogsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_Name__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_Type__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Status__c</searchResultsAdditionalFields>
+    </searchLayouts>
     <sharingModel>ReadWrite</sharingModel>
     <visibility>Public</visibility>
 </CustomObject>
