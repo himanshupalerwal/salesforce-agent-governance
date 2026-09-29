@@ -28,6 +28,9 @@ public inherited sharing class AgentGovTriggerHandler {
      */
     private static final Integer MAX_EMAIL_BODY_CHARACTERS = 30000;
 
+    /** @description Length of the Error_Message__c fields on the action log and its event. */
+    private static final Integer MAX_ERROR_CHARACTERS = 32768;
+
     /**
      * @description Records one agent action.
      * @param registrationId The acting agent
@@ -45,24 +48,49 @@ public inherited sharing class AgentGovTriggerHandler {
         String status,
         String details
     ) {
-        AgentGov_Registration__c registration = AgentGovSelector.getRegistrationById(registrationId);
-        logActions(
-            new List<AgentGov_Action_Event__e>{
-                buildEvent(
-                    registrationId,
-                    registration != null ? registration.Agent_Name__c : AgentGovConstants.UNKNOWN_AGENT_NAME,
-                    actionType,
-                    objectName,
-                    recordId,
-                    status,
-                    details
-                )
-            }
-        );
+        logAction(registrationId, actionType, objectName, recordId, status, details, null);
     }
 
     /**
-     * @description Builds an action event without publishing it, for bulk callers.
+     * @description Records one agent action with the underlying error, when there is one.
+     * @param registrationId The acting agent
+     * @param actionType One of the AgentGovConstants.ACTION_* values
+     * @param objectName Object acted upon
+     * @param recordId Record acted upon
+     * @param status Success, Failure, Denied, or Throttled
+     * @param details Free-form details
+     * @param errorMessage Why the action failed or was refused, or null
+     */
+    public static void logAction(
+        Id registrationId,
+        String actionType,
+        String objectName,
+        String recordId,
+        String status,
+        String details,
+        String errorMessage
+    ) {
+        AgentGov_Registration__c registration = AgentGovSelector.getRegistrationById(registrationId);
+        AgentGov_Action_Event__e event = buildEvent(
+            registrationId,
+            registration != null ? registration.Agent_Name__c : AgentGovConstants.UNKNOWN_AGENT_NAME,
+            actionType,
+            objectName,
+            recordId,
+            status,
+            details
+        );
+        if (errorMessage != null) {
+            event.Error_Message__c = errorMessage.left(MAX_ERROR_CHARACTERS);
+        }
+        logActions(new List<AgentGov_Action_Event__e>{ event });
+    }
+
+    /**
+     * @description Builds an action event without publishing it, for bulk callers. The event
+     *              carries the request's correlation id, the time the request had taken so
+     *              far, and the session the agent's activity was recorded against, if any. A
+     *              denial or failure also carries its reason as the row's error message.
      */
     public static AgentGov_Action_Event__e buildEvent(
         Id registrationId,
@@ -73,6 +101,7 @@ public inherited sharing class AgentGovTriggerHandler {
         String status,
         String details
     ) {
+        Boolean refused = status == AgentGovConstants.ACTION_DENIED || status == AgentGovConstants.ACTION_FAILURE;
         return new AgentGov_Action_Event__e(
             Agent_Id__c = registrationId,
             Agent_Name__c = agentName,
@@ -81,7 +110,11 @@ public inherited sharing class AgentGovTriggerHandler {
             Record_Id__c = recordId,
             Status__c = status,
             Timestamp__c = DateTime.now(),
-            Details__c = details
+            Details__c = details,
+            Error_Message__c = refused && details != null ? details.left(MAX_ERROR_CHARACTERS) : null,
+            Correlation_Id__c = AgentGovRequestContext.getCorrelationId(),
+            Execution_Time_Ms__c = AgentGovRequestContext.elapsedMs(),
+            Session_Id__c = AgentGovSessionTracker.currentSessionFor(registrationId)
         );
     }
 
@@ -175,13 +208,29 @@ public inherited sharing class AgentGovTriggerHandler {
     }
 
     /**
-     * @description Emails alerts to the configured administrator address. Called by
-     *              AgentGovAlertTrigger. One email is sent per delivered batch.
+     * @description Records each delivered alert in the action log, then emails the batch: to
+     *              the administrator address in settings, and, when Notify_Agent_Owners__c is
+     *              checked, to each affected agent's owner listing only that owner's agents.
+     *              All messages go out in one send. Called by AgentGovAlertTrigger.
      * @param alerts Delivered alerts
      */
     public static void handleAlerts(List<AgentGov_Alert__e> alerts) {
-        String recipient = AgentGovSelector.getSettings().Admin_Notification_Email__c;
-        if (String.isBlank(recipient) || alerts == null || alerts.isEmpty()) {
+        if (alerts == null || alerts.isEmpty()) {
+            return;
+        }
+        // Recorded before any email decision, so alert history does not depend on whether
+        // anyone is configured to receive email.
+        recordAlertHistory(alerts);
+
+        AgentGov_Settings__c settings = AgentGovSelector.getSettings();
+        List<Messaging.SingleEmailMessage> messages = new List<Messaging.SingleEmailMessage>();
+        if (String.isNotBlank(settings.Admin_Notification_Email__c)) {
+            messages.add(alertEmail(settings.Admin_Notification_Email__c, alerts));
+        }
+        if (settings.Notify_Agent_Owners__c == true) {
+            messages.addAll(ownerEmails(alerts));
+        }
+        if (messages.isEmpty()) {
             return;
         }
         if (Limits.getEmailInvocations() >= Limits.getLimitEmailInvocations()) {
@@ -193,7 +242,66 @@ public inherited sharing class AgentGovTriggerHandler {
             );
             return;
         }
+        sendAlertEmails(messages);
+    }
 
+    private static void recordAlertHistory(List<AgentGov_Alert__e> alerts) {
+        List<AgentGov_Action_Log__c> rows = new List<AgentGov_Action_Log__c>();
+        for (AgentGov_Alert__e alert : alerts) {
+            rows.add(
+                new AgentGov_Action_Log__c(
+                    Agent_Registration__c = toRegistrationId(alert.Agent_Id__c),
+                    Action_Type__c = AgentGovConstants.ACTION_ALERT,
+                    Status__c = AgentGovConstants.ACTION_SUCCESS,
+                    Timestamp__c = alert.Timestamp__c != null ? alert.Timestamp__c : DateTime.now(),
+                    Details__c = describeAlert(alert)
+                )
+            );
+        }
+        insertLogs(rows);
+    }
+
+    // An alert row says what happened in words, led by a short label such as "Blocked:" that the
+    // console shows as a pill. The agent is the row's registration and the time its Timestamp__c,
+    // so neither is repeated in the text.
+    private static String describeAlert(AgentGov_Alert__e alert) {
+        if (alert.Limit_Type__c == AgentGovConstants.ALERT_LIMIT_CIRCUIT_BREAKER) {
+            String reached = alert.Current_Usage__c == null ||
+                alert.Budget_Allocated__c == null
+                ? 'the failure threshold was reached.'
+                : whole(alert.Current_Usage__c) +
+                  ' failures reached the threshold of ' +
+                  whole(alert.Budget_Allocated__c) +
+                  '.';
+            return AgentGovConstants.ALERT_LABEL_BREAKER_OPEN + ': ' + reached;
+        }
+        String label = AgentGovConstants.ALERT_LABELS.containsKey(alert.Alert_Type__c)
+            ? AgentGovConstants.ALERT_LABELS.get(alert.Alert_Type__c)
+            : alert.Alert_Type__c;
+        String limitLabel = AgentGovConstants.LIMIT_LABELS.containsKey(alert.Limit_Type__c)
+            ? AgentGovConstants.LIMIT_LABELS.get(alert.Limit_Type__c)
+            : alert.Limit_Type__c;
+        String text = label + ': ' + limitLabel + ' at ' + whole(alert.Usage_Percentage__c) + '% of today\'s budget';
+        if (alert.Current_Usage__c != null && alert.Budget_Allocated__c != null) {
+            text += ' (' + whole(alert.Current_Usage__c) + ' of ' + whole(alert.Budget_Allocated__c) + ')';
+        }
+        return text + '.';
+    }
+
+    // An email lists several agents' alerts, so each line names the agent and, because the
+    // recipient's time zone is unknown, gives the time in GMT.
+    private static String describeAlertForEmail(AgentGov_Alert__e alert) {
+        String line = alert.Agent_Name__c + ' - ' + describeAlert(alert);
+        return alert.Timestamp__c == null
+            ? line
+            : line + ' ' + alert.Timestamp__c.formatGmt('yyyy-MM-dd HH:mm') + ' GMT';
+    }
+
+    private static String whole(Decimal value) {
+        return value == null ? '0' : String.valueOf(value.setScale(0, System.RoundingMode.HALF_UP));
+    }
+
+    private static Messaging.SingleEmailMessage alertEmail(String recipient, List<AgentGov_Alert__e> alerts) {
         // A platform-event trigger can deliver a large batch, and a plain text body is capped
         // at 32,000 characters. Listing every alert would push a big batch past that and the
         // send would fail, losing the notification entirely. The count in the subject stays
@@ -201,22 +309,7 @@ public inherited sharing class AgentGovTriggerHandler {
         List<String> lines = new List<String>();
         Integer listed = Math.min(alerts.size(), MAX_ALERTS_IN_EMAIL);
         for (Integer i = 0; i < listed; i++) {
-            AgentGov_Alert__e alert = alerts[i];
-            lines.add(
-                alert.Alert_Type__c +
-                    ' alert for agent ' +
-                    alert.Agent_Name__c +
-                    ': ' +
-                    alert.Limit_Type__c +
-                    ' at ' +
-                    alert.Usage_Percentage__c +
-                    '% (' +
-                    alert.Current_Usage__c +
-                    ' of ' +
-                    alert.Budget_Allocated__c +
-                    ') at ' +
-                    alert.Timestamp__c
-            );
+            lines.add(describeAlertForEmail(alerts[i]));
         }
         if (alerts.size() > listed) {
             lines.add('');
@@ -229,14 +322,42 @@ public inherited sharing class AgentGovTriggerHandler {
         // capped number of lines can exceed the plain text limit and fail the send outright.
         message.setPlainTextBody(String.join(lines, '\n').abbreviate(MAX_EMAIL_BODY_CHARACTERS));
         message.setSaveAsActivity(false);
+        return message;
+    }
 
+    // One message per owner, each listing only that owner's agents, so an owner never learns
+    // about agents that belong to someone else.
+    private static List<Messaging.SingleEmailMessage> ownerEmails(List<AgentGov_Alert__e> alerts) {
+        Set<Id> agentIds = new Set<Id>();
+        for (AgentGov_Alert__e alert : alerts) {
+            Id agentId = toRegistrationId(alert.Agent_Id__c);
+            if (agentId != null) {
+                agentIds.add(agentId);
+            }
+        }
+        Map<Id, AgentGov_Registration__c> agents = AgentGovSelector.getRegistrationsByIds(agentIds);
+        Map<String, List<AgentGov_Alert__e>> byOwner = new Map<String, List<AgentGov_Alert__e>>();
+        for (AgentGov_Alert__e alert : alerts) {
+            AgentGov_Registration__c agent = agents.get(toRegistrationId(alert.Agent_Id__c));
+            if (agent == null || String.isBlank(agent.Owner_Email__c)) {
+                continue;
+            }
+            String owner = agent.Owner_Email__c.trim().toLowerCase();
+            if (!byOwner.containsKey(owner)) {
+                byOwner.put(owner, new List<AgentGov_Alert__e>());
+            }
+            byOwner.get(owner).add(alert);
+        }
+        List<Messaging.SingleEmailMessage> messages = new List<Messaging.SingleEmailMessage>();
+        for (String owner : byOwner.keySet()) {
+            messages.add(alertEmail(owner, byOwner.get(owner)));
+        }
+        return messages;
+    }
+
+    private static void sendAlertEmails(List<Messaging.SingleEmailMessage> messages) {
         try {
-            for (
-                Messaging.SendEmailResult result : Messaging.sendEmail(
-                    new List<Messaging.SingleEmailMessage>{ message },
-                    false
-                )
-            ) {
+            for (Messaging.SendEmailResult result : Messaging.sendEmail(messages, false)) {
                 if (!result.isSuccess()) {
                     List<String> errors = new List<String>();
                     for (Messaging.SendEmailError error : result.getErrors()) {
@@ -278,13 +399,26 @@ public inherited sharing class AgentGovTriggerHandler {
     }
 
     /**
-     * @description Records an audit entry about the framework itself: purge summaries,
-     *              delivery failures, unhandled REST errors. Best effort by design, because
-     *              it is the last resort when another write has already failed.
-     * @param registrationId The agent involved, or null
-     * @param status Success or Failure
-     * @param details What happened
-     * @param errorMessage Diagnostic detail, or null
+     * @description Sets the key that allows at most one active session per agent: the agent's
+     *              registration Id while the session is Active, blank once it has ended. Blank
+     *              values never collide, so any number of ended sessions can exist. Called by
+     *              AgentGovSessionTrigger.
+     * @param sessions Session rows about to be inserted or updated
+     */
+    public static void populateSessionKeys(List<AgentGov_Session__c> sessions) {
+        for (AgentGov_Session__c session : sessions) {
+            Boolean active =
+                session.Status__c == AgentGovConstants.SESSION_ACTIVE &&
+                session.Agent_Registration__c != null;
+            session.Active_Session_Key__c = active ? String.valueOf(session.Agent_Registration__c) : null;
+        }
+    }
+
+    /**
+     * @description Records audit entries about the framework itself (purge summaries,
+     *              delivery failures, unhandled REST errors) in one statement. Best effort by
+     *              design, because it is the last resort when another write has already failed.
+     * @param entries Rows built with buildFrameworkEvent
      */
     public static void recordFrameworkEvents(List<AgentGov_Action_Log__c> entries) {
         if (entries == null || entries.isEmpty()) {
@@ -313,21 +447,24 @@ public inherited sharing class AgentGovTriggerHandler {
             Action_Type__c = AgentGovConstants.ACTION_SYSTEM,
             Status__c = status,
             Timestamp__c = DateTime.now(),
+            Correlation_Id__c = AgentGovRequestContext.getCorrelationId(),
             Details__c = details == null ? null : details.left(131072),
-            Error_Message__c = errorMessage == null ? null : errorMessage.left(32768)
+            Error_Message__c = errorMessage == null ? null : errorMessage.left(MAX_ERROR_CHARACTERS)
         );
     }
 
+    /**
+     * @description Records one audit entry about the framework itself. See recordFrameworkEvents.
+     * @param registrationId The agent the note concerns, or null
+     * @param status One of the AgentGovConstants.ACTION_* statuses
+     * @param details What happened
+     * @param errorMessage Underlying error text, if any
+     */
     public static void recordFrameworkEvent(Id registrationId, String status, String details, String errorMessage) {
-        AgentGov_Action_Log__c entry = new AgentGov_Action_Log__c(
-            Agent_Registration__c = registrationId,
-            Action_Type__c = AgentGovConstants.ACTION_SYSTEM,
-            Status__c = status,
-            Timestamp__c = DateTime.now(),
-            Details__c = details == null ? null : details.left(131072),
-            Error_Message__c = errorMessage == null ? null : errorMessage.left(32768)
+        AgentGovDml.insertRecords(
+            new List<SObject>{ buildFrameworkEvent(registrationId, status, details, errorMessage) },
+            false
         );
-        AgentGovDml.insertRecords(new List<SObject>{ entry }, false);
     }
 
     // --- Private helpers ---
@@ -337,12 +474,16 @@ public inherited sharing class AgentGovTriggerHandler {
         for (AgentGov_Action_Event__e event : events) {
             AgentGov_Action_Log__c entry = new AgentGov_Action_Log__c(
                 Agent_Registration__c = toRegistrationId(event.Agent_Id__c),
+                Agent_Session__c = toSessionId(event.Session_Id__c),
                 Action_Type__c = event.Action_Type__c,
                 Object_Name__c = event.Object_Name__c,
                 Record_Id__c = event.Record_Id__c,
                 Status__c = event.Status__c,
                 Timestamp__c = event.Timestamp__c != null ? event.Timestamp__c : DateTime.now(),
-                Details__c = event.Details__c
+                Details__c = event.Details__c,
+                Error_Message__c = event.Error_Message__c,
+                Correlation_Id__c = event.Correlation_Id__c,
+                Execution_Time_Ms__c = event.Execution_Time_Ms__c
             );
             if (String.isNotBlank(event.Agent_Id__c) && entry.Agent_Registration__c == null) {
                 entry.Details__c =
@@ -356,12 +497,20 @@ public inherited sharing class AgentGovTriggerHandler {
     }
 
     private static Id toRegistrationId(String rawId) {
+        return toIdOf(rawId, AgentGov_Registration__c.SObjectType);
+    }
+
+    private static Id toSessionId(String rawId) {
+        return toIdOf(rawId, AgentGov_Session__c.SObjectType);
+    }
+
+    private static Id toIdOf(String rawId, Schema.SObjectType expectedType) {
         if (String.isBlank(rawId)) {
             return null;
         }
         try {
             Id candidate = Id.valueOf(rawId);
-            return candidate.getSObjectType() == AgentGov_Registration__c.SObjectType ? candidate : null;
+            return candidate.getSObjectType() == expectedType ? candidate : null;
         } catch (Exception e) {
             return null;
         }
@@ -408,6 +557,7 @@ public inherited sharing class AgentGovTriggerHandler {
             Action_Type__c = AgentGovConstants.ACTION_SYSTEM,
             Status__c = AgentGovConstants.ACTION_FAILURE,
             Timestamp__c = original.Timestamp__c,
+            Correlation_Id__c = original.Correlation_Id__c,
             Details__c = originalValues.left(131072),
             Error_Message__c = ('Log entry rejected: ' + AgentGovDml.describeErrors(errors)).left(32768)
         );

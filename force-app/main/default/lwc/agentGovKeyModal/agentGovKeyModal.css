@@ -1,0 +1,8 @@
+/* Colors come from SLDS 2 global styling hooks with SLDS 1 fallbacks. */
+.key-row {
+    display: flex;
+    align-items: center;
+}
+.key-input {
+    font-family: var(--slds-g-font-family-monospace, 'Courier New', monospace);
+}

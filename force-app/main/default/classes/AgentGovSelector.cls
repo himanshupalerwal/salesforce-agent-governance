@@ -20,6 +20,7 @@ public without sharing class AgentGovSelector {
     private static List<AgentGov_Limit_Config__mdt> cachedLimitConfigs;
     private static List<AgentGov_Policy__mdt> cachedPolicies;
     private static Map<Id, AgentGov_Registration__c> cachedRegistrations = new Map<Id, AgentGov_Registration__c>();
+    private static String cachedOrgTimeZone;
 
     /** @description Retrieves the org-level AgentGov settings, with defaults when none are configured. Cached per transaction. */
     public static AgentGov_Settings__c getSettings() {
@@ -35,9 +36,23 @@ public without sharing class AgentGovSelector {
                 cachedSettings.Enable_Conflict_Detection__c = true;
                 cachedSettings.Enable_Real_Time_Events__c = true;
                 cachedSettings.Max_Concurrent_Agents__c = AgentGovConstants.DEFAULT_MAX_CONCURRENT_AGENTS;
+                cachedSettings.Session_Idle_Minutes__c = AgentGovConstants.DEFAULT_SESSION_IDLE_MINUTES;
+                cachedSettings.Budget_Retention_Days__c = AgentGovConstants.DEFAULT_BUDGET_RETENTION_DAYS;
             }
         }
         return cachedSettings;
+    }
+
+    /**
+     * @description Returns the org's default time zone. Budget days are counted in it, so an
+     *              agent's day does not depend on which user's session made the call. Cached
+     *              per transaction.
+     */
+    public static String getOrgTimeZone() {
+        if (cachedOrgTimeZone == null) {
+            cachedOrgTimeZone = [SELECT TimeZoneSidKey FROM Organization WITH SYSTEM_MODE LIMIT 1].TimeZoneSidKey;
+        }
+        return cachedOrgTimeZone;
     }
 
     /** @description Checks whether the framework is enabled. An unset flag counts as enabled. */
@@ -259,20 +274,39 @@ public without sharing class AgentGovSelector {
         return registrations.isEmpty() ? null : getRegistrationById(registrations[0].Id);
     }
 
-    /** @description Retrieves the registration bound to a user, or null when the user is not an agent. */
+    /**
+     * @description Retrieves the registration bound to a user, or null when the user is not an
+     *              agent. When the user is bound to several registrations this returns the most
+     *              recently modified one; AgentGovRestAuth uses getRegistrationIdsByAgentUser
+     *              instead so that it can refuse to guess.
+     */
     public static AgentGov_Registration__c getRegistrationByAgentUser(Id userId) {
+        List<Id> ids = getRegistrationIdsByAgentUser(userId);
+        return ids.isEmpty() ? null : getRegistrationById(ids[0]);
+    }
+
+    /**
+     * @description Returns the Ids of up to two registrations bound to a user, most recently
+     *              modified first. Two are enough to tell a unique binding from an ambiguous one.
+     * @param userId The user to look up
+     * @return Zero, one or two registration Ids
+     */
+    public static List<Id> getRegistrationIdsByAgentUser(Id userId) {
+        List<Id> ids = new List<Id>();
         if (userId == null) {
-            return null;
+            return ids;
         }
-        List<AgentGov_Registration__c> registrations = [
+        for (AgentGov_Registration__c registration : [
             SELECT Id
             FROM AgentGov_Registration__c
             WHERE Agent_User__c = :userId
             WITH SYSTEM_MODE
             ORDER BY LastModifiedDate DESC
-            LIMIT 1
-        ];
-        return registrations.isEmpty() ? null : getRegistrationById(registrations[0].Id);
+            LIMIT 2
+        ]) {
+            ids.add(registration.Id);
+        }
+        return ids;
     }
 
     /** @description Replaces the cached copy of a registration after the framework updates it. */
@@ -346,7 +380,7 @@ public without sharing class AgentGovSelector {
         if (registrationIds == null || registrationIds.isEmpty()) {
             return budgets;
         }
-        Date today = Date.today();
+        Date today = AgentGovBudgetManager.budgetDate();
         for (AgentGov_Budget__c budget : [
             SELECT
                 Id,
@@ -385,7 +419,7 @@ public without sharing class AgentGovSelector {
         if (registrationIds == null || registrationIds.isEmpty()) {
             return budgets;
         }
-        Date today = Date.today();
+        Date today = AgentGovBudgetManager.budgetDate();
         for (AgentGov_Budget__c budget : [
             SELECT
                 Id,
@@ -429,7 +463,9 @@ public without sharing class AgentGovSelector {
                 Agent_Registration__c,
                 Session_Start__c,
                 Session_End__c,
+                Last_Activity__c,
                 Status__c,
+                End_Reason__c,
                 API_Calls_Used__c,
                 SOQL_Queries_Used__c,
                 DML_Statements_Used__c,
@@ -444,6 +480,112 @@ public without sharing class AgentGovSelector {
             }
         }
         return sessions;
+    }
+
+    /**
+     * @description Reads the newest active session of each agent under a row lock, so two
+     *              transactions adding usage to the same session cannot overwrite each other's
+     *              counts. FOR UPDATE cannot be combined with ORDER BY, so the newest session is
+     *              picked here rather than in the query.
+     * @param registrationIds Agents whose sessions to lock
+     * @return Map of registration Id to its newest active session
+     */
+    public static Map<Id, AgentGov_Session__c> getActiveSessionsForUpdate(Set<Id> registrationIds) {
+        Map<Id, AgentGov_Session__c> sessions = new Map<Id, AgentGov_Session__c>();
+        if (registrationIds == null || registrationIds.isEmpty()) {
+            return sessions;
+        }
+        for (AgentGov_Session__c session : [
+            SELECT
+                Id,
+                Agent_Registration__c,
+                Session_Start__c,
+                Session_End__c,
+                Last_Activity__c,
+                Status__c,
+                API_Calls_Used__c,
+                SOQL_Queries_Used__c,
+                DML_Statements_Used__c,
+                Actions_Count__c
+            FROM AgentGov_Session__c
+            WHERE Agent_Registration__c IN :registrationIds AND Status__c = :AgentGovConstants.SESSION_ACTIVE
+            WITH SYSTEM_MODE
+            FOR UPDATE
+        ]) {
+            AgentGov_Session__c newest = sessions.get(session.Agent_Registration__c);
+            if (newest == null || session.Session_Start__c > newest.Session_Start__c) {
+                sessions.put(session.Agent_Registration__c, session);
+            }
+        }
+        return sessions;
+    }
+
+    /**
+     * @description Reads every active session of the given agents under a row lock. Used when
+     *              an agent is deactivated, which must end all of its sessions, including any
+     *              duplicates left by releases before v1.3.
+     * @param registrationIds Agents whose sessions to read
+     * @return The active sessions
+     */
+    public static List<AgentGov_Session__c> getAllActiveSessionsForUpdate(Set<Id> registrationIds) {
+        if (registrationIds == null || registrationIds.isEmpty()) {
+            return new List<AgentGov_Session__c>();
+        }
+        return [
+            SELECT Id, Agent_Registration__c, Session_Start__c, Last_Activity__c, Status__c
+            FROM AgentGov_Session__c
+            WHERE Agent_Registration__c IN :registrationIds AND Status__c = :AgentGovConstants.SESSION_ACTIVE
+            WITH SYSTEM_MODE
+            FOR UPDATE
+        ];
+    }
+
+    /**
+     * @description Reads sessions by Id under a row lock.
+     * @param sessionIds Sessions to read
+     * @return Map of session Id to session
+     */
+    public static Map<Id, AgentGov_Session__c> getSessionsForUpdate(Set<Id> sessionIds) {
+        if (sessionIds == null || sessionIds.isEmpty()) {
+            return new Map<Id, AgentGov_Session__c>();
+        }
+        return new Map<Id, AgentGov_Session__c>(
+            [
+                SELECT Id, Agent_Registration__c, Session_Start__c, Last_Activity__c, Status__c
+                FROM AgentGov_Session__c
+                WHERE Id IN :sessionIds
+                WITH SYSTEM_MODE
+                FOR UPDATE
+            ]
+        );
+    }
+
+    /**
+     * @description Reads active sessions that should be closed: idle since the cutoff, or
+     *              started before the maximum-duration cutoff. A session with no recorded
+     *              activity, which only releases before v1.3 created, is judged by its start.
+     * @param idleCutoff Sessions last active before this are idle
+     * @param maxStartCutoff Sessions started before this have run too long
+     * @param maxRows Most rows to return
+     * @return The sessions to close
+     */
+    public static List<AgentGov_Session__c> getStaleSessions(
+        DateTime idleCutoff,
+        DateTime maxStartCutoff,
+        Integer maxRows
+    ) {
+        return [
+            SELECT Id, Agent_Registration__c, Session_Start__c, Last_Activity__c, Status__c
+            FROM AgentGov_Session__c
+            WHERE
+                Status__c = :AgentGovConstants.SESSION_ACTIVE
+                AND (Last_Activity__c < :idleCutoff
+                OR (Last_Activity__c = NULL
+                AND Session_Start__c < :idleCutoff)
+                OR Session_Start__c < :maxStartCutoff)
+            WITH SYSTEM_MODE
+            LIMIT :maxRows
+        ];
     }
 
     /** @description Reads the most recent active session for an agent, or null. */
@@ -461,8 +603,10 @@ public without sharing class AgentGovSelector {
                 Id,
                 Agent_Registration__c,
                 Status__c,
+                End_Reason__c,
                 Session_Start__c,
                 Session_End__c,
+                Last_Activity__c,
                 API_Calls_Used__c,
                 SOQL_Queries_Used__c,
                 DML_Statements_Used__c,
@@ -475,13 +619,30 @@ public without sharing class AgentGovSelector {
         return sessions.isEmpty() ? null : sessions[0];
     }
 
-    /** @description Reads sessions that have been active longer than the given number of hours. */
+    /**
+     * @description Reads sessions that have been active longer than the given number of hours.
+     *              Kept for callers written against v1.2; the health check uses getStaleSessions.
+     */
     public static List<AgentGov_Session__c> getOrphanedSessions(Integer maxHours) {
         DateTime cutoff = DateTime.now().addHours(-maxHours);
         return [
             SELECT Id, Agent_Registration__c, Session_Start__c, Status__c
             FROM AgentGov_Session__c
             WHERE Status__c = :AgentGovConstants.SESSION_ACTIVE AND Session_Start__c < :cutoff
+            WITH SYSTEM_MODE
+        ];
+    }
+
+    /**
+     * @description Reads scheduled jobs by name, with their schedule and next run.
+     * @param jobNames Job names to look up
+     * @return The matching scheduled jobs
+     */
+    public static List<CronTrigger> getScheduledJobs(List<String> jobNames) {
+        return [
+            SELECT Id, CronJobDetail.Name, CronExpression, NextFireTime, State
+            FROM CronTrigger
+            WHERE CronJobDetail.Name IN :jobNames
             WITH SYSTEM_MODE
         ];
     }
@@ -498,6 +659,8 @@ public without sharing class AgentGovSelector {
                 Status__c,
                 Error_Message__c,
                 Execution_Time_Ms__c,
+                Correlation_Id__c,
+                Agent_Session__c,
                 Timestamp__c,
                 Details__c
             FROM AgentGov_Action_Log__c
@@ -514,6 +677,7 @@ public without sharing class AgentGovSelector {
         cachedSettings = null;
         cachedLimitConfigs = null;
         cachedPolicies = null;
+        cachedOrgTimeZone = null;
         cachedRegistrations.clear();
     }
 }

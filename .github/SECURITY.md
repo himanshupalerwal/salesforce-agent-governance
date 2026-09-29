@@ -16,11 +16,14 @@ Reports are acknowledged within 48 hours.
 
 ## Supported versions
 
-| Version | Supported                                   |
-| ------- | ------------------------------------------- |
-| 1.2.x   | Yes                                         |
-| 1.1.x   | Security fixes only, until v1.3 is released |
-| 1.0.x   | No                                          |
+| Version | Supported           |
+| ------- | ------------------- |
+| 1.3.x   | Yes                 |
+| 1.2.x   | Security fixes only |
+| 1.1.x   | No                  |
+| 1.0.x   | No                  |
+
+Support for 1.1.x ended with the release of v1.3.
 
 ## How AgentGov handles security
 
@@ -33,8 +36,11 @@ Reports are acknowledged within 48 hours.
   SOQL with bound values; relationship paths and subqueries cannot be expressed.
 - **Credentials.** API keys are stored only as SHA-256 hashes. Prefer binding the agent's
   Salesforce user to its registration so the OAuth identity is the credential.
-- **Errors.** REST callers never receive exception text or stack traces; unexpected errors
-  return a correlation id that an administrator can look up in the action log.
+- **Errors.** An unexpected REST or proxy error (HTTP 500) never includes exception text or a
+  stack trace. Everything the request wrote is rolled back, and the response carries a
+  correlation id that finds the logged detail in the action log. Every other error is worded by the
+  framework: a proxy `ACCESS_DENIED` names the object, or the fields, the calling user may
+  not reach.
 
 ## Recommendations for production
 
@@ -43,8 +49,12 @@ Reports are acknowledged within 48 hours.
 - Send API keys in the `X-AgentGov-Key` header, never in URLs or logs, and rotate them with
   `POST /rotate-key`.
 - Assign `AgentGov_Agent` to the users agents run as, `AgentGov_User` to people who need
-  the dashboards, and `AgentGov_Admin` (or the `AgentGov_Operators` group) only to
-  administrators.
-- Keep `Admin_Notification_Email__c` set so budget and circuit-breaker alerts reach someone.
+  the dashboards, `AgentGov_User` plus `AgentGov_Responder` to on-call staff who act on
+  agents from the console, and `AgentGov_Admin` (or the `AgentGov_Operators` group) only to
+  administrators. Key rotation stays with holders of `AgentGov_Manage_Keys`, which
+  `AgentGov_Admin` includes and `AgentGov_Responder` does not.
+- Keep `Admin_Notification_Email__c` set and `Enable_Real_Time_Events__c` checked so budget
+  and circuit-breaker alerts reach someone. With real-time events off, no alert is recorded or
+  emailed.
 - Review `AgentGov_Action_Log__c` entries with the `System` action type; they record
   delivery failures and unhandled errors.

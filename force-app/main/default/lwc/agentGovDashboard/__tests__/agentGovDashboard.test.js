@@ -9,6 +9,7 @@ import getTrippedCircuitBreakerCount from '@salesforce/apex/AgentGovDashboardCon
 import { refreshApex } from '@salesforce/apex';
 import { subscribe, unsubscribe } from 'lightning/empApi';
 import { ShowToastEventName } from 'lightning/platformShowToastEvent';
+import { getNavigateCalledWith } from 'lightning/navigation';
 
 jest.mock(
     '@salesforce/apex/AgentGovDashboardController.getAllRegistrations',
@@ -121,17 +122,19 @@ describe('c-agent-gov-dashboard', () => {
         return element;
     }
 
-    it('shows a spinner until every wire has resolved', async () => {
+    it('shows loading placeholders until every wire has resolved', async () => {
         const element = mount();
-        expect(element.shadowRoot.querySelector('lightning-spinner')).not.toBeNull();
+        expect(element.shadowRoot.querySelector('.ag-skeleton')).not.toBeNull();
+        expect(element.shadowRoot.querySelector('[aria-busy="true"]')).not.toBeNull();
 
         getAllRegistrations.emit(AGENTS);
         await flushPromises();
-        expect(element.shadowRoot.querySelector('lightning-spinner')).not.toBeNull();
+        expect(element.shadowRoot.querySelector('.ag-skeleton')).not.toBeNull();
 
         emitAll();
         await flushPromises();
-        expect(element.shadowRoot.querySelector('lightning-spinner')).toBeNull();
+        expect(element.shadowRoot.querySelector('.ag-skeleton')).toBeNull();
+        expect(element.shadowRoot.querySelector('[aria-busy="true"]')).toBeNull();
     });
 
     it('computes summary tiles and budget bars from wired data', async () => {
@@ -139,19 +142,26 @@ describe('c-agent-gov-dashboard', () => {
         emitAll();
         await flushPromises();
 
-        const headings = Array.from(element.shadowRoot.querySelectorAll('.slds-text-heading_large')).map(
-            (el) => el.textContent
-        );
-        expect(headings).toEqual(['2', '1', '7', '0', '50%', '1']);
+        const values = Array.from(element.shadowRoot.querySelectorAll('.kpi-value')).map((el) => el.textContent);
+        expect(values).toEqual(['2', '1', '7', '0', '50%', '1']);
+        // One breaker is tripped, so its tile is marked as an alert and the others are not.
+        expect(element.shadowRoot.querySelector('[data-key="tripped"]').classList.contains('ag-kpi_alert')).toBe(true);
+        expect(element.shadowRoot.querySelector('[data-key="tripped"] lightning-icon').variant).toBe('error');
+        expect(element.shadowRoot.querySelector('[data-key="total"]').classList.contains('ag-kpi_alert')).toBe(false);
 
-        const bar = element.shadowRoot.querySelector('.slds-progress-bar');
+        const bar = element.shadowRoot.querySelector('.budget-row [role="progressbar"]');
         expect(bar.getAttribute('aria-valuenow')).toBe('50');
-        expect(bar.getAttribute('aria-label')).toBe('Agent 1 average budget usage 50 percent');
-        const fill = bar.querySelector('.slds-progress-bar__value');
+        // The bar shows the most-used limit, the figure the server decides the status on.
+        expect(bar.getAttribute('aria-label')).toBe('Agent 1 peak budget usage 50 percent');
+        const fill = bar.querySelector('.usage-fill');
         expect(fill.style.width).toBe('50%');
-        expect(fill.classList.contains('bar-normal')).toBe(true);
-        expect(element.shadowRoot.querySelector('.slds-theme_warning').textContent).toBe('Warning');
-        expect(element.shadowRoot.querySelector('.badge-high').textContent).toBe('High');
+        expect(fill.classList.contains('ag-bar_normal')).toBe(true);
+        const status = element.shadowRoot.querySelector('.budget-status');
+        expect(status.textContent).toBe('Warning');
+        expect(status.classList.contains('ag-pill_warning')).toBe(true);
+        const severity = element.shadowRoot.querySelector('.severity-label');
+        expect(severity.textContent).toBe('High');
+        expect(severity.classList.contains('ag-pill_error')).toBe(true);
     });
 
     it('renders empty states when there is no data', async () => {
@@ -159,10 +169,19 @@ describe('c-agent-gov-dashboard', () => {
         emitAll({ agents: [], budgets: [], conflicts: [], actions: 0, tripped: 0 });
         await flushPromises();
 
-        const emptyStates = Array.from(element.shadowRoot.querySelectorAll('.empty-state')).map((el) =>
-            el.textContent.trim()
-        );
-        expect(emptyStates).toEqual(['No budget data available for today.', 'No conflicts detected.']);
+        const emptyStates = Array.from(element.shadowRoot.querySelectorAll('.empty-state'));
+        // The Active Sessions card stays on the page with an empty state instead of disappearing.
+        expect(emptyStates.map((el) => el.querySelector('.ag-empty__text').textContent.trim())).toEqual([
+            'No budget data available for today.',
+            'No agent has a live session right now.',
+            'No conflicts detected.'
+        ]);
+        expect(emptyStates.map((el) => el.querySelector('.ag-empty__title').textContent.trim())).toEqual([
+            'No usage yet today',
+            'No live sessions',
+            'All clear'
+        ]);
+        expect(element.shadowRoot.querySelector('[data-key="tripped"]').classList.contains('ag-kpi_alert')).toBe(false);
     });
 
     it('shows the error and toasts once when a wire fails', async () => {
@@ -189,7 +208,9 @@ describe('c-agent-gov-dashboard', () => {
             '/event/AgentGov_Action_Event__e',
             '/event/AgentGov_Alert__e'
         ]);
-        expect(element.shadowRoot.querySelector('[aria-live="polite"]').textContent).toBe('Live updates on');
+        const live = element.shadowRoot.querySelector('[aria-live="polite"]');
+        expect(live.textContent).toBe('Live updates on');
+        expect(live.classList.contains('ag-live_on')).toBe(true);
 
         const onEvent = subscribe.mock.calls[0][2];
         onEvent({ data: { payload: {} } });
@@ -252,7 +273,9 @@ describe('c-agent-gov-dashboard', () => {
         emitAll();
         await flushPromises();
 
-        expect(element.shadowRoot.querySelector('[aria-live="polite"]').textContent).toBe('Live updates off');
+        const live = element.shadowRoot.querySelector('[aria-live="polite"]');
+        expect(live.textContent).toBe('Live updates off');
+        expect(live.classList.contains('ag-live_on')).toBe(false);
     });
 
     it('shows an error when a refresh fails', async () => {
@@ -265,5 +288,105 @@ describe('c-agent-gov-dashboard', () => {
         await flushPromises();
 
         expect(element.shadowRoot.querySelector('[role="alert"] h2').textContent).toBe('Refresh failed');
+    });
+    it('keeps showing a failed wire after another wire loads', async () => {
+        const element = mount();
+        getAllRegistrations.error({ message: 'No access to registrations' });
+        await flushPromises();
+        getAllTodaysBudgets.emit(BUDGETS);
+        getRecentConflictLogs.emit(CONFLICTS);
+        getTodaysActionCount.emit(1);
+        getActiveSessions.emit([]);
+        getTrippedCircuitBreakerCount.emit(0);
+        await flushPromises();
+
+        // settle() used to clear the error whenever any wire succeeded.
+        expect(element.shadowRoot.querySelector('[role="alert"] h2').textContent).toBe('No access to registrations');
+
+        getAllRegistrations.emit(AGENTS);
+        await flushPromises();
+        expect(element.shadowRoot.querySelector('[role="alert"]')).toBeNull();
+    });
+
+    it('draws each budget bar from the most-used limit, as the server decides the status', async () => {
+        const element = mount();
+        emitAll({
+            budgets: [
+                {
+                    Id: 'b2',
+                    Agent_Registration__c: 'a1',
+                    Agent_Registration__r: { Agent_Name__c: 'Agent 1' },
+                    Budget_Status__c: 'Throttled',
+                    API_Calls_Allocated__c: 100,
+                    API_Calls_Consumed__c: 90,
+                    SOQL_Queries_Allocated__c: 100,
+                    SOQL_Queries_Consumed__c: 0,
+                    DML_Operations_Allocated__c: 100,
+                    DML_Operations_Consumed__c: 0
+                }
+            ]
+        });
+        await flushPromises();
+
+        const bar = element.shadowRoot.querySelector('.budget-row [role="progressbar"]');
+        // An average of the three limits would have said 30 beside a Throttled status.
+        expect(bar.getAttribute('aria-valuenow')).toBe('90');
+        expect(bar.querySelector('.usage-fill').classList.contains('ag-bar_warning')).toBe(true);
+        expect(element.shadowRoot.querySelector('.budget-status').classList.contains('ag-pill_warning')).toBe(true);
+        const values = Array.from(element.shadowRoot.querySelectorAll('.kpi-value')).map((el) => el.textContent);
+        expect(values[4]).toBe('90%');
+    });
+
+    it('lists live sessions with their agents and last activity, linked to the agent', async () => {
+        const element = mount();
+        emitAll({
+            sessions: [
+                {
+                    Id: 's1',
+                    Agent_Registration__c: 'a1',
+                    Agent_Registration__r: { Agent_Name__c: 'Agent 1' },
+                    Session_Start__c: '2026-09-15T10:00:00.000Z',
+                    Last_Activity__c: '2026-09-15T10:05:00.000Z',
+                    API_Calls_Used__c: 3,
+                    SOQL_Queries_Used__c: 1,
+                    DML_Statements_Used__c: 0,
+                    Actions_Count__c: 4
+                }
+            ]
+        });
+        await flushPromises();
+
+        const link = element.shadowRoot.querySelector('tbody th[scope="row"] a');
+        expect(link.textContent).toBe('Agent 1');
+        expect(link.getAttribute('href')).toBe('/lightning/r/AgentGov_Registration__c/a1/view');
+        link.click();
+        expect(getNavigateCalledWith().pageReference.attributes.recordId).toBe('a1');
+        // API calls, SOQL queries, DML statements, and actions, in column order.
+        const counts = Array.from(link.closest('tr').querySelectorAll('td.ag-num')).map((el) => el.textContent);
+        expect(counts).toEqual(['3', '1', '0', '4']);
+    });
+
+    it('shows that a refresh is running, then when the data was last updated', async () => {
+        const element = mount();
+        emitAll();
+        await flushPromises();
+        const pending = [];
+        refreshApex.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+        const button = element.shadowRoot.querySelector('lightning-button');
+
+        button.click();
+        await flushPromises();
+        expect(button.disabled).toBe(true);
+        expect(button.label).toBe('Refreshing…');
+
+        refreshApex.mockImplementation(() => Promise.resolve());
+        pending.forEach((resolve) => resolve());
+        await flushPromises();
+        expect(button.disabled).toBe(false);
+        expect(button.label).toBe('Refresh');
+        expect(element.shadowRoot.querySelector('.last-updated').textContent).toMatch(/^Updated /);
+        const announcement = element.shadowRoot.querySelector('.announcement');
+        expect(announcement.getAttribute('aria-live')).toBe('polite');
+        expect(announcement.textContent).toMatch(/^Refreshed\. Last updated .+\.$/);
     });
 });

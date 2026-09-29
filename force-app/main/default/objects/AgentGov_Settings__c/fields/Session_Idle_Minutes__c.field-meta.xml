@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Session_Idle_Minutes__c</fullName>
+    <defaultValue>30</defaultValue>
+    <description>Minutes without governed activity after which an agent's session is closed. The agent's next governed call opens a new session. Values outside 1 to 1440 fall back to 30.</description>
+    <externalId>false</externalId>
+    <label>Session Idle Minutes</label>
+    <precision>4</precision>
+    <required>false</required>
+    <scale>0</scale>
+    <trackTrending>false</trackTrending>
+    <type>Number</type>
+    <unique>false</unique>
+</CustomField>

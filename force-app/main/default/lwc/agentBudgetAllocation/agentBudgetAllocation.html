@@ -1,59 +1,94 @@
 <template>
-    <lightning-card title="Budget Allocation" icon-name="standard:calibration">
-        <lightning-button
-            slot="actions"
-            label="Refresh"
-            icon-name="utility:refresh"
-            onclick={handleRefresh}
-        ></lightning-button>
+    <lightning-card class="ag-card" title="Budget allocation" icon-name="standard:calibration">
+        <div slot="actions" class="slds-grid slds-grid_vertical-align-center">
+            <span class="ag-meta slds-m-right_small last-updated">{lastUpdatedLabel}</span>
+            <lightning-button
+                label={refreshLabel}
+                icon-name="utility:refresh"
+                disabled={refreshing}
+                onclick={handleRefresh}
+            ></lightning-button>
+        </div>
+        <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
 
-        <template lwc:if={error}>
-            <div class="slds-p-around_medium slds-text-color_error" role="alert" aria-live="assertive">{error}</div>
-        </template>
+        <div class="slds-p-horizontal_medium">
+            <template lwc:if={error}>
+                <div
+                    class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small"
+                    role="alert"
+                    aria-live="assertive"
+                >
+                    {error}
+                </div>
+            </template>
 
-        <template lwc:if={isLoading}>
-            <div class="slds-is-relative loading-region" aria-busy="true">
-                <lightning-spinner alternative-text="Loading budgets" size="medium"></lightning-spinner>
-            </div>
-        </template>
-        <template lwc:else>
-            <template lwc:if={hasBudgets}>
-                <div class="slds-p-around_medium">
-                    <div class="slds-grid slds-wrap slds-gutters slds-m-bottom_medium">
-                        <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3 slds-text-align_center">
-                            <p class="slds-text-title_caps">Total API Budget</p>
-                            <p class="slds-text-heading_medium total-api">{totalApiAllocated}</p>
-                        </div>
-                        <div class="slds-col slds-size_1-of-3 slds-text-align_center">
-                            <p class="slds-text-title_caps">Total SOQL Budget</p>
-                            <p class="slds-text-heading_medium total-soql">{totalSoqlAllocated}</p>
-                        </div>
-                        <div class="slds-col slds-size_1-of-3 slds-text-align_center">
-                            <p class="slds-text-title_caps">Total DML Budget</p>
-                            <p class="slds-text-heading_medium total-dml">{totalDmlAllocated}</p>
-                        </div>
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small" aria-busy="true">
+                    <div class="ag-kpi-grid">
+                        <span class="ag-skeleton ag-skeleton_tile"></span>
+                        <span class="ag-skeleton ag-skeleton_tile"></span>
+                        <span class="ag-skeleton ag-skeleton_tile"></span>
                     </div>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading budgets</span>
+                </div>
+            </template>
+            <template lwc:elseif={hasBudgets}>
+                <div class="ag-fade-in">
+                    <dl class="ag-kpi-grid">
+                        <div class="ag-kpi">
+                            <dt class="ag-kpi__head">
+                                <lightning-icon icon-name="utility:api" size="x-small"></lightning-icon>
+                                <span>Total API budget</span>
+                            </dt>
+                            <dd class="ag-kpi__value total-api">{totalApiAllocated}</dd>
+                        </div>
+                        <div class="ag-kpi">
+                            <dt class="ag-kpi__head">
+                                <lightning-icon icon-name="utility:search" size="x-small"></lightning-icon>
+                                <span>Total SOQL budget</span>
+                            </dt>
+                            <dd class="ag-kpi__value total-soql">{totalSoqlAllocated}</dd>
+                        </div>
+                        <div class="ag-kpi">
+                            <dt class="ag-kpi__head">
+                                <lightning-icon icon-name="utility:edit" size="x-small"></lightning-icon>
+                                <span>Total DML budget</span>
+                            </dt>
+                            <dd class="ag-kpi__value total-dml">{totalDmlAllocated}</dd>
+                        </div>
+                    </dl>
 
                     <template for:each={budgets} for:item="budget">
-                        <article key={budget.Id} class="budget-card slds-m-bottom_small slds-p-around_small">
-                            <div class="slds-grid slds-grid_align-spread slds-m-bottom_x-small">
-                                <h3 class="slds-text-heading_small">{budget.agentName}</h3>
-                                <lightning-icon
-                                    icon-name={budget.statusIcon}
-                                    size="x-small"
-                                    alternative-text={budget.statusAltText}
-                                ></lightning-icon>
+                        <article key={budget.Id} class="ag-card budget-card slds-m-bottom_small slds-p-around_small">
+                            <div
+                                class="slds-grid slds-grid_align-spread slds-grid_vertical-align-center slds-m-bottom_x-small"
+                            >
+                                <h3 class="slds-text-heading_small">
+                                    <a
+                                        href={budget.agentUrl}
+                                        data-record-id={budget.Agent_Registration__c}
+                                        onclick={handleRecordLink}
+                                        >{budget.agentName}</a
+                                    >
+                                </h3>
+                                <span class="budget-status">
+                                    <span class="slds-assistive-text">Budget status</span>
+                                    <span class={budget.statusPillClass}>{budget.statusLabel}</span>
+                                </span>
                             </div>
 
                             <div class="slds-m-bottom_xx-small">
                                 <div class="slds-grid slds-grid_align-spread">
-                                    <span class="slds-text-body_small">API Calls</span>
-                                    <span class="slds-text-body_small usage-api"
+                                    <span class="slds-text-body_small">API calls</span>
+                                    <span class="slds-text-body_small ag-num usage-api"
                                         >{budget.api.consumed} / {budget.api.allocated} ({budget.api.percent}%)</span
                                     >
                                 </div>
                                 <div
-                                    class="progress-track"
+                                    class="ag-bar-track slds-m-top_xxx-small"
                                     role="progressbar"
                                     aria-valuemin="0"
                                     aria-valuemax="100"
@@ -66,13 +101,13 @@
 
                             <div class="slds-m-bottom_xx-small">
                                 <div class="slds-grid slds-grid_align-spread">
-                                    <span class="slds-text-body_small">SOQL Queries</span>
-                                    <span class="slds-text-body_small usage-soql"
+                                    <span class="slds-text-body_small">SOQL queries</span>
+                                    <span class="slds-text-body_small ag-num usage-soql"
                                         >{budget.soql.consumed} / {budget.soql.allocated} ({budget.soql.percent}%)</span
                                     >
                                 </div>
                                 <div
-                                    class="progress-track"
+                                    class="ag-bar-track slds-m-top_xxx-small"
                                     role="progressbar"
                                     aria-valuemin="0"
                                     aria-valuemax="100"
@@ -85,13 +120,13 @@
 
                             <div>
                                 <div class="slds-grid slds-grid_align-spread">
-                                    <span class="slds-text-body_small">DML Operations</span>
-                                    <span class="slds-text-body_small usage-dml"
+                                    <span class="slds-text-body_small">DML operations</span>
+                                    <span class="slds-text-body_small ag-num usage-dml"
                                         >{budget.dml.consumed} / {budget.dml.allocated} ({budget.dml.percent}%)</span
                                     >
                                 </div>
                                 <div
-                                    class="progress-track"
+                                    class="ag-bar-track slds-m-top_xxx-small"
                                     role="progressbar"
                                     aria-valuemin="0"
                                     aria-valuemax="100"
@@ -106,10 +141,14 @@
                 </div>
             </template>
             <template lwc:else>
-                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large empty-state">
-                    No budget allocations found for today.
+                <div class="ag-empty empty-state">
+                    <span class="ag-empty__icon">
+                        <lightning-icon icon-name="utility:chart" size="small"></lightning-icon>
+                    </span>
+                    <p class="ag-empty__title">No usage yet today</p>
+                    <p class="ag-empty__text">No budget allocations found for today.</p>
                 </div>
             </template>
-        </template>
+        </div>
     </lightning-card>
 </template>

@@ -13,11 +13,35 @@ private class AgentGovContextTest {
     }
 
     private static AgentGov_Budget__c budgetOf(Id registrationId) {
+        Date orgToday = AgentGovBudgetManager.budgetDate();
         return [
             SELECT SOQL_Queries_Consumed__c, DML_Operations_Consumed__c
             FROM AgentGov_Budget__c
-            WHERE Agent_Registration__c = :registrationId AND Budget_Date__c = TODAY
+            WHERE Agent_Registration__c = :registrationId AND Budget_Date__c = :orgToday
         ];
+    }
+
+    @IsTest
+    static void eachUnitOfWorkIsAuditedWithItsOwnDuration() {
+        AgentGov_Registration__c agent = activeAgent('Audited Unit');
+
+        Test.startTest();
+        AgentGovContext.startTracking(agent.Id);
+        List<Account> accounts = [SELECT Id FROM Account LIMIT 1];
+        AgentGovContext.stopTracking();
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        AgentGov_Action_Log__c row = [
+            SELECT Action_Type__c, Status__c, Details__c, Execution_Time_Ms__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :agent.Id
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_APEX, row.Action_Type__c);
+        Assert.areEqual(AgentGovConstants.ACTION_SUCCESS, row.Status__c);
+        Assert.isTrue(row.Details__c.contains(AgentGovConstants.LIMIT_SOQL_QUERIES), row.Details__c);
+        Assert.isNotNull(row.Execution_Time_Ms__c, 'The unit records how long it ran');
+        Assert.isNotNull(accounts);
     }
 
     @IsTest
@@ -44,6 +68,20 @@ private class AgentGovContextTest {
             Assert.fail('Stopping without a context must be rejected');
         } catch (AgentGovException e) {
             Assert.isTrue(e.getMessage().contains('No active'));
+        }
+    }
+
+    @IsTest
+    static void trackingIsRefusedForADeactivatedAgent() {
+        AgentGov_Registration__c reg = activeAgent('Deactivated Apex Agent');
+        AgentGovRegistryService.deactivateAgent(reg.Id);
+        AgentGovSelector.clearCache();
+
+        try {
+            AgentGovContext.startTracking(reg.Id);
+            Assert.fail('A deactivated agent must not start a unit of work');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.AGENT_NOT_ACTIVE, e.getErrorCode());
         }
     }
 

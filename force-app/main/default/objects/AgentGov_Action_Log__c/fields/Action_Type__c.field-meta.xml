@@ -38,12 +38,12 @@
             <value>
                 <fullName>API_Call</fullName>
                 <default>false</default>
-                <label>API_Call</label>
+                <label>API Call</label>
             </value>
             <value>
                 <fullName>Flow_Trigger</fullName>
                 <default>false</default>
-                <label>Flow_Trigger</label>
+                <label>Flow Trigger</label>
             </value>
             <value>
                 <fullName>Report</fullName>
@@ -54,6 +54,21 @@
                 <fullName>System</fullName>
                 <default>false</default>
                 <label>System</label>
+            </value>
+            <value>
+                <fullName>Alert</fullName>
+                <default>false</default>
+                <label>Alert</label>
+            </value>
+            <value>
+                <fullName>Apex</fullName>
+                <default>false</default>
+                <label>Apex</label>
+            </value>
+            <value>
+                <fullName>Admin</fullName>
+                <default>false</default>
+                <label>Admin</label>
             </value>
         </valueSetDefinition>
     </valueSet>

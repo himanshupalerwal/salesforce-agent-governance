@@ -62,7 +62,10 @@ describe('c-agent-conflict-viewer', () => {
         expect(datatable.data[1].agent1Name).toBe('Unknown');
         expect(datatable.data[1].formattedTime).toBe('');
         expect(datatable.data[1].severityCellClass).toBe('');
-        expect(element.shadowRoot.querySelector('lightning-badge').label).toBe(2);
+        expect(element.shadowRoot.querySelector('.conflict-count').textContent).toBe('2');
+        expect(datatable.data[0].typeLabel).toBe('Concurrent write');
+        expect(datatable.data[0].outcome).toBe('Agent A went ahead');
+        expect(datatable.showRowNumberColumn).toBeFalsy();
     });
 
     it('shows the empty state and errors', async () => {
@@ -121,5 +124,30 @@ describe('c-agent-conflict-viewer', () => {
         await flushPromises();
 
         expect(element.shadowRoot.querySelector('.empty-state')).not.toBeNull();
+    });
+    it('links both agents to their record pages and shows refresh progress', async () => {
+        const element = mount();
+        getRecentConflictLogs.emit([{ ...CONFLICTS[0], Agent_1__c: 'a1', Agent_2__c: 'a2' }]);
+        await flushPromises();
+
+        const datatable = element.shadowRoot.querySelector('lightning-datatable');
+        const agentColumns = datatable.columns.filter((column) => column.type === 'url');
+        expect(agentColumns.map((column) => column.label)).toEqual(['Agent 1', 'Agent 2']);
+        expect(datatable.data[0].agent1Url).toBe('/lightning/r/AgentGov_Registration__c/a1/view');
+        expect(datatable.data[0].agent2Url).toBe('/lightning/r/AgentGov_Registration__c/a2/view');
+
+        const pending = [];
+        refreshApex.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+        const button = element.shadowRoot.querySelector('lightning-button');
+        button.click();
+        await flushPromises();
+        expect(button.disabled).toBe(true);
+        expect(button.label).toBe('Refreshing…');
+        refreshApex.mockImplementation(() => Promise.resolve());
+        pending.forEach((resolve) => resolve());
+        await flushPromises();
+        expect(button.disabled).toBe(false);
+        expect(element.shadowRoot.querySelector('.announcement').textContent).toMatch(/^Refreshed\./);
+        expect(element.shadowRoot.querySelector('.last-updated').textContent).toMatch(/^Updated /);
     });
 });

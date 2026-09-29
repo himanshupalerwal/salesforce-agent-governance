@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Is_Enabled__c</fullName>
     <defaultValue>true</defaultValue>
-    <description>Global kill switch for AgentGov governance</description>
+    <description>Governance on or off. Unchecked is an emergency bypass: checks are skipped and actions allowed. To stop an agent, deactivate it.</description>
     <externalId>false</externalId>
     <label>Is Enabled</label>
     <trackTrending>false</trackTrending>

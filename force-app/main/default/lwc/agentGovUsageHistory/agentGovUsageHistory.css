@@ -1,0 +1,24 @@
+@import 'c/agentGovStyles';
+
+/* Colors come from SLDS 2 global styling hooks with SLDS 1 fallbacks. */
+:host {
+    display: block;
+}
+.loading-region {
+    min-height: 4rem;
+}
+.peak-column {
+    min-width: 12rem;
+}
+.peak {
+    display: flex;
+    align-items: center;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+}
+.history-track {
+    flex: 1 1 auto;
+    min-width: 6rem;
+}
+.peak-value {
+    min-width: 2.5rem;
+}

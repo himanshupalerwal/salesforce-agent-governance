@@ -1,0 +1,85 @@
+<template>
+    <lightning-card class="ag-card" title="Usage history" icon-name="standard:report">
+        <div slot="actions">
+            <lightning-radio-group
+                name="usage-window"
+                label="Period"
+                type="button"
+                variant="label-hidden"
+                options={windowOptions}
+                value={selectedWindow}
+                onchange={handleWindowChange}
+            ></lightning-radio-group>
+        </div>
+
+        <div class="slds-p-horizontal_medium">
+            <template lwc:if={error}>
+                <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                    <span class="slds-assistive-text">Error</span>
+                    <h2 class="error-message">{error}</h2>
+                </div>
+            </template>
+
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small loading-region" aria-busy="true">
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading usage history</span>
+                </div>
+            </template>
+            <template lwc:elseif={hasHistory}>
+                <div class="slds-scrollable_x ag-fade-in">
+                    <table class="slds-table slds-table_cell-buffer slds-table_bordered history-table">
+                        <caption class="slds-assistive-text">
+                            {caption}
+                        </caption>
+                        <thead>
+                            <tr class="slds-line-height_reset">
+                                <th scope="col"><div class="slds-truncate">Day</div></th>
+                                <th scope="col" class="ag-num"><div class="slds-truncate">API calls</div></th>
+                                <th scope="col" class="ag-num"><div class="slds-truncate">SOQL queries</div></th>
+                                <th scope="col" class="ag-num"><div class="slds-truncate">DML operations</div></th>
+                                <th scope="col" class="peak-column"><div class="slds-truncate">Peak usage</div></th>
+                                <template lwc:if={showStatus}>
+                                    <th scope="col"><div class="slds-truncate">Status</div></th>
+                                </template>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template for:each={rows} for:item="row">
+                                <tr key={row.key} class="history-row">
+                                    <th scope="row" class="day-label">{row.label}</th>
+                                    <td class="ag-num api-calls">{row.apiCalls}</td>
+                                    <td class="ag-num soql-queries">{row.soqlQueries}</td>
+                                    <td class="ag-num dml-operations">{row.dmlOperations}</td>
+                                    <td>
+                                        <div class="peak">
+                                            <div class="ag-bar-track history-track" aria-hidden="true">
+                                                <div class={row.barClass} style={row.barStyle}></div>
+                                            </div>
+                                            <span class="ag-num peak-value">{row.percent}%</span>
+                                        </div>
+                                    </td>
+                                    <template lwc:if={row.showStatus}>
+                                        <td>
+                                            <span class={row.statusPillClass}>{row.statusLabel}</span>
+                                        </td>
+                                    </template>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+                <p class="ag-meta slds-m-top_x-small">Days without any usage are not listed.</p>
+            </template>
+            <template lwc:else>
+                <div class="ag-empty">
+                    <span class="ag-empty__icon">
+                        <lightning-icon icon-name="utility:chart" size="small"></lightning-icon>
+                    </span>
+                    <p class="ag-empty__text empty-state">{emptyMessage}</p>
+                </div>
+            </template>
+        </div>
+    </lightning-card>
+</template>

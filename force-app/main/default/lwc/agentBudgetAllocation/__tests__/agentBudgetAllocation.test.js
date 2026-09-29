@@ -41,6 +41,8 @@ const BUDGETS = [
 
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+const pillVariantOf = (pill) => Array.from(pill.classList).find((name) => name.startsWith('ag-pill_'));
+
 describe('c-agent-budget-allocation', () => {
     afterEach(() => {
         while (document.body.firstChild) {
@@ -60,29 +62,33 @@ describe('c-agent-budget-allocation', () => {
         getAllTodaysBudgets.emit(BUDGETS);
         await flushPromises();
 
-        expect(element.shadowRoot.querySelector('.total-api').textContent).toBe('10100');
-        expect(element.shadowRoot.querySelector('.total-soql').textContent).toBe('5100');
-        expect(element.shadowRoot.querySelector('.total-dml').textContent).toBe('3100');
+        // Figures are grouped in the viewer's locale, en-US under Jest.
+        expect(element.shadowRoot.querySelector('.total-api').textContent).toBe('10,100');
+        expect(element.shadowRoot.querySelector('.total-soql').textContent).toBe('5,100');
+        expect(element.shadowRoot.querySelector('.total-dml').textContent).toBe('3,100');
 
         const cards = element.shadowRoot.querySelectorAll('.budget-card');
         expect(cards.length).toBe(2);
-        expect(cards[0].querySelector('.usage-api').textContent).toBe('5000 / 10000 (50%)');
-        expect(cards[0].querySelector('.usage-soql').textContent).toBe('4500 / 5000 (90%)');
-        expect(cards[0].querySelector('.usage-dml').textContent).toBe('2100 / 3000 (70%)');
+        expect(cards[0].querySelector('.usage-api').textContent).toBe('5,000 / 10,000 (50%)');
+        expect(cards[0].querySelector('.usage-soql').textContent).toBe('4,500 / 5,000 (90%)');
+        expect(cards[0].querySelector('.usage-dml').textContent).toBe('2,100 / 3,000 (70%)');
         const bars = cards[0].querySelectorAll('.progress-fill');
-        expect(bars[0].classList.contains('bar-normal')).toBe(true);
-        expect(bars[1].classList.contains('bar-warning')).toBe(true);
-        expect(bars[2].classList.contains('bar-normal')).toBe(true);
+        expect(bars[0].classList.contains('ag-bar_normal')).toBe(true);
+        expect(bars[1].classList.contains('ag-bar_warning')).toBe(true);
+        expect(bars[2].classList.contains('ag-bar_normal')).toBe(true);
         expect(bars[1].style.width).toBe('90%');
         expect(cards[0].querySelector('[role="progressbar"]').getAttribute('aria-label')).toBe(
             'Test Agent API calls 50 percent used'
         );
-        expect(cards[0].querySelector('lightning-icon').iconName).toBe('utility:error');
-        expect(cards[1].querySelector('lightning-icon').iconName).toBe('utility:success');
+        // Throttled is a warning; it used to fall through to the error presentation.
+        expect(pillVariantOf(cards[0].querySelector('.status-label'))).toBe('ag-pill_warning');
+        expect(pillVariantOf(cards[1].querySelector('.status-label'))).toBe('ag-pill_success');
+        expect(cards[0].querySelector('.budget-status .slds-assistive-text').textContent).toBe('Budget status');
     });
 
     it('shows the empty state and errors', async () => {
         const element = mount();
+        expect(element.shadowRoot.querySelector('[aria-busy="true"] .ag-skeleton')).not.toBeNull();
         getAllTodaysBudgets.emit([]);
         await flushPromises();
         expect(element.shadowRoot.querySelector('.empty-state')).not.toBeNull();
@@ -128,5 +134,65 @@ describe('c-agent-budget-allocation', () => {
         await flushPromises();
         await flushPromises();
         expect(refreshApex).toHaveBeenCalledTimes(2);
+    });
+    it('shows every budget status as a pill of its severity, and anything else as a neutral one', async () => {
+        const element = mount();
+        const statuses = ['Normal', 'Warning', 'Throttled', 'Blocked', 'Exhausted', 'Bypassed'];
+        getAllTodaysBudgets.emit(
+            statuses.map((status, index) => ({
+                ...BUDGETS[1],
+                Id: `b${index}`,
+                Budget_Status__c: status
+            }))
+        );
+        await flushPromises();
+
+        const pills = Array.from(element.shadowRoot.querySelectorAll('.budget-card')).map((card) =>
+            card.querySelector('.status-label')
+        );
+        expect(pills.map(pillVariantOf)).toEqual([
+            'ag-pill_success',
+            'ag-pill_warning',
+            'ag-pill_warning',
+            'ag-pill_error',
+            'ag-pill_error',
+            'ag-pill_neutral'
+        ]);
+        // The status is written out as well, so it does not depend on the pill's colour.
+        expect(pills.map((pill) => pill.textContent)).toEqual(statuses);
+    });
+
+    it('stacks the three totals on narrow screens', async () => {
+        const element = mount();
+        getAllTodaysBudgets.emit(BUDGETS);
+        await flushPromises();
+
+        // The shared tile grid fits as many columns as the width allows, down to one.
+        ['.total-api', '.total-soql', '.total-dml'].forEach((selector) => {
+            const tile = element.shadowRoot.querySelector(selector).parentElement;
+            expect(tile.classList.contains('ag-kpi')).toBe(true);
+            expect(tile.parentElement.classList.contains('ag-kpi-grid')).toBe(true);
+        });
+    });
+
+    it('shows refresh progress and links agents to their records', async () => {
+        const element = mount();
+        getAllTodaysBudgets.emit(BUDGETS);
+        await flushPromises();
+        expect(element.shadowRoot.querySelector('.budget-card h3 a').getAttribute('href')).toBe(
+            '/lightning/r/AgentGov_Registration__c/a1/view'
+        );
+
+        const pending = [];
+        refreshApex.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+        const button = element.shadowRoot.querySelector('lightning-button');
+        button.click();
+        await flushPromises();
+        expect(button.disabled).toBe(true);
+        refreshApex.mockImplementation(() => Promise.resolve());
+        pending.forEach((resolve) => resolve());
+        await flushPromises();
+        expect(button.label).toBe('Refresh');
+        expect(element.shadowRoot.querySelector('.announcement').textContent).toMatch(/^Refreshed\./);
     });
 });

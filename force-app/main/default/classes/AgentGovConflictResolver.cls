@@ -3,15 +3,39 @@
  *              record within a transaction, using agent priority (lower number wins).
  *
  *              The lock table is held in memory for the current transaction, so this class
- *              catches agents that collide inside one request (for example a Flow that fans
- *              out to several agents). Detection across transactions is on the roadmap and
- *              will be built on Platform Cache.
+ *              catches agents that collide inside one request: a Register Agent Action batch
+ *              in which several agents claim the same record, or Apex that runs several agents
+ *              in one transaction. Each REST or proxy request serves a single agent, so two
+ *              separate requests never meet here. Detection across transactions is on the
+ *              roadmap and will be built on Platform Cache.
  *
  *              Security posture: inherited sharing. Conflict logs are written through
  *              AgentGovDml in system mode.
  */
 public inherited sharing class AgentGovConflictResolver {
     private static Map<String, Id> recordLocks = new Map<String, Id>();
+    private static Boolean deferring = false;
+    private static List<AgentGov_Conflict_Log__c> pendingLogs = new List<AgentGov_Conflict_Log__c>();
+
+    /**
+     * @description Holds conflict log rows until flushLogs is called, so a bulk caller that
+     *              checks many records writes all of their conflicts in one statement. Without
+     *              it, a batch with many conflicts would issue one insert per conflict.
+     */
+    public static void deferLogs() {
+        deferring = true;
+    }
+
+    /** @description Writes any held conflict log rows in one statement and stops holding them. */
+    public static void flushLogs() {
+        deferring = false;
+        if (pendingLogs.isEmpty()) {
+            return;
+        }
+        List<AgentGov_Conflict_Log__c> toInsert = pendingLogs;
+        pendingLogs = new List<AgentGov_Conflict_Log__c>();
+        AgentGovDml.assertAllSucceeded(AgentGovDml.insertRecords(toInsert, false), 'Conflict log');
+    }
 
     /** @description Result of a conflict check. */
     public class ConflictResult {
@@ -105,14 +129,16 @@ public inherited sharing class AgentGovConflictResolver {
         } else {
             result.winningAgentId = lockHolderId;
             result.resolution = AgentGovConstants.RESOLUTION_AGENT2_WON;
+            // Refused, not queued: there is no queue, and saying otherwise told the caller to
+            // wait for a retry that would never happen.
             result.message =
                 'Record locked by ' +
                 lockHolder.Agent_Name__c +
                 ' (priority ' +
                 holderPriority +
-                '). Agent ' +
+                '). The request from ' +
                 currentAgent.Agent_Name__c +
-                ' queued.';
+                ' was refused.';
             logConflict(
                 agentId,
                 lockHolderId,
@@ -201,6 +227,10 @@ public inherited sharing class AgentGovConflictResolver {
             Timestamp__c = DateTime.now(),
             Details__c = details
         );
+        if (deferring) {
+            pendingLogs.add(entry);
+            return;
+        }
         AgentGovDml.assertAllSucceeded(AgentGovDml.insertRecords(new List<SObject>{ entry }, false), 'Conflict log');
     }
 }

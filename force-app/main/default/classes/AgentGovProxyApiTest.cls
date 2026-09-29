@@ -120,17 +120,138 @@ private class AgentGovProxyApiTest {
 
     @IsTest
     static void policyRecordCapLimitsQueryRows() {
+        // More rows than the shipped MCP_External read policy allows, so the cap is what
+        // decides the result size rather than the data.
+        List<Account> accounts = new List<Account>();
+        for (Integer i = 0; i < 205; i++) {
+            accounts.add(new Account(Name = 'Cap test ' + i));
+        }
+        insert accounts;
         Map<String, Object> body = queryBody('Account', new List<String>{ 'Id' });
         body.put('limit', 5000);
 
         Map<String, Object> result = post('/query', body, MCP_KEY);
 
         Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual(200, result.get('totalSize'), 'The policy caps the rows returned at 200 of 205');
+    }
+
+    @IsTest
+    static void aUserWithoutObjectAccessIsRefusedInTheFrameworksOwnWords() {
+        User restricted = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+
+        System.runAs(restricted) {
+            Map<String, Object> result = post(
+                '/create',
+                new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 'Forbidden Account' } }
+                },
+                KEY
+            );
+
+            Assert.areEqual(403, RestContext.response.statusCode, JSON.serialize(result));
+            Assert.areEqual('ACCESS_DENIED', result.get('errorCode'));
+            String message = String.valueOf(result.get('message'));
+            Assert.isTrue(message.contains('not permitted to create Account'), message);
+            Assert.isFalse(message.containsIgnoreCase('exception'), 'Platform text leaked: ' + message);
+        }
+        Assert.areEqual(0, [SELECT COUNT() FROM Account WHERE Name = 'Forbidden Account']);
+    }
+
+    @IsTest
+    static void anUnexpectedFailureUndoesTheWriteAndTheCharge() {
+        AgentGovProxyApi.failureAfterWrite = new SimulatedFailureException('Simulated failure after the write.');
+        createOnce();
+        Assert.areEqual(500, RestContext.response.statusCode, 'The failure is answered as an internal error');
+        assertCreateUndone('Simulated failure after the write');
+    }
+
+    @IsTest
+    static void anInternalErrorAfterTheWriteIsUndoneToo() {
+        // An INTERNAL_ERROR raised as an AgentGovException, such as a breaker update that fails
+        // after the records were saved, also answers 500 and must leave nothing behind.
+        AgentGovProxyApi.failureAfterWrite = new AgentGovException(
+            AgentGovException.ErrorCode.INTERNAL_ERROR,
+            'Simulated ledger failure after the write.'
+        );
+        createOnce();
+        Assert.areEqual(500, RestContext.response.statusCode, 'The failure is answered as an internal error');
+        assertCreateUndone('Simulated ledger failure after the write');
+    }
+
+    private static void createOnce() {
+        Test.startTest();
+        post(
+            '/create',
+            new Map<String, Object>{
+                'objectName' => 'Account',
+                'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 'Half Written Account' } }
+            },
+            KEY
+        );
+        Test.stopTest();
+    }
+
+    private static void assertCreateUndone(String failureText) {
         Assert.areEqual(
             0,
-            result.get('totalSize'),
-            'No accounts exist, but the request itself is accepted with the capped limit'
+            [SELECT COUNT() FROM Account WHERE Name = 'Half Written Account'],
+            'A retry must not find the first attempt saved'
         );
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Budget__c WHERE DML_Operations_Consumed__c > 0],
+            'The charge for the undone write is undone too'
+        );
+        List<AgentGov_Action_Log__c> failures = [
+            SELECT Details__c, Error_Message__c
+            FROM AgentGov_Action_Log__c
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM AND Status__c = :AgentGovConstants.ACTION_FAILURE
+        ];
+        Boolean recorded = false;
+        for (AgentGov_Action_Log__c failure : failures) {
+            recorded = recorded || String.valueOf(failure.Error_Message__c).contains(failureText);
+        }
+        Assert.isTrue(recorded, 'The failure itself survives the rollback: ' + JSON.serialize(failures));
+    }
+
+    @IsTest
+    static void aTrippedAgentCanWriteDuringTheEmergencyBypass() {
+        AgentGov_Registration__c tripped = [
+            SELECT Id
+            FROM AgentGov_Registration__c
+            WHERE Agent_Name__c = 'Proxy Test Agent'
+        ];
+        tripped.Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN;
+        tripped.Status__c = AgentGovConstants.STATUS_BLOCKED;
+        tripped.Cooldown_Until__c = DateTime.now().addHours(1);
+        update tripped;
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Is_Enabled__c = false;
+        update settings;
+        AgentGovSelector.clearCache();
+
+        post(
+            '/create',
+            new Map<String, Object>{
+                'objectName' => 'Account',
+                'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 'Written During Bypass' } }
+            },
+            KEY
+        );
+
+        Assert.areEqual(200, RestContext.response.statusCode, RestContext.response.responseBody.toString());
+        Assert.areEqual(1, [SELECT COUNT() FROM Account WHERE Name = 'Written During Bypass']);
+        Assert.areEqual(
+            AgentGovConstants.CB_OPEN,
+            [SELECT Circuit_Breaker_State__c FROM AgentGov_Registration__c WHERE Id = :tripped.Id]
+            .Circuit_Breaker_State__c,
+            'The bypass leaves the breaker as it was'
+        );
+    }
+
+    private class SimulatedFailureException extends Exception {
     }
 
     @IsTest

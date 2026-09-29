@@ -1,35 +1,57 @@
 <template>
-    <lightning-card title="Agent Conflicts" icon-name="standard:case">
-        <span slot="actions">
-            <lightning-badge label={conflictCount} class="slds-m-right_small"></lightning-badge>
-            <lightning-button label="Refresh" icon-name="utility:refresh" onclick={handleRefresh}></lightning-button>
+    <lightning-card class="ag-card" icon-name="standard:case">
+        <h2 slot="title" class="ag-section-heading conflicts-heading">
+            Agent conflicts<span class="slds-assistive-text"> (</span
+            ><span class="ag-count conflict-count">{conflictCount}</span><span class="slds-assistive-text">)</span>
+        </h2>
+        <span slot="actions" class="slds-grid slds-grid_vertical-align-center">
+            <span class="ag-meta slds-m-right_small last-updated">{lastUpdatedLabel}</span>
+            <lightning-button
+                class="refresh-button"
+                label={refreshLabel}
+                icon-name="utility:refresh"
+                disabled={refreshing}
+                onclick={handleRefresh}
+            ></lightning-button>
         </span>
+        <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
 
-        <template lwc:if={error}>
-            <div class="slds-p-around_medium slds-text-color_error" role="alert" aria-live="assertive">{error}</div>
-        </template>
-
-        <template lwc:if={isLoading}>
-            <div class="slds-is-relative loading-region" aria-busy="true">
-                <lightning-spinner alternative-text="Loading conflicts" size="medium"></lightning-spinner>
-            </div>
-        </template>
-        <template lwc:else>
-            <template lwc:if={hasConflicts}>
-                <lightning-datatable
-                    key-field="Id"
-                    data={conflicts}
-                    columns={columns}
-                    hide-checkbox-column
-                    show-row-number-column
-                >
-                </lightning-datatable>
-            </template>
-            <template lwc:else>
-                <div class="slds-text-align_center slds-text-color_weak slds-p-around_large empty-state">
-                    No conflicts detected. All agents are operating without contention.
+        <div class="slds-p-horizontal_medium">
+            <template lwc:if={error}>
+                <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                    {error}
                 </div>
             </template>
-        </template>
+
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small loading-region" aria-busy="true">
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading conflicts</span>
+                </div>
+            </template>
+            <template lwc:else>
+                <template lwc:if={hasConflicts}>
+                    <p class="ag-meta slds-m-bottom_x-small">
+                        When two agents claim one record in the same request, the one with the higher priority goes
+                        ahead and the other is refused.
+                    </p>
+                    <div class={tableFrameClass}>
+                        <lightning-datatable key-field="Id" data={conflicts} columns={columns} hide-checkbox-column>
+                        </lightning-datatable>
+                    </div>
+                </template>
+                <template lwc:else>
+                    <div class="ag-empty empty-state">
+                        <span class="ag-empty__icon">
+                            <lightning-icon icon-name="utility:check" size="small"></lightning-icon>
+                        </span>
+                        <p class="ag-empty__title">No conflicts</p>
+                        <p class="ag-empty__text">No two agents have claimed the same record at the same time.</p>
+                    </div>
+                </template>
+            </template>
+        </div>
     </lightning-card>
 </template>

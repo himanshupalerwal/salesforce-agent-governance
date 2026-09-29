@@ -1,0 +1,135 @@
+<template>
+    <section class="slds-card ag-card agent-list" aria-labelledby="agents-heading" data-focus-request={focusToken}>
+        <div class="slds-card__header slds-grid">
+            <header class="slds-media slds-media_center slds-has-flexi-truncate">
+                <div class="slds-media__figure">
+                    <lightning-icon icon-name="standard:bot" size="small"></lightning-icon>
+                </div>
+                <div class="slds-media__body">
+                    <h2
+                        id="agents-heading"
+                        class="slds-card__header-title ag-section-heading agents-heading"
+                        tabindex="-1"
+                        lwc:ref="heading"
+                    >
+                        Agents<span class="slds-assistive-text"> (</span><span class="ag-count">{agentCount}</span
+                        ><span class="slds-assistive-text">)</span>
+                    </h2>
+                </div>
+            </header>
+            <div class="slds-no-flex slds-grid slds-grid_vertical-align-center">
+                <span class="ag-meta slds-m-right_small last-updated">{lastUpdatedLabel}</span>
+                <lightning-button
+                    class="refresh-button"
+                    label={refreshLabel}
+                    icon-name="utility:refresh"
+                    disabled={refreshing}
+                    onclick={handleRefresh}
+                ></lightning-button>
+            </div>
+        </div>
+        <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
+
+        <div class="slds-card__body slds-card__body_inner">
+            <div class="slds-grid slds-wrap slds-grid_vertical-align-end slds-gutters_x-small slds-m-bottom_small">
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_1-of-3">
+                    <lightning-input
+                        class="search"
+                        type="search"
+                        label="Search agents"
+                        placeholder="Name, type, or status"
+                        value={searchTerm}
+                        onchange={handleSearch}
+                    ></lightning-input>
+                </div>
+                <div class="slds-col slds-size_1-of-1 slds-medium-size_2-of-3">
+                    <lightning-radio-group
+                        class="filter"
+                        name="agent-filter"
+                        label="Show"
+                        type="button"
+                        options={filterOptions}
+                        value={currentFilter}
+                        onchange={handleFilterChange}
+                    ></lightning-radio-group>
+                </div>
+            </div>
+
+            <template lwc:if={errorMessage}>
+                <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                    <span class="slds-assistive-text">Error</span>
+                    <h2 class="error-message">{errorMessage}</h2>
+                </div>
+            </template>
+
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small loading-region" aria-busy="true">
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading agents</span>
+                </div>
+            </template>
+            <template lwc:elseif={hasAgents}>
+                <div
+                    class="slds-grid slds-wrap slds-grid_align-spread slds-grid_vertical-align-center slds-m-bottom_x-small"
+                >
+                    <p class="ag-meta summary">{summary}</p>
+                    <template lwc:if={showBulkActions}>
+                        <lightning-button-group class="bulk-actions">
+                            <template for:each={bulkActions} for:item="bulk">
+                                <lightning-button
+                                    key={bulk.name}
+                                    class="bulk-button"
+                                    label={bulk.label}
+                                    data-action={bulk.name}
+                                    disabled={bulk.disabled}
+                                    onclick={handleBulkAction}
+                                ></lightning-button>
+                            </template>
+                        </lightning-button-group>
+                    </template>
+                </div>
+                <template lwc:if={hasVisibleRows}>
+                    <div class={tableFrameClass}>
+                        <lightning-datatable
+                            key-field="id"
+                            data={visibleRows}
+                            columns={columns}
+                            sorted-by={sortedBy}
+                            sorted-direction={sortDirection}
+                            default-sort-direction="asc"
+                            selected-rows={selectedIds}
+                            hide-checkbox-column={hideCheckboxes}
+                            max-row-selection={maxSelection}
+                            wrap-text-max-lines="3"
+                            onsort={handleSort}
+                            onrowselection={handleRowSelection}
+                            onrowaction={handleRowAction}
+                        ></lightning-datatable>
+                    </div>
+                </template>
+                <template lwc:else>
+                    <div class="ag-empty empty-state no-match">
+                        <span class="ag-empty__icon">
+                            <lightning-icon icon-name="utility:filterList" size="small"></lightning-icon>
+                        </span>
+                        <p class="ag-empty__title">No matching agents</p>
+                        <p class="ag-empty__text">Try another filter, or clear the search.</p>
+                    </div>
+                </template>
+            </template>
+            <template lwc:else>
+                <div class="ag-empty empty-state no-agents">
+                    <span class="ag-empty__icon">
+                        <lightning-icon icon-name="utility:people" size="small"></lightning-icon>
+                    </span>
+                    <p class="ag-empty__title">No agents yet</p>
+                    <p class="ag-empty__text">
+                        Agents appear here once they register through the REST API, an invocable action, or Apex.
+                    </p>
+                </div>
+            </template>
+        </div>
+    </section>
+</template>

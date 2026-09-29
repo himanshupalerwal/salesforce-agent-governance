@@ -6,10 +6,12 @@
  *                 header name is accepted as an alias).
  *              2. An API key in the request body's apiKey property. Supported for
  *                 compatibility with v1.1 clients, flagged as deprecated in every response,
- *                 and scheduled for removal in v1.3.
+ *                 and scheduled for removal in v1.4.
  *              3. No key at all, when the running user is bound to a registration through
  *                 Agent_User__c. This is the intended path for Agentforce Agent Users and
  *                 External Client App integration users: the OAuth identity is the credential.
+ *                 A user bound to more than one registration must send a key, because the
+ *                 login alone cannot say which agent is calling.
  *
  *              Keys are never stored. Only a SHA-256 hash and a short identifying prefix are
  *              kept on the registration. Keys are 256 random bits, so the hash is not salted;
@@ -51,13 +53,22 @@ public inherited sharing class AgentGovRestAuth {
                 );
             }
         } else {
-            registration = AgentGovSelector.getRegistrationByAgentUser(UserInfo.getUserId());
-            if (registration == null) {
+            List<Id> boundIds = AgentGovSelector.getRegistrationIdsByAgentUser(UserInfo.getUserId());
+            if (boundIds.isEmpty()) {
                 throw new AgentGovException(
                     AgentGovException.ErrorCode.AGENT_NOT_FOUND,
                     AgentGovConstants.ERR_AUTH_REQUIRED
                 );
             }
+            // Picking one of several bound agents would charge and audit whichever was edited
+            // most recently, so the caller must say which agent it is by sending its key.
+            if (boundIds.size() > 1) {
+                throw new AgentGovException(
+                    AgentGovException.ErrorCode.ACCESS_DENIED,
+                    AgentGovConstants.ERR_AMBIGUOUS_AGENT_USER
+                );
+            }
+            registration = AgentGovSelector.getRegistrationById(boundIds[0]);
         }
         return registration;
     }

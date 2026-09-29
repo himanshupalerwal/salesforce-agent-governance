@@ -5,7 +5,7 @@
  */
 @IsTest
 public class AgentGovTestDataFactory {
-    /** @description Profile used for the restricted test user. Falls back to Standard User when absent. */
+    /** @description Profile used for the restricted test user. Every org has it. */
     private static final String MINIMUM_ACCESS_PROFILE = 'Minimum Access - Salesforce';
 
     /** @description Creates an agent registration with default values. */
@@ -64,11 +64,12 @@ public class AgentGovTestDataFactory {
         return registrations;
     }
 
-    /** @description Creates a session for an agent. */
+    /** @description Creates an active session for an agent. An agent can have only one. */
     public static AgentGov_Session__c createSession(Id registrationId, Boolean doInsert) {
         AgentGov_Session__c session = new AgentGov_Session__c(
             Agent_Registration__c = registrationId,
             Session_Start__c = DateTime.now(),
+            Last_Activity__c = DateTime.now(),
             Status__c = AgentGovConstants.SESSION_ACTIVE,
             API_Calls_Used__c = 0,
             SOQL_Queries_Used__c = 0,
@@ -81,11 +82,15 @@ public class AgentGovTestDataFactory {
         return session;
     }
 
-    /** @description Creates today's budget for an agent with the default allocations. */
+    /**
+     * @description Creates today's budget for an agent with the default allocations, dated by
+     *              the org's calendar as the framework dates it, so tests do not depend on the
+     *              running user's time zone.
+     */
     public static AgentGov_Budget__c createBudget(Id registrationId, Boolean doInsert) {
         AgentGov_Budget__c budget = new AgentGov_Budget__c(
             Agent_Registration__c = registrationId,
-            Budget_Date__c = Date.today(),
+            Budget_Date__c = AgentGovBudgetManager.budgetDate(),
             API_Calls_Allocated__c = AgentGovConstants.DEFAULT_API_BUDGET,
             API_Calls_Consumed__c = 0,
             SOQL_Queries_Allocated__c = AgentGovConstants.DEFAULT_SOQL_BUDGET,
@@ -166,7 +171,9 @@ public class AgentGovTestDataFactory {
             Log_Retention_Days__c = AgentGovConstants.DEFAULT_LOG_RETENTION_DAYS,
             Enable_Conflict_Detection__c = true,
             Enable_Real_Time_Events__c = true,
-            Max_Concurrent_Agents__c = AgentGovConstants.DEFAULT_MAX_CONCURRENT_AGENTS
+            Max_Concurrent_Agents__c = AgentGovConstants.DEFAULT_MAX_CONCURRENT_AGENTS,
+            Session_Idle_Minutes__c = AgentGovConstants.DEFAULT_SESSION_IDLE_MINUTES,
+            Budget_Retention_Days__c = AgentGovConstants.DEFAULT_BUDGET_RETENTION_DAYS
         );
         insert settings;
         return settings;
@@ -181,17 +188,19 @@ public class AgentGovTestDataFactory {
     }
 
     /**
-     * @description Creates a user with the least-privileged standard profile available and
-     *              assigns the given permission sets. Runs inside System.runAs to avoid the
-     *              mixed-DML restriction between setup and non-setup objects.
+     * @description Creates a user on the Minimum Access profile and assigns the given
+     *              permission sets. The user shares the running user's time zone, so date
+     *              comparisons in tests do not depend on where the org or the Dev Hub is. Runs
+     *              inside System.runAs to avoid the mixed-DML restriction between setup and
+     *              non-setup objects.
      * @param permissionSetNames API names of permission sets to assign; may be empty
      * @return The inserted user
      */
     public static User createRestrictedUser(List<String> permissionSetNames) {
         List<Profile> profiles = [SELECT Id FROM Profile WHERE Name = :MINIMUM_ACCESS_PROFILE LIMIT 1];
-        if (profiles.isEmpty()) {
-            profiles = [SELECT Id FROM Profile WHERE Name = 'Standard User' LIMIT 1];
-        }
+        // No fallback. A more privileged profile such as Standard User can create Accounts, which
+        // would silently turn a test proving that access is refused into one proving nothing.
+        Assert.isFalse(profiles.isEmpty(), 'The ' + MINIMUM_ACCESS_PROFILE + ' profile is required by security tests.');
         String uniqueness = String.valueOf(Crypto.getRandomInteger()).replace('-', '');
         User restricted = new User(
             ProfileId = profiles[0].Id,
@@ -203,7 +212,7 @@ public class AgentGovTestDataFactory {
             EmailEncodingKey = 'UTF-8',
             LanguageLocaleKey = 'en_US',
             LocaleSidKey = 'en_US',
-            TimeZoneSidKey = 'America/Los_Angeles'
+            TimeZoneSidKey = UserInfo.getTimeZone().getID()
         );
         System.runAs(new User(Id = UserInfo.getUserId())) {
             insert restricted;

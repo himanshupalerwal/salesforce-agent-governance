@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomPermission xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Allows the holder to issue a replacement API key for an agent from the AgentGov console. The new key is shown once and only its hash is stored. Kept separate from Operate Agents so on-call staff can act on agents without handling credentials.</description>
+    <isLicensed>false</isLicensed>
+    <label>AgentGov Manage Keys</label>
+</CustomPermission>

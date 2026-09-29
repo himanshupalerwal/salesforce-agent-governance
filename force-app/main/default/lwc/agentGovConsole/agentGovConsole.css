@@ -1,0 +1,23 @@
+@import 'c/agentGovStyles';
+
+:host {
+    display: block;
+}
+.console {
+    position: relative;
+}
+/* Sits at the right-hand end of the tab bar; on a narrow screen it moves above the tabs. */
+.live-status {
+    position: absolute;
+    top: var(--slds-g-spacing-3, 0.75rem);
+    right: 0;
+    z-index: 1;
+}
+@media (max-width: 30em) {
+    .live-status {
+        position: static;
+        display: flex;
+        justify-content: flex-end;
+        margin-bottom: var(--slds-g-spacing-1, 0.25rem);
+    }
+}

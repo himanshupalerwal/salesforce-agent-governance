@@ -61,7 +61,21 @@
         <type>AutoNumber</type>
     </nameField>
     <pluralLabel>Agent Action Logs</pluralLabel>
-    <searchLayouts/>
+    <searchLayouts>
+        <customTabListAdditionalFields>Agent_Registration__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Action_Type__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Status__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Object_Name__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Timestamp__c</customTabListAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_Registration__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Action_Type__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Status__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Timestamp__c</lookupDialogsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_Registration__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Action_Type__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Status__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Timestamp__c</searchResultsAdditionalFields>
+    </searchLayouts>
     <sharingModel>ReadWrite</sharingModel>
     <visibility>Public</visibility>
 </CustomObject>

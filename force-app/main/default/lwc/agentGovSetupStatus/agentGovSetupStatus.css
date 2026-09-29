@@ -1,0 +1,35 @@
+@import 'c/agentGovStyles';
+
+:host {
+    display: block;
+}
+.loading-region {
+    min-height: 4rem;
+}
+.checklist {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.setup-heading:focus {
+    outline: 2px solid var(--slds-g-color-border-accent-1, #0176d3);
+    outline-offset: 2px;
+}
+
+.section-title {
+    margin-bottom: var(--slds-g-spacing-2, 0.5rem);
+    color: var(--slds-g-color-on-surface-1, #5c5c5c);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+    font-weight: var(--slds-g-font-weight-bold, 700);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+.checklist {
+    margin-bottom: var(--slds-g-spacing-5, 1.5rem);
+}
+.cron {
+    padding: 0.0625rem 0.375rem;
+    border-radius: var(--slds-g-radius-border-1, 0.25rem);
+    background-color: var(--slds-g-color-neutral-base-95, #f3f3f3);
+    font-size: var(--slds-g-font-scale-neg-1, 0.75rem);
+}
