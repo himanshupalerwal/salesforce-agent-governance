@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CompactLayout xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>AgentGov_Agent_Highlights</fullName>
+    <fields>Agent_Name__c</fields>
+    <fields>Status__c</fields>
+    <fields>Agent_Type__c</fields>
+    <fields>Priority__c</fields>
+    <fields>Circuit_Breaker_State__c</fields>
+    <label>Agent Highlights</label>
+</CompactLayout>

@@ -258,14 +258,36 @@ public inherited sharing class AgentGovQueryBuilder {
             // USER_MODE has been refused for access. Classifying by message text was tried and
             // reverted: user mode reports an object denial as "sObject type X is not
             // supported", which reads like malformed input and is not safely distinguishable.
-            throw new AgentGovException(
-                AgentGovException.ErrorCode.ACCESS_DENIED,
-                String.format(
-                    AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
-                    new List<String>{ 'read', built.describe.getName(), e.getMessage() }
-                )
+            // The refusal is described from describe, never from the platform's own message,
+            // which names internals a REST caller should not see.
+            throw new AgentGovException(AgentGovException.ErrorCode.ACCESS_DENIED, describeReadRefusal(built));
+        }
+    }
+
+    private static String describeReadRefusal(BuiltQuery built) {
+        // Described afresh, so the answer reflects the running user's access at this moment
+        // rather than the access held when the query was compiled.
+        Schema.DescribeSObjectResult current = built.describe.getSObjectType().getDescribe();
+        String objectName = current.getName();
+        if (!current.isAccessible()) {
+            return String.format(AgentGovConstants.ERR_OBJECT_NOT_ACCESSIBLE, new List<String>{ 'read', objectName });
+        }
+        Map<String, Schema.SObjectField> fieldMap = current.fields.getMap();
+        List<String> refused = new List<String>();
+        for (String fieldName : built.referencedFields) {
+            Schema.SObjectField field = fieldMap.get(fieldName.toLowerCase());
+            if (field != null && !field.getDescribe().isAccessible()) {
+                refused.add(fieldName);
+            }
+        }
+        refused.sort();
+        if (!refused.isEmpty()) {
+            return String.format(
+                AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
+                new List<String>{ 'read', objectName, String.join(refused, ', ') }
             );
         }
+        return String.format(AgentGovConstants.ERR_ACCESS_REFUSED, new List<String>{ 'read', objectName });
     }
 
     /**

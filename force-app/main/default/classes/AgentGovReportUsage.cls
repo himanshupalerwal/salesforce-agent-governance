@@ -1,7 +1,8 @@
 /**
  * @description Invocable action that reports the resources an agent actually consumed, so
  *              Flows can charge real usage instead of estimates. Bulk-safe: usage for the
- *              same agent across a batch is summed and charged once.
+ *              same agent across a batch is summed and charged once. Each report is audited
+ *              as a Report row, and a report with a negative count is refused.
  *
  *              Security posture: with sharing. Budget writes run in system mode through
  *              AgentGovBudgetManager.
@@ -17,6 +18,11 @@ public with sharing class AgentGovReportUsage {
         public Integer soqlQueriesUsed;
         @InvocableVariable(label='DML Statements Used' required=false)
         public Integer dmlStatementsUsed;
+        @InvocableVariable(
+            label='Correlation ID'
+            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Flow runs batched into one transaction share the first id supplied.'
+        )
+        public String correlationId;
     }
 
     /** @description Budget after the report. */
@@ -48,8 +54,36 @@ public with sharing class AgentGovReportUsage {
     public static List<Result> reportUsage(List<Request> requests) {
         Map<Id, Map<String, Integer>> consumption = new Map<Id, Map<String, Integer>>();
         Set<Id> readOnlyIds = new Set<Id>();
+        // Negative usage is always malformed. Ignoring it silently let a Flow believe a
+        // correction had been applied; it is now refused, as the REST /report endpoint does.
+        Set<Integer> rejected = new Set<Integer>();
+        // A deactivated agent may not change its own ledger, as REST /report refuses it.
+        Set<Integer> deactivated = new Set<Integer>();
+        Set<Id> requestedIds = new Set<Id>();
         for (Request request : requests) {
+            if (request.registrationId != null) {
+                requestedIds.add(request.registrationId);
+            }
+        }
+        Map<Id, AgentGov_Registration__c> agents = AgentGovSelector.getRegistrationsByIds(requestedIds);
+        String correlationId;
+        for (Integer i = 0; i < requests.size(); i++) {
+            Request request = requests[i];
+            if (correlationId == null && String.isNotBlank(request.correlationId)) {
+                correlationId = request.correlationId;
+            }
             if (request.registrationId == null) {
+                continue;
+            }
+            AgentGov_Registration__c reporting = agents.get(request.registrationId);
+            if (reporting != null && reporting.Status__c == AgentGovConstants.STATUS_INACTIVE) {
+                deactivated.add(i);
+                readOnlyIds.add(request.registrationId);
+                continue;
+            }
+            if (hasNegative(request)) {
+                rejected.add(i);
+                readOnlyIds.add(request.registrationId);
                 continue;
             }
             Map<String, Integer> usage = new Map<String, Integer>();
@@ -72,13 +106,25 @@ public with sharing class AgentGovReportUsage {
         // Is_Enabled__c suspends enforcement everywhere, reporting included. Charging during
         // an emergency bypass could deny the agent with BUDGET_EXCEEDED, which is the outcome
         // the switch exists to prevent. The usage is still reported back to the Flow.
-        if (!AgentGovSelector.isFrameworkEnabled()) {
+        AgentGovRequestContext.ensureBegun(correlationId);
+        Set<Id> reportingIds = new Set<Id>(consumption.keySet());
+        Boolean bypassed = !AgentGovSelector.isFrameworkEnabled();
+        if (bypassed) {
             consumption.clear();
         }
-        AgentGovBudgetManager.BatchOutcome outcome = AgentGovBudgetManager.consumeBudgets(consumption);
-        // Agents that reported nothing, and agents whose report pushed them over budget,
-        // are read back so the Flow still receives their current status.
+        // A usage report describes work already counted as an action when it was authorized,
+        // so no actions are passed: the session gains the usage but not another action.
+        AgentGovBudgetManager.BatchOutcome outcome = AgentGovBudgetManager.consumeBudgets(
+            consumption,
+            new Map<Id, Integer>()
+        );
+        // Agents that reported nothing, agents whose report pushed them over budget, and every
+        // reporting agent during an emergency bypass are read back so the Flow still receives
+        // their current status. The bypass case used to answer "agent not found" instead.
         Set<Id> toRead = new Set<Id>(readOnlyIds);
+        if (bypassed) {
+            toRead.addAll(reportingIds);
+        }
         for (Id registrationId : outcome.failures.keySet()) {
             if (outcome.failures.get(registrationId).getErrorCode() == AgentGovException.ErrorCode.BUDGET_EXCEEDED) {
                 toRead.add(registrationId);
@@ -88,8 +134,55 @@ public with sharing class AgentGovReportUsage {
         Map<Id, AgentGovBudgetManager.BudgetResult> snapshots = AgentGovBudgetManager.checkBudgets(toRead);
 
         List<Result> results = new List<Result>();
-        for (Request request : requests) {
+        List<AgentGov_Action_Event__e> events = new List<AgentGov_Action_Event__e>();
+        for (Integer i = 0; i < requests.size(); i++) {
+            Request request = requests[i];
             Result result = new Result();
+            if (deactivated.contains(i)) {
+                AgentGov_Registration__c agent = agents.get(request.registrationId);
+                AgentGovBudgetManager.BudgetResult current = snapshots.get(request.registrationId);
+                result.budgetStatus = current?.budgetStatus;
+                result.allowed = false;
+                result.errorMessage = AgentGovConstants.ERR_AGENT_NOT_ACTIVE;
+                events.add(
+                    AgentGovTriggerHandler.buildEvent(
+                        agent.Id,
+                        agent.Agent_Name__c,
+                        AgentGovConstants.ACTION_REPORT,
+                        null,
+                        null,
+                        AgentGovConstants.ACTION_DENIED,
+                        AgentGovConstants.ERR_AGENT_NOT_ACTIVE
+                    )
+                );
+                results.add(result);
+                continue;
+            }
+            if (rejected.contains(i)) {
+                AgentGovBudgetManager.BudgetResult current = snapshots.get(request.registrationId);
+                result.budgetStatus = current?.budgetStatus;
+                result.allowed = false;
+                result.errorMessage = AgentGovConstants.ERR_NEGATIVE_USAGE;
+                results.add(result);
+                continue;
+            }
+            AgentGov_Registration__c agent = agents.get(request.registrationId);
+            if (agent != null && hasUsage(request)) {
+                // Audited like REST /report: a charged report is a Success row and one that
+                // pushed the agent over its budget is a Denied row.
+                AgentGovException failure = outcome.failures.get(request.registrationId);
+                events.add(
+                    AgentGovTriggerHandler.buildEvent(
+                        agent.Id,
+                        agent.Agent_Name__c,
+                        AgentGovConstants.ACTION_REPORT,
+                        null,
+                        null,
+                        failure == null ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_DENIED,
+                        failure == null ? describeUsage(request) : failure.getMessage()
+                    )
+                );
+            }
             AgentGovBudgetManager.BudgetResult budget = outcome.results.containsKey(request.registrationId)
                 ? outcome.results.get(request.registrationId)
                 : snapshots.get(request.registrationId);
@@ -111,7 +204,27 @@ public with sharing class AgentGovReportUsage {
             }
             results.add(result);
         }
+        AgentGovTriggerHandler.logActions(events);
         return results;
+    }
+
+    private static String describeUsage(Request request) {
+        return JSON.serialize(
+            new Map<String, Object>{
+                'apiCalls' => request.apiCallsUsed,
+                'soqlQueries' => request.soqlQueriesUsed,
+                'dmlOperations' => request.dmlStatementsUsed
+            }
+        );
+    }
+
+    private static Boolean hasUsage(Request request) {
+        return (request.apiCallsUsed != null &&
+            request.apiCallsUsed > 0) ||
+            (request.soqlQueriesUsed != null &&
+            request.soqlQueriesUsed > 0) ||
+            (request.dmlStatementsUsed != null &&
+            request.dmlStatementsUsed > 0);
     }
 
     private static Boolean hasNegative(Request request) {

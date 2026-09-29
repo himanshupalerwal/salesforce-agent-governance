@@ -1,11 +1,14 @@
 /**
  * @description Scheduled job that keeps agent state moving when no requests arrive:
- *              OPEN circuit breakers whose cooldown has elapsed become HALF_OPEN, and
- *              sessions that have stayed active for too long are terminated.
- *              Schedule: System.schedule('AgentGov Health Check', '0 0 * * * ?', new AgentGovHealthCheck());
+ *              OPEN circuit breakers whose cooldown has elapsed become HALF_OPEN, and sessions
+ *              that have gone idle or run past the maximum duration are closed, with their end
+ *              time set to their last activity.
+ *              Schedule: AgentGovJobScheduler.scheduleAll(), or
+ *              System.schedule('AgentGov Health Check', '0 0 * * * ?', new AgentGovHealthCheck());
  *
  *              Security posture: inherited sharing. Reads go through AgentGovSelector and
- *              writes through AgentGovDml and AgentGovCircuitBreaker, all in system mode.
+ *              writes through AgentGovDml, AgentGovCircuitBreaker and AgentGovSessionTracker,
+ *              all in system mode.
  */
 public inherited sharing class AgentGovHealthCheck implements Schedulable {
     /**
@@ -17,20 +20,8 @@ public inherited sharing class AgentGovHealthCheck implements Schedulable {
         if (!openAgents.isEmpty()) {
             AgentGovCircuitBreaker.transitionToHalfOpen(openAgents);
         }
-
-        List<AgentGov_Session__c> orphanedSessions = AgentGovSelector.getOrphanedSessions(
-            AgentGovConstants.ORPHAN_SESSION_HOURS
-        );
-        if (!orphanedSessions.isEmpty()) {
-            DateTime now = DateTime.now();
-            for (AgentGov_Session__c session : orphanedSessions) {
-                session.Status__c = AgentGovConstants.SESSION_TERMINATED;
-                session.Session_End__c = now;
-            }
-            AgentGovDml.assertAllSucceeded(
-                AgentGovDml.updateRecords(orphanedSessions, false),
-                'Orphaned session cleanup'
-            );
-        }
+        // Bounded per run so a large backlog cannot exceed the DML row limit; the rest are
+        // closed by the next hourly run.
+        AgentGovSessionTracker.closeStale(AgentGovConstants.MAX_SESSIONS_CLOSED_PER_RUN);
     }
 }

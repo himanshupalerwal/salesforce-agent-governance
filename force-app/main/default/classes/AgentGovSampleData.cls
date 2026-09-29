@@ -115,12 +115,16 @@ public with sharing class AgentGovSampleData {
         agents[3].Failure_Count__c = 3;
         agents[3].Last_Failure__c = DateTime.now().addHours(-1);
         agents[3].Cooldown_Until__c = DateTime.now().addMinutes(15);
+        // Last active as their sessions below: minutes ago for the three live ones.
+        List<Integer> minutesSinceActive = new List<Integer>{ 2, 6, 10, 60, 30 };
         for (Integer i = 0; i < agents.size(); i++) {
             AgentGovRestAuth.applyKey(agents[i], SAMPLE_API_KEYS[i]);
+            agents[i].Last_Active__c = DateTime.now().addMinutes(-minutesSinceActive[i]);
         }
         insert agents;
 
-        Date today = Date.today();
+        // The org's day, which the framework and the console count budgets in.
+        Date today = AgentGovBudgetManager.budgetDate();
         List<AgentGov_Budget__c> budgets = new List<AgentGov_Budget__c>{
             budget(agents[0].Id, today, 10000, 4200, 5000, 2100, 3000, 1350, AgentGovConstants.BUDGET_NORMAL),
             budget(agents[1].Id, today, 5000, 4100, 8000, 5600, 4000, 3200, AgentGovConstants.BUDGET_WARNING),
@@ -130,61 +134,31 @@ public with sharing class AgentGovSampleData {
         };
         insert budgets;
 
-        List<AgentGov_Session__c> sessions = new List<AgentGov_Session__c>();
-        for (Integer i = 0; i < agents.size(); i++) {
-            sessions.add(
-                new AgentGov_Session__c(
-                    Agent_Registration__c = agents[i].Id,
-                    Session_Start__c = DateTime.now().addHours(-i - 1),
-                    Status__c = i < 3 ? AgentGovConstants.SESSION_ACTIVE : AgentGovConstants.SESSION_COMPLETED,
-                    Session_End__c = i >= 3 ? DateTime.now().addMinutes(-30) : null,
-                    API_Calls_Used__c = 120 * (i + 1),
-                    SOQL_Queries_Used__c = 45 * (i + 1),
-                    DML_Statements_Used__c = 20 * (i + 1),
-                    Actions_Count__c = 12 * (i + 1)
-                )
-            );
-        }
+        List<AgentGov_Session__c> sessions = sampleSessions(agents);
         insert sessions;
 
-        List<AgentGov_Action_Log__c> logs = new List<AgentGov_Action_Log__c>();
-        List<String> actionTypes = new List<String>{
-            AgentGovConstants.ACTION_QUERY,
-            AgentGovConstants.ACTION_CREATE,
-            AgentGovConstants.ACTION_UPDATE,
-            AgentGovConstants.ACTION_DELETE,
-            AgentGovConstants.ACTION_API_CALL
-        };
-        List<String> objects = new List<String>{ 'Account', 'Contact', 'Lead', 'Opportunity', 'Case' };
-        for (Integer i = 0; i < 25; i++) {
-            Integer agentIndex = Math.mod(i, agents.size());
-            logs.add(
-                new AgentGov_Action_Log__c(
-                    Agent_Registration__c = agents[agentIndex].Id,
-                    Agent_Session__c = sessions[agentIndex].Id,
-                    Action_Type__c = actionTypes[Math.mod(i, actionTypes.size())],
-                    Object_Name__c = objects[Math.mod(i, objects.size())],
-                    Status__c = Math.mod(i, 7) == 0
-                        ? AgentGovConstants.ACTION_FAILURE
-                        : AgentGovConstants.ACTION_SUCCESS,
-                    Timestamp__c = DateTime.now().addMinutes(-i * 5),
-                    Execution_Time_Ms__c = 40 + 17 * i
-                )
-            );
-        }
-        insert logs;
+        List<AgentGov_Action_Log__c> logs = sampleLogs(agents, sessions);
+        List<AgentGov_Action_Log__c> alerts = sampleAlerts(agents);
+        // One insert in time order: the rows share a created date, so the order they are created
+        // in is the order the activity log lists them in.
+        List<AgentGov_Action_Log__c> rows = new List<AgentGov_Action_Log__c>(logs);
+        rows.addAll(alerts);
+        rows.sort(new OldestFirst());
+        insert rows;
 
+        // The outcomes and wording AgentGovConflictResolver records: Agent 1 is the agent that
+        // asked, Agent 2 the one that already held the record.
         List<AgentGov_Conflict_Log__c> conflicts = new List<AgentGov_Conflict_Log__c>{
             conflict(
-                agents[0].Id,
                 agents[2].Id,
+                agents[0].Id,
                 '001000000000001',
                 'Account',
                 AgentGovConstants.CONFLICT_CONCURRENT_WRITE,
-                AgentGovConstants.RESOLUTION_AGENT1_WON,
-                AgentGovConstants.SEVERITY_HIGH,
+                AgentGovConstants.RESOLUTION_AGENT2_WON,
+                AgentGovConstants.SEVERITY_MEDIUM,
                 -2,
-                'Both agents attempted to update the Account billing address at the same time.'
+                'Record locked by Lead Enrichment Agent (priority 2). The request from Data Sync MCP Agent was refused.'
             ),
             conflict(
                 agents[1].Id,
@@ -195,18 +169,18 @@ public with sharing class AgentGovSampleData {
                 AgentGovConstants.RESOLUTION_AGENT1_WON,
                 AgentGovConstants.SEVERITY_MEDIUM,
                 -5,
-                'Case Routing Agent (priority 1) overrode Email Campaign Agent (priority 5) for case assignment.'
+                'Agent Case Routing Agent (priority 1) overrides Email Campaign Agent (priority 5).'
             ),
             conflict(
-                agents[2].Id,
                 agents[3].Id,
+                agents[2].Id,
                 '006000000000001',
                 'Opportunity',
-                AgentGovConstants.CONFLICT_LOCK_CONTENTION,
-                AgentGovConstants.RESOLUTION_QUEUED,
-                AgentGovConstants.SEVERITY_LOW,
+                AgentGovConstants.CONFLICT_CONCURRENT_WRITE,
+                AgentGovConstants.RESOLUTION_AGENT2_WON,
+                AgentGovConstants.SEVERITY_MEDIUM,
                 -8,
-                'Data Sync MCP Agent queued while Opportunity Scoring Agent completed its update.'
+                'Record locked by Data Sync MCP Agent (priority 3). The request from Opportunity Scoring Agent was refused.'
             )
         };
         insert conflicts;
@@ -220,6 +194,8 @@ public with sharing class AgentGovSampleData {
             ' sessions, ' +
             logs.size() +
             ' action logs, ' +
+            alerts.size() +
+            ' alerts, ' +
             conflicts.size() +
             ' conflict logs.';
     }
@@ -344,6 +320,102 @@ public with sharing class AgentGovSampleData {
             DML_Operations_Allocated__c = dmlAllocated,
             DML_Operations_Consumed__c = dmlConsumed,
             Budget_Status__c = status
+        );
+    }
+
+    private static List<AgentGov_Session__c> sampleSessions(List<AgentGov_Registration__c> agents) {
+        // The three live sessions were used minutes ago, inside the default idle window, so the
+        // console lists them as live; the other two ended at their last activity, as the tracker
+        // ends idle sessions.
+        List<AgentGov_Session__c> sessions = new List<AgentGov_Session__c>();
+        for (Integer i = 0; i < agents.size(); i++) {
+            Boolean live = i < 3;
+            DateTime lastActivity = live ? DateTime.now().addMinutes(-(2 + 4 * i)) : DateTime.now().addMinutes(-30);
+            sessions.add(
+                new AgentGov_Session__c(
+                    Agent_Registration__c = agents[i].Id,
+                    Session_Start__c = DateTime.now().addHours(-i - 1),
+                    Last_Activity__c = lastActivity,
+                    Status__c = live ? AgentGovConstants.SESSION_ACTIVE : AgentGovConstants.SESSION_COMPLETED,
+                    Session_End__c = live ? null : lastActivity,
+                    End_Reason__c = live ? null : AgentGovConstants.SESSION_END_IDLE,
+                    API_Calls_Used__c = 120 * (i + 1),
+                    SOQL_Queries_Used__c = 45 * (i + 1),
+                    DML_Statements_Used__c = 20 * (i + 1),
+                    Actions_Count__c = 12 * (i + 1)
+                )
+            );
+        }
+        return sessions;
+    }
+
+    private static List<AgentGov_Action_Log__c> sampleLogs(
+        List<AgentGov_Registration__c> agents,
+        List<AgentGov_Session__c> sessions
+    ) {
+        List<AgentGov_Action_Log__c> logs = new List<AgentGov_Action_Log__c>();
+        List<String> actionTypes = new List<String>{
+            AgentGovConstants.ACTION_QUERY,
+            AgentGovConstants.ACTION_CREATE,
+            AgentGovConstants.ACTION_UPDATE,
+            AgentGovConstants.ACTION_DELETE,
+            AgentGovConstants.ACTION_API_CALL
+        };
+        List<String> objects = new List<String>{ 'Account', 'Contact', 'Lead', 'Opportunity', 'Case' };
+        Map<String, String> failures = new Map<String, String>{
+            AgentGovConstants.ACTION_QUERY => 'Query timed out after 120 seconds.',
+            AgentGovConstants.ACTION_CREATE => 'Required fields are missing: [LastName].',
+            AgentGovConstants.ACTION_UPDATE => 'The record is locked by another transaction.',
+            AgentGovConstants.ACTION_DELETE => 'The record has related records that must be removed first.',
+            AgentGovConstants.ACTION_API_CALL => 'The external service returned 503.'
+        };
+        for (Integer i = 0; i < 25; i++) {
+            Integer agentIndex = Math.mod(i, agents.size());
+            String actionType = actionTypes[Math.mod(i, actionTypes.size())];
+            Boolean failed = Math.mod(i, 7) == 0;
+            logs.add(
+                new AgentGov_Action_Log__c(
+                    Agent_Registration__c = agents[agentIndex].Id,
+                    Agent_Session__c = sessions[agentIndex].Id,
+                    Action_Type__c = actionType,
+                    Object_Name__c = objects[Math.mod(i, objects.size())],
+                    Status__c = failed ? AgentGovConstants.ACTION_FAILURE : AgentGovConstants.ACTION_SUCCESS,
+                    Error_Message__c = failed ? failures.get(actionType) : null,
+                    Timestamp__c = DateTime.now().addMinutes(-(24 - i) * 5),
+                    Execution_Time_Ms__c = 40 + 17 * i
+                )
+            );
+        }
+        return logs;
+    }
+
+    private static List<AgentGov_Action_Log__c> sampleAlerts(List<AgentGov_Registration__c> agents) {
+        // The alerts the framework would have raised for the sample's escalated budgets and its
+        // tripped breaker, in its wording. Written as rows rather than raised, so loading sample
+        // data never sends alert email.
+        return new List<AgentGov_Action_Log__c>{
+            alertRow(agents[3].Id, 60, 'Breaker open: 3 failures reached the threshold of 3.'),
+            alertRow(agents[1].Id, 40, 'Warning: API calls at 82% of today\'s budget (4100 of 5000).'),
+            alertRow(agents[2].Id, 25, 'Throttled: API calls at 92% of today\'s budget (13800 of 15000).')
+        };
+    }
+
+    private class OldestFirst implements System.Comparator<AgentGov_Action_Log__c> {
+        public Integer compare(AgentGov_Action_Log__c left, AgentGov_Action_Log__c right) {
+            if (left.Timestamp__c == right.Timestamp__c) {
+                return 0;
+            }
+            return left.Timestamp__c < right.Timestamp__c ? -1 : 1;
+        }
+    }
+
+    private static AgentGov_Action_Log__c alertRow(Id agentId, Integer minutesAgo, String details) {
+        return new AgentGov_Action_Log__c(
+            Agent_Registration__c = agentId,
+            Action_Type__c = AgentGovConstants.ACTION_ALERT,
+            Status__c = AgentGovConstants.ACTION_SUCCESS,
+            Timestamp__c = DateTime.now().addMinutes(-minutesAgo),
+            Details__c = details
         );
     }
 

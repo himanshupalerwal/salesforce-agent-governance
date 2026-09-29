@@ -55,6 +55,46 @@ private class AgentGovRestApiTest {
         return (Map<String, Object>) JSON.deserializeUntyped(RestContext.response.responseBody.toString());
     }
 
+    @IsTest
+    static void refusalsWhileTheBreakerIsOpenAreAudited() {
+        AgentGov_Registration__c agent = primaryAgent();
+        update new AgentGov_Registration__c(
+            Id = agent.Id,
+            Status__c = AgentGovConstants.STATUS_BLOCKED,
+            Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN,
+            Cooldown_Until__c = DateTime.now().addMinutes(30)
+        );
+
+        Test.startTest();
+        Map<String, Object> result = post('/authorize', authorizeBody(AgentGovConstants.ACTION_QUERY), KEY);
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.areEqual(403, RestContext.response.statusCode, JSON.serialize(result));
+        AgentGov_Action_Log__c denied = [
+            SELECT Status__c, Action_Type__c, Correlation_Id__c, Error_Message__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :agent.Id
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_DENIED, denied.Status__c);
+        Assert.areEqual(AgentGovConstants.ACTION_QUERY, denied.Action_Type__c);
+        Assert.areEqual(result.get('correlationId'), denied.Correlation_Id__c, 'The row traces back to the response');
+        Assert.isNotNull(denied.Error_Message__c, 'The reason is recorded');
+    }
+
+    @IsTest
+    static void anAuthorizedCallReportsItsSession() {
+        Test.startTest();
+        Map<String, Object> result = post('/authorize', authorizeBody(AgentGovConstants.ACTION_QUERY), KEY);
+        Test.stopTest();
+
+        Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual(
+            [SELECT Id FROM AgentGov_Session__c WHERE Agent_Registration__c = :primaryAgent().Id].Id,
+            (Id) result.get('sessionId')
+        );
+    }
+
     private static Map<String, Object> authorizeBody(String operation) {
         return new Map<String, Object>{
             'objectName' => 'Account',
@@ -558,7 +598,7 @@ private class AgentGovRestApiTest {
         );
 
         // A client reading the documented keys must keep working while the bypass is on,
-        // otherwise the kill switch breaks the very traffic it exists to unblock.
+        // otherwise the bypass breaks the very traffic it exists to unblock.
         Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(result));
         Assert.areEqual(true, result.get('authorized'), 'The documented key is authorized, not allowed');
         Assert.isNotNull(result.get('agentId'));
@@ -777,5 +817,145 @@ private class AgentGovRestApiTest {
         Assert.areEqual(5, budget.API_Calls_Consumed__c, 'API_Call charges the API budget');
         Assert.areEqual(0, budget.SOQL_Queries_Consumed__c);
         Assert.areEqual(0, budget.DML_Operations_Consumed__c);
+    }
+
+    @IsTest
+    static void registerReturnsTheRegistrationNumber() {
+        Map<String, Object> result = post(
+            '/register',
+            new Map<String, Object>{ 'agentName' => 'Numbered Agent', 'agentType' => 'Agentforce' },
+            null
+        );
+
+        Assert.areEqual(201, RestContext.response.statusCode, JSON.serialize(result));
+        Id registrationId = (Id) result.get('registrationId');
+        AgentGov_Registration__c saved = [SELECT Name FROM AgentGov_Registration__c WHERE Id = :registrationId];
+        Assert.areEqual(saved.Name, result.get('registrationNumber'), 'The response names the saved registration');
+        Assert.isTrue(saved.Name.startsWith('AGT-'), 'The number is the auto-number: ' + saved.Name);
+    }
+
+    @IsTest
+    static void registerReportsAMalformedOwnerEmailAsBadInput() {
+        Map<String, Object> result = post(
+            '/register',
+            new Map<String, Object>{
+                'agentName' => 'Bad Email Agent',
+                'agentType' => 'Agentforce',
+                'ownerEmail' => 'not-an-email'
+            },
+            null
+        );
+
+        Assert.areEqual(400, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual('INVALID_INPUT', result.get('errorCode'));
+        Assert.isTrue(
+            String.valueOf(result.get('message')).contains('Owner Email'),
+            'The message names the field to correct: ' + result.get('message')
+        );
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Registration__c WHERE Agent_Name__c = 'Bad Email Agent'],
+            'Nothing is registered'
+        );
+    }
+
+    @IsTest
+    static void aTrippedAgentIsAdmittedDuringTheEmergencyBypass() {
+        AgentGov_Registration__c tripped = primaryAgent();
+        tripped.Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN;
+        tripped.Status__c = AgentGovConstants.STATUS_BLOCKED;
+        tripped.Cooldown_Until__c = DateTime.now().addHours(1);
+        update tripped;
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Is_Enabled__c = false;
+        update settings;
+        AgentGovSelector.clearCache();
+
+        Map<String, Object> result = post(
+            '/authorize',
+            new Map<String, Object>{ 'operation' => AgentGovConstants.ACTION_QUERY, 'objectName' => 'Account' },
+            KEY
+        );
+
+        // The bypass lets work through while governance is suspended, as the Flow actions do;
+        // a breaker that tripped before it was switched on must not keep the agent out.
+        Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual(true, result.get('authorized'));
+        Assert.areEqual(false, result.get('governanceEnabled'));
+        Assert.areEqual(
+            AgentGovConstants.CB_OPEN,
+            [SELECT Circuit_Breaker_State__c FROM AgentGov_Registration__c WHERE Id = :tripped.Id]
+            .Circuit_Breaker_State__c,
+            'The bypass leaves the breaker as it was'
+        );
+    }
+
+    @IsTest
+    static void aDeactivatedAgentIsRefusedDuringTheEmergencyBypass() {
+        AgentGov_Registration__c agent = primaryAgent();
+        agent.Status__c = AgentGovConstants.STATUS_INACTIVE;
+        update agent;
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Is_Enabled__c = false;
+        update settings;
+        AgentGovSelector.clearCache();
+
+        Map<String, Object> result = post(
+            '/authorize',
+            new Map<String, Object>{ 'operation' => AgentGovConstants.ACTION_QUERY, 'objectName' => 'Account' },
+            KEY
+        );
+
+        Assert.areEqual(403, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual('AGENT_NOT_ACTIVE', result.get('errorCode'));
+    }
+
+    @IsTest
+    static void anUnexpectedFailureAfterTheChargeIsUndone() {
+        AgentGovRestApi.failureAfterCharge = new SimulatedFailureException('Simulated failure after the charge.');
+        authorizeOnce();
+        Assert.areEqual(500, RestContext.response.statusCode, 'The failure is answered as an internal error');
+        assertAuthorizationUndone('Simulated failure after the charge.');
+    }
+
+    @IsTest
+    static void anInternalErrorAfterTheChargeIsUndone() {
+        AgentGovRestApi.failureAfterCharge = new AgentGovException(
+            AgentGovException.ErrorCode.INTERNAL_ERROR,
+            'Simulated ledger failure after the charge.'
+        );
+        authorizeOnce();
+        Assert.areEqual(500, RestContext.response.statusCode, 'The failure is answered as an internal error');
+        assertAuthorizationUndone('Simulated ledger failure after the charge.');
+    }
+
+    private static void authorizeOnce() {
+        Test.startTest();
+        post(
+            '/authorize',
+            new Map<String, Object>{ 'operation' => AgentGovConstants.ACTION_QUERY, 'objectName' => 'Account' },
+            KEY
+        );
+        Test.stopTest();
+    }
+
+    private static void assertAuthorizationUndone(String failureText) {
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Budget__c WHERE SOQL_Queries_Consumed__c > 0],
+            'The charge for an authorization the caller never received is undone'
+        );
+        Boolean recorded = false;
+        for (AgentGov_Action_Log__c failure : [
+            SELECT Error_Message__c
+            FROM AgentGov_Action_Log__c
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM AND Status__c = :AgentGovConstants.ACTION_FAILURE
+        ]) {
+            recorded = recorded || String.valueOf(failure.Error_Message__c).contains(failureText);
+        }
+        Assert.isTrue(recorded, 'The failure itself survives the rollback');
+    }
+
+    private class SimulatedFailureException extends Exception {
     }
 }

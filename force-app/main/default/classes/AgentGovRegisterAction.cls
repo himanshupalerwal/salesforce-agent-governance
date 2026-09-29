@@ -1,7 +1,9 @@
 /**
  * @description Invocable action that authorizes an agent action in one call: circuit
- *              breaker, policy, budget, and audit log. This is the primary entry point for
- *              Flow-based agents.
+ *              breaker, policy, record conflicts, budget, and audit log. This is the primary
+ *              entry point for Flow-based agents. When several agents in one batch name the
+ *              same record, the agent with the best priority keeps it and the others are
+ *              refused, whatever the order of the requests.
  *
  *              The action is bulk-safe. A Flow that submits 200 requests causes one
  *              registration query, one circuit-breaker pass, one budget consumption per
@@ -28,6 +30,11 @@ public with sharing class AgentGovRegisterAction {
         public String objectName;
         @InvocableVariable(label='Record ID')
         public String recordId;
+        @InvocableVariable(
+            label='Correlation ID'
+            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Flow runs batched into one transaction share the first id supplied.'
+        )
+        public String correlationId;
     }
 
     /** @description Outcome for one action. */
@@ -58,6 +65,7 @@ public with sharing class AgentGovRegisterAction {
         if (requests.isEmpty()) {
             return results;
         }
+        AgentGovRequestContext.ensureBegun(firstCorrelationId(requests));
         if (!AgentGovSelector.isFrameworkEnabled()) {
             // Enforcement is suspended, auditing is not. This is the window an administrator
             // most needs recorded, so every bypassed request still produces a log entry.
@@ -76,6 +84,13 @@ public with sharing class AgentGovRegisterAction {
                     // The switch suspends governance, not identity. An Id that resolves to no
                     // registration is still refused, and the refusal still leaves a record.
                     deny(result, AgentGovConstants.ERR_AGENT_NOT_FOUND);
+                    continue;
+                }
+                if (isDeactivated(registration)) {
+                    deny(result, AgentGovConstants.ERR_AGENT_NOT_ACTIVE);
+                    bypassEvents.add(
+                        event(registration, requests[i], AgentGovConstants.ACTION_DENIED, result.denialReason)
+                    );
                     continue;
                 }
                 result.authorized = true;
@@ -105,19 +120,33 @@ public with sharing class AgentGovRegisterAction {
                 probingAgents.add(registration.Id);
             }
         }
+        Set<Id> admissible = new Set<Id>();
+        for (AgentGov_Registration__c registration : registrations.values()) {
+            if (!isDeactivated(registration)) {
+                admissible.add(registration.Id);
+            }
+        }
         Set<Id> probeSpent = new Set<Id>();
-        Map<Id, Boolean> breakerDecisions = AgentGovCircuitBreaker.allowRequests(registrationIds);
+        Map<Id, Boolean> breakerDecisions = AgentGovCircuitBreaker.allowRequests(admissible);
 
-        Map<Id, Map<String, Integer>> consumption = new Map<Id, Map<String, Integer>>();
-        Set<Integer> awaitingBudget = new Set<Integer>();
+        List<Integer> candidates = new List<Integer>();
         List<AgentGov_Action_Event__e> events = new List<AgentGov_Action_Event__e>();
 
+        // Conflict logs from the whole batch are written in one statement at the end.
+        AgentGovConflictResolver.deferLogs();
         for (Integer i = 0; i < requests.size(); i++) {
             Request request = requests[i];
             Result result = results[i];
             AgentGov_Registration__c registration = registrations.get(request.registrationId);
             if (registration == null) {
                 deny(result, AgentGovConstants.ERR_AGENT_NOT_FOUND);
+                continue;
+            }
+            // Deactivation refuses an agent on every entry point, this one as well as REST.
+            // Blocked and Throttled agents are decided by the circuit breaker below.
+            if (isDeactivated(registration)) {
+                deny(result, AgentGovConstants.ERR_AGENT_NOT_ACTIVE);
+                events.add(event(registration, request, AgentGovConstants.ACTION_DENIED, result.denialReason));
                 continue;
             }
             if (
@@ -150,6 +179,35 @@ public with sharing class AgentGovRegisterAction {
                 events.add(event(registration, request, AgentGovConstants.ACTION_DENIED, result.denialReason));
                 continue;
             }
+            // Each agent that names a record claims it; the resolver keeps the claim of the
+            // agent with the best priority.
+            if (String.isNotBlank(request.recordId) && String.isNotBlank(request.objectName)) {
+                AgentGovConflictResolver.checkForConflict(registration.Id, request.recordId, request.objectName);
+            }
+            candidates.add(i);
+        }
+        AgentGovConflictResolver.flushLogs();
+
+        Map<Id, Map<String, Integer>> consumption = new Map<Id, Map<String, Integer>>();
+        Map<Id, Integer> actionsByAgent = new Map<Id, Integer>();
+        Set<Integer> awaitingBudget = new Set<Integer>();
+        for (Integer i : candidates) {
+            Request request = requests[i];
+            AgentGov_Registration__c registration = registrations.get(request.registrationId);
+            // Settled once every claim in the batch is known, so the outcome does not depend on
+            // the order of the requests: an agent overridden later in the batch by a
+            // higher-priority agent is refused here.
+            Id holder = recordHolder(request);
+            if (holder != null && holder != registration.Id) {
+                AgentGov_Registration__c winner = registrations.get(holder);
+                deny(
+                    results[i],
+                    AgentGovConstants.ERR_RECORD_LOCKED +
+                    (winner != null ? ' It is held by ' + winner.Agent_Name__c + ', which has priority.' : '')
+                );
+                events.add(event(registration, request, AgentGovConstants.ACTION_DENIED, results[i].denialReason));
+                continue;
+            }
             String limitType = limitTypeFor(request.actionType);
             if (!consumption.containsKey(registration.Id)) {
                 consumption.put(registration.Id, new Map<String, Integer>());
@@ -159,10 +217,14 @@ public with sharing class AgentGovRegisterAction {
                 limitType,
                 (agentConsumption.containsKey(limitType) ? agentConsumption.get(limitType) : 0) + 1
             );
+            actionsByAgent.put(
+                registration.Id,
+                (actionsByAgent.containsKey(registration.Id) ? actionsByAgent.get(registration.Id) : 0) + 1
+            );
             awaitingBudget.add(i);
         }
 
-        AgentGovBudgetManager.BatchOutcome outcome = AgentGovBudgetManager.consumeBudgets(consumption);
+        AgentGovBudgetManager.BatchOutcome outcome = AgentGovBudgetManager.consumeBudgets(consumption, actionsByAgent);
         Map<Id, Boolean> breakerOutcomes = new Map<Id, Boolean>();
         for (Integer i : awaitingBudget) {
             Request request = requests[i];
@@ -182,6 +244,26 @@ public with sharing class AgentGovRegisterAction {
         AgentGovTriggerHandler.logActions(events);
         AgentGovCircuitBreaker.recordOutcomes(breakerOutcomes);
         return results;
+    }
+
+    private static Id recordHolder(Request request) {
+        if (String.isBlank(request.recordId) || String.isBlank(request.objectName)) {
+            return null;
+        }
+        return AgentGovConflictResolver.getLockHolder(request.recordId, request.objectName);
+    }
+
+    private static String firstCorrelationId(List<Request> requests) {
+        for (Request request : requests) {
+            if (request != null && String.isNotBlank(request.correlationId)) {
+                return request.correlationId;
+            }
+        }
+        return null;
+    }
+
+    private static Boolean isDeactivated(AgentGov_Registration__c registration) {
+        return registration.Status__c == AgentGovConstants.STATUS_INACTIVE;
     }
 
     private static void deny(Result result, String reason) {

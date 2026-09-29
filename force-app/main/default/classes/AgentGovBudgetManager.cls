@@ -127,11 +127,28 @@ public inherited sharing class AgentGovBudgetManager {
      * @throws AgentGovException BUDGET_EXCEEDED when the budget is Blocked or Exhausted after consumption
      */
     public static BudgetResult consumeBudget(Id registrationId, Map<String, Integer> consumption) {
+        return consumeBudget(registrationId, consumption, 1);
+    }
+
+    /**
+     * @description Consumes several limit types for an agent and records how many governed
+     *              actions the charge represents on the agent's session. A usage report
+     *              describes an action that was already counted, so it passes 0.
+     * @param registrationId The agent registration Id
+     * @param consumption Map of limit type to units consumed
+     * @param actionCount Governed actions this charge represents
+     * @return The budget snapshot after consumption
+     * @throws AgentGovException BUDGET_EXCEEDED when the budget is Blocked or Exhausted after consumption
+     */
+    public static BudgetResult consumeBudget(Id registrationId, Map<String, Integer> consumption, Integer actionCount) {
         requireId(registrationId);
         if (consumption == null || consumption.isEmpty()) {
             return checkBudget(registrationId);
         }
-        BatchOutcome outcome = consumeBudgets(new Map<Id, Map<String, Integer>>{ registrationId => consumption });
+        BatchOutcome outcome = consumeBudgets(
+            new Map<Id, Map<String, Integer>>{ registrationId => consumption },
+            new Map<Id, Integer>{ registrationId => actionCount }
+        );
         if (outcome.failures.containsKey(registrationId)) {
             throw outcome.failures.get(registrationId);
         }
@@ -139,13 +156,35 @@ public inherited sharing class AgentGovBudgetManager {
     }
 
     /**
-     * @description Consumes budget for many agents at once: one locking query, one update,
-     *              one alert publish. Never throws for a single agent's denial; denials are
-     *              returned in the outcome so bulk callers can report per request.
+     * @description Consumes budget for many agents at once, counting one governed action per
+     *              agent. See the two-argument form.
      * @param consumptionByAgent Map of registration Id to its consumption by limit type
      * @return Per-agent results and failures
      */
     public static BatchOutcome consumeBudgets(Map<Id, Map<String, Integer>> consumptionByAgent) {
+        Map<Id, Integer> oneEach = new Map<Id, Integer>();
+        if (consumptionByAgent != null) {
+            for (Id registrationId : consumptionByAgent.keySet()) {
+                oneEach.put(registrationId, 1);
+            }
+        }
+        return consumeBudgets(consumptionByAgent, oneEach);
+    }
+
+    /**
+     * @description Consumes budget for many agents at once: one locking query, one update,
+     *              one alert publish. Never throws for a single agent's denial; denials are
+     *              returned in the outcome so bulk callers can report per request. The usage
+     *              and the action counts are also recorded on each agent's current session.
+     * @param consumptionByAgent Map of registration Id to its consumption by limit type
+     * @param actionsByAgent Map of registration Id to the governed actions the charge
+     *                       represents, for example 200 for a 200-request Flow batch
+     * @return Per-agent results and failures
+     */
+    public static BatchOutcome consumeBudgets(
+        Map<Id, Map<String, Integer>> consumptionByAgent,
+        Map<Id, Integer> actionsByAgent
+    ) {
         BatchOutcome outcome = new BatchOutcome();
         if (consumptionByAgent == null || consumptionByAgent.isEmpty()) {
             return outcome;
@@ -211,8 +250,25 @@ public inherited sharing class AgentGovBudgetManager {
         // consumption that crossed the line, not just the consumption before it.
         AgentGovDml.assertAllSucceeded(AgentGovDml.updateRecords(toUpdate, false), 'Budget update');
         AgentGovTriggerHandler.publishAlerts(alerts);
-        updateSessionCounters(consumptionByAgent, budgets.keySet());
+        // Runs while this transaction holds the budget row locks taken above, which is what
+        // serializes session changes for an agent in the common case.
+        Map<Id, Map<String, Integer>> charged = new Map<Id, Map<String, Integer>>();
+        for (Id registrationId : budgets.keySet()) {
+            charged.put(registrationId, consumptionByAgent.get(registrationId));
+        }
+        AgentGovSessionTracker.recordActivity(charged, actionsByAgent);
         return outcome;
+    }
+
+    /**
+     * @description Today's date in the org's default time zone. Budget days are counted in the
+     *              org's time zone, not the running user's: a Flow run by users in different
+     *              time zones would otherwise charge one agent to two different days at the same
+     *              moment, each with a full allocation.
+     * @return The org's current date
+     */
+    public static Date budgetDate() {
+        return Date.valueOf(DateTime.now().format('yyyy-MM-dd', AgentGovSelector.getOrgTimeZone()));
     }
 
     /**
@@ -261,7 +317,7 @@ public inherited sharing class AgentGovBudgetManager {
                 AgentGovConstants.ERR_AGENT_NOT_FOUND
             );
         }
-        AgentGov_Budget__c budget = newBudgetFor(registration, Date.today());
+        AgentGov_Budget__c budget = newBudgetFor(registration, budgetDate());
         Database.SaveResult result = AgentGovDml.insertRecords(new List<SObject>{ budget }, false)[0];
         if (result.isSuccess()) {
             return budget;
@@ -282,7 +338,7 @@ public inherited sharing class AgentGovBudgetManager {
      */
     public static void resetDailyBudgets() {
         List<AgentGov_Budget__c> newBudgets = new List<AgentGov_Budget__c>();
-        Date today = Date.today();
+        Date today = budgetDate();
         for (AgentGov_Registration__c registration : AgentGovSelector.getActiveRegistrations()) {
             newBudgets.add(newBudgetFor(registration, today));
         }
@@ -396,7 +452,7 @@ public inherited sharing class AgentGovBudgetManager {
         Map<Id, AgentGov_Registration__c> registrations = AgentGovSelector.getRegistrationsByIds(missing);
         List<AgentGov_Budget__c> toInsert = new List<AgentGov_Budget__c>();
         Set<Id> created = new Set<Id>();
-        Date today = Date.today();
+        Date today = budgetDate();
         for (Id registrationId : missing) {
             AgentGov_Registration__c registration = registrations.get(registrationId);
             if (registration == null) {
@@ -568,59 +624,6 @@ public inherited sharing class AgentGovBudgetManager {
                 : evaluation.worstPercent,
             Timestamp__c = DateTime.now()
         );
-    }
-
-    private static void updateSessionCounters(
-        Map<Id, Map<String, Integer>> consumptionByAgent,
-        Set<Id> registrationIds
-    ) {
-        Map<Id, AgentGov_Session__c> sessions = AgentGovSelector.getActiveSessionsByAgent(registrationIds);
-        if (sessions.isEmpty()) {
-            return;
-        }
-        List<AgentGov_Session__c> toUpdate = new List<AgentGov_Session__c>();
-        for (Id registrationId : sessions.keySet()) {
-            AgentGov_Session__c session = sessions.get(registrationId);
-            Map<String, Integer> consumption = consumptionByAgent.get(registrationId);
-            for (String limitType : consumption.keySet()) {
-                Integer amount = consumption.get(limitType);
-                if (amount == null || amount <= 0) {
-                    continue;
-                }
-                if (limitType == AgentGovConstants.LIMIT_API_CALLS) {
-                    session.API_Calls_Used__c =
-                        (session.API_Calls_Used__c != null ? session.API_Calls_Used__c : 0) + amount;
-                } else if (limitType == AgentGovConstants.LIMIT_SOQL_QUERIES) {
-                    session.SOQL_Queries_Used__c =
-                        (session.SOQL_Queries_Used__c != null ? session.SOQL_Queries_Used__c : 0) + amount;
-                } else {
-                    session.DML_Statements_Used__c =
-                        (session.DML_Statements_Used__c != null ? session.DML_Statements_Used__c : 0) + amount;
-                }
-            }
-            session.Actions_Count__c = (session.Actions_Count__c != null ? session.Actions_Count__c : 0) + 1;
-            toUpdate.add(session);
-        }
-        // Session counters are secondary to the budget ledger: a failure here is recorded
-        // for administrators but does not deny the agent's action.
-        // Collected and written in one statement. Reporting each failure separately meant one
-        // DML per failed session, so a systemic failure across a 200-agent batch exhausted the
-        // DML statement limit and rolled the whole batch back.
-        List<Database.SaveResult> results = AgentGovDml.updateRecords(toUpdate, false);
-        List<AgentGov_Action_Log__c> notes = new List<AgentGov_Action_Log__c>();
-        for (Integer i = 0; i < results.size(); i++) {
-            if (!results[i].isSuccess()) {
-                notes.add(
-                    AgentGovTriggerHandler.buildFrameworkEvent(
-                        toUpdate[i].Agent_Registration__c,
-                        AgentGovConstants.ACTION_FAILURE,
-                        'Session counter update failed for session ' + toUpdate[i].Id,
-                        AgentGovDml.describeErrors(results[i].getErrors())
-                    )
-                );
-            }
-        }
-        AgentGovTriggerHandler.recordFrameworkEvents(notes);
     }
 
     private static BudgetResult buildBudgetResult(AgentGov_Budget__c budget) {

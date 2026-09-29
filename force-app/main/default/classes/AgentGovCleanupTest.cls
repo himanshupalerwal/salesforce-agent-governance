@@ -35,15 +35,24 @@ private class AgentGovCleanupTest {
         Database.executeBatch(new AgentGovCleanup(30), 200);
         Test.stopTest();
 
-        List<AgentGov_Action_Log__c> remaining = [
-            SELECT Action_Type__c, Details__c
+        Assert.areEqual(
+            1,
+            [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_QUERY],
+            'Only the recent row remains'
+        );
+        List<String> summaries = new List<String>();
+        for (AgentGov_Action_Log__c summary : [
+            SELECT Details__c
             FROM AgentGov_Action_Log__c
-            ORDER BY Timestamp__c
-        ];
-        Assert.areEqual(2, remaining.size(), 'The recent row and the purge summary remain');
-        Assert.areEqual(AgentGovConstants.ACTION_QUERY, remaining[0].Action_Type__c);
-        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, remaining[1].Action_Type__c);
-        Assert.isTrue(remaining[1].Details__c.contains('deleted 5 rows older than 30 days'), remaining[1].Details__c);
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM
+        ]) {
+            summaries.add(summary.Details__c);
+        }
+        String all = String.join(summaries, '\n');
+        Assert.isTrue(all.contains('Action log purge: deleted 5 rows older than 30 days'), all);
+        // Each phase chains the next and records its own summary.
+        Assert.areEqual(4, summaries.size(), all);
+        Assert.isTrue(all.contains('Budget purge: deleted 0 rows older than'), all);
     }
 
     @IsTest

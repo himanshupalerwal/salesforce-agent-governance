@@ -8,5 +8,5 @@
     <unique>true</unique>
     <externalId>true</externalId>
     <caseSensitive>false</caseSensitive>
-    <description>Deprecated since v1.2: keys are stored as a hash in API_Key_Hash__c. This field is only read to upgrade keys created by earlier releases and is cleared on first use. It will be removed in v1.3.</description>
+    <description>Deprecated since v1.2: keys are stored as a hash in API_Key_Hash__c. This field is only read to upgrade keys created by earlier releases and is cleared on first use. It will be removed in v1.4.</description>
 </CustomField>

@@ -17,6 +17,14 @@
  */
 @SuppressWarnings('PMD.ApexSharingViolations, PMD.ApexCRUDViolation')
 public without sharing class AgentGovDml {
+    // Errors that reject a value the caller supplied, as opposed to a fault in the org.
+    private static final Set<StatusCode> REJECTED_VALUE_CODES = new Set<StatusCode>{
+        StatusCode.INVALID_EMAIL_ADDRESS,
+        StatusCode.STRING_TOO_LONG,
+        StatusCode.NUMBER_OUTSIDE_VALID_RANGE,
+        StatusCode.INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST,
+        StatusCode.FIELD_CUSTOM_VALIDATION_EXCEPTION
+    };
     /**
      * @description Test-only switch that makes publishEvents behave as it does for a user
      *              without Create on the platform event. Such a user cannot be constructed
@@ -149,6 +157,25 @@ public without sharing class AgentGovDml {
         }
         for (Integer i = 0; i < failure.getNumDml(); i++) {
             if (failure.getDmlType(i) != StatusCode.DUPLICATE_VALUE) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @description Returns true when every error on a thrown DmlException rejects a value the
+     *              caller supplied, such as a malformed email address or text too long for its
+     *              field. Used to report such a failure as bad input rather than an internal one.
+     * @param failure The exception raised by an all-or-none write
+     * @return True when every error rejects a supplied value
+     */
+    public static Boolean isRejectedValueFailure(DmlException failure) {
+        if (failure == null || failure.getNumDml() == 0) {
+            return false;
+        }
+        for (Integer i = 0; i < failure.getNumDml(); i++) {
+            if (!REJECTED_VALUE_CODES.contains(failure.getDmlType(i))) {
                 return false;
             }
         }

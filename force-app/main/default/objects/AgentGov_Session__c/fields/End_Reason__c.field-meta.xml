@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>End_Reason__c</fullName>
+    <label>End Reason</label>
+    <type>Picklist</type>
+    <required>false</required>
+    <externalId>false</externalId>
+    <description>Why the session ended.</description>
+    <trackTrending>false</trackTrending>
+    <valueSet>
+        <restricted>true</restricted>
+        <valueSetDefinition>
+            <sorted>false</sorted>
+            <value>
+                <fullName>Idle</fullName>
+                <default>false</default>
+                <label>Idle</label>
+            </value>
+            <value>
+                <fullName>Max_Duration</fullName>
+                <default>false</default>
+                <label>Maximum Duration</label>
+            </value>
+            <value>
+                <fullName>Ended_By_Caller</fullName>
+                <default>false</default>
+                <label>Ended by Caller</label>
+            </value>
+            <value>
+                <fullName>Ended_By_Administrator</fullName>
+                <default>false</default>
+                <label>Ended by Administrator</label>
+            </value>
+            <value>
+                <fullName>Agent_Deactivated</fullName>
+                <default>false</default>
+                <label>Agent Deactivated</label>
+            </value>
+        </valueSetDefinition>
+    </valueSet>
+</CustomField>

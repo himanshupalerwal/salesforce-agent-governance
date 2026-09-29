@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CompactLayout xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>AgentGov_Session_Highlights</fullName>
+    <fields>Name</fields>
+    <fields>Agent_Registration__c</fields>
+    <fields>Status__c</fields>
+    <fields>Session_Start__c</fields>
+    <fields>End_Reason__c</fields>
+    <label>Session Highlights</label>
+</CompactLayout>

@@ -31,7 +31,15 @@ global with sharing class AgentGovProxyApi {
         PATH_DELETE,
         PATH_UPSERT
     };
+    private static final Map<String, String> OPERATION_BY_PATH = new Map<String, String>{
+        PATH_QUERY => AgentGovConstants.ACTION_QUERY,
+        PATH_CREATE => AgentGovConstants.ACTION_CREATE,
+        PATH_UPDATE => AgentGovConstants.ACTION_UPDATE,
+        PATH_DELETE => AgentGovConstants.ACTION_DELETE,
+        PATH_UPSERT => AgentGovConstants.ACTION_UPSERT
+    };
     private static final Set<AgentGovException.ErrorCode> DENIAL_CODES = new Set<AgentGovException.ErrorCode>{
+        AgentGovException.ErrorCode.AGENT_NOT_ACTIVE,
         AgentGovException.ErrorCode.CIRCUIT_BREAKER_OPEN,
         AgentGovException.ErrorCode.POLICY_VIOLATION,
         AgentGovException.ErrorCode.BUDGET_EXCEEDED,
@@ -44,10 +52,24 @@ global with sharing class AgentGovProxyApi {
     private static String currentOperation;
     private static String currentObject;
 
+    // Lets a test fail a create after its records are written, to prove the write is undone.
+    @TestVisible
+    private static Exception failureAfterWrite;
+
     /** Per-record outcome of a write. */
     private class WriteSummary {
         private Integer successCount = 0;
         private List<Map<String, Object>> results = new List<Map<String, Object>>();
+        // First per-record error, recorded on the audit row so a failed write says why.
+        private String firstError;
+
+        private void addFailure(Map<String, Object> entry, List<Database.Error> errors) {
+            List<String> messages = AgentGovProxyApi.errorMessages(errors);
+            entry.put('errors', messages);
+            if (firstError == null && !messages.isEmpty()) {
+                firstError = messages[0];
+            }
+        }
     }
 
     /** @description Routes POST requests to the proxy handlers. */
@@ -56,9 +78,14 @@ global with sharing class AgentGovProxyApi {
         RestRequest request = RestContext.request;
         RestResponse response = RestContext.response;
         String correlationId = AgentGovRestResponder.correlationId(request);
+        AgentGovRequestContext.begin(correlationId);
         AgentGov_Registration__c registration;
         currentOperation = null;
         currentObject = null;
+        // An unexpected failure undoes everything the request wrote, customer records and
+        // ledger alike, so a caller that retries after a 500 never finds half of its first
+        // attempt saved. Governance refusals are answered normally and keep their audit rows.
+        Savepoint savepoint = Database.setSavepoint();
 
         try {
             String path = request.requestURI.substringAfter(AgentGovConstants.REST_PROXY_BASE_PATH.removeEnd('/'));
@@ -67,16 +94,21 @@ global with sharing class AgentGovProxyApi {
                 return;
             }
             Map<String, Object> body = parseBody(request);
+            // Known before the agent is admitted, so a refused attempt by a blocked or inactive
+            // agent is audited with the operation it tried.
+            currentOperation = OPERATION_BY_PATH.get(path);
+            currentObject = body.get('objectName') == null ? null : String.valueOf(body.get('objectName')).left(255);
             registration = AgentGovRestAuth.resolveRegistration(request, body);
             // A Blocked agent whose cooldown has elapsed is admitted past the status check so
             // the breaker can readmit it; tripping leaves the agent Blocked, and refusing here
             // would lock a REST-only agent out for good. Nothing is written at this point: the
             // transition and the probe claim happen together under the row lock taken by
-            // runGovernancePipeline's allowRequest call.
+            // runGovernancePipeline's allowRequest call. During the emergency bypass the breaker
+            // is not consulted, so a Blocked agent is admitted as the Flow actions admit it.
             registration = AgentGovRestAuth.requireActive(
                 registration,
                 true,
-                AgentGovCircuitBreaker.mayProbe(registration)
+                !AgentGovSelector.isFrameworkEnabled() || AgentGovCircuitBreaker.mayProbe(registration)
             );
 
             Map<String, Object> payload;
@@ -99,10 +131,22 @@ global with sharing class AgentGovProxyApi {
             }
             AgentGovRestResponder.success(response, 200, payload, correlationId);
         } catch (AgentGovException e) {
+            undoInternalError(savepoint, e);
             logDenial(registration, e);
             AgentGovRestResponder.error(response, e, correlationId);
         } catch (Exception e) {
+            if (savepoint != null) {
+                Database.rollback(savepoint);
+            }
             AgentGovRestResponder.internalError(response, e, correlationId, registration?.Id);
+        }
+    }
+
+    // An internal failure raised as an AgentGovException, such as a ledger write that fails
+    // after the records were saved, is undone like any other unexpected error.
+    private static void undoInternalError(Savepoint savepoint, AgentGovException failure) {
+        if (savepoint != null && failure.getErrorCode() == AgentGovException.ErrorCode.INTERNAL_ERROR) {
+            Database.rollback(savepoint);
         }
     }
 
@@ -157,6 +201,9 @@ global with sharing class AgentGovProxyApi {
 
         AgentGovBudgetManager.BudgetResult budget = consumeDml(registration, records.size());
         WriteSummary summary = summarizeSaveResults(Database.insert(records, false, AccessLevel.USER_MODE));
+        if (failureAfterWrite != null) {
+            throw failureAfterWrite;
+        }
         return finishWrite(
             registration,
             AgentGovConstants.ACTION_CREATE,
@@ -314,15 +361,9 @@ global with sharing class AgentGovProxyApi {
     }
 
     /**
-     * Charges the agent for work the proxy is about to do. With governance switched off the
-     * budget is read rather than consumed, so the response still reports a truthful remaining
-     * balance while the emergency bypass keeps the request from being refused.
-     */
-    /**
      * Records a breaker outcome unless governance is switched off. During an emergency bypass
-     * a failure must not trip the breaker: tripping sets Status__c to Blocked, and the status
-     * check runs before the bypass does, so the agent would be locked out by the very switch
-     * meant to unblock it.
+     * a failure must not trip the breaker: tripping sets Status__c to Blocked, which would
+     * leave the agent refused the moment the bypass ends.
      */
     private static void recordOutcome(AgentGov_Registration__c registration, Boolean succeeded) {
         if (!AgentGovSelector.isFrameworkEnabled()) {
@@ -331,6 +372,11 @@ global with sharing class AgentGovProxyApi {
         AgentGovCircuitBreaker.recordOutcomes(new Map<Id, Boolean>{ registration.Id => succeeded });
     }
 
+    /**
+     * Charges the agent for work the proxy is about to do. With governance switched off the
+     * budget is read rather than consumed, so the response still reports a truthful remaining
+     * balance while the emergency bypass keeps the request from being refused.
+     */
     private static AgentGovBudgetManager.BudgetResult charge(
         AgentGov_Registration__c registration,
         String limitType,
@@ -396,12 +442,11 @@ global with sharing class AgentGovProxyApi {
         try {
             decision = Security.stripInaccessible(accessType, records, true);
         } catch (Exception e) {
+            // The user may not touch the object at all. Said in the framework's own words:
+            // the platform's message names internals a REST caller should not see.
             throw new AgentGovException(
                 AgentGovException.ErrorCode.ACCESS_DENIED,
-                String.format(
-                    AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
-                    new List<String>{ verb, objectName, e.getMessage() }
-                )
+                String.format(AgentGovConstants.ERR_OBJECT_NOT_ACCESSIBLE, new List<String>{ verb, objectName })
             );
         }
         Map<String, Set<String>> removed = decision.getRemovedFields();
@@ -438,7 +483,8 @@ global with sharing class AgentGovProxyApi {
             objectName,
             null,
             anySucceeded ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE,
-            summary.successCount + '/' + recordCount + ' records ' + verb
+            summary.successCount + '/' + recordCount + ' records ' + verb,
+            summary.firstError
         );
         if (anySucceeded) {
             recordOutcome(registration, true);
@@ -450,6 +496,7 @@ global with sharing class AgentGovProxyApi {
             'recordsProcessed' => recordCount,
             'recordsSucceeded' => summary.successCount,
             'results' => summary.results,
+            'sessionId' => AgentGovSessionTracker.currentSessionFor(registration.Id),
             'budgetStatus' => budget.budgetStatus,
             'remainingBudget' => AgentGovRestResponder.remainingBudget(budget)
         };
@@ -584,7 +631,7 @@ global with sharing class AgentGovProxyApi {
                 entry.put('id', result.getId());
                 summary.successCount++;
             } else {
-                entry.put('errors', errorMessages(result.getErrors()));
+                summary.addFailure(entry, result.getErrors());
             }
             summary.results.add(entry);
         }
@@ -602,7 +649,7 @@ global with sharing class AgentGovProxyApi {
                 entry.put('id', result.getId());
                 summary.successCount++;
             } else {
-                entry.put('errors', errorMessages(result.getErrors()));
+                summary.addFailure(entry, result.getErrors());
             }
             summary.results.add(entry);
         }
@@ -616,7 +663,7 @@ global with sharing class AgentGovProxyApi {
             if (results[i].isSuccess()) {
                 summary.successCount++;
             } else {
-                entry.put('errors', errorMessages(results[i].getErrors()));
+                summary.addFailure(entry, results[i].getErrors());
             }
             summary.results.add(entry);
         }

@@ -18,6 +18,45 @@ private class AgentGovReportUsageTest {
     }
 
     @IsTest
+    static void aDeactivatedAgentCannotChangeItsLedger() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
+            'Deactivated Reporter',
+            AgentGovConstants.AGENT_TYPE_CUSTOM_APEX,
+            true
+        );
+        AgentGovRegistryService.deactivateAgent(reg.Id);
+        AgentGovSelector.clearCache();
+
+        Test.startTest();
+        List<AgentGovReportUsage.Result> results = AgentGovReportUsage.reportUsage(
+            new List<AgentGovReportUsage.Request>{ request(reg.Id, 5, 0, 0) }
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.isFalse(results[0].allowed, 'A deactivated agent is refused, as REST /report refuses it');
+        Assert.areEqual(AgentGovConstants.ERR_AGENT_NOT_ACTIVE, results[0].errorMessage);
+        Assert.areEqual(
+            0,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Budget__c
+                WHERE Agent_Registration__c = :reg.Id AND API_Calls_Consumed__c > 0
+            ],
+            'Nothing is charged'
+        );
+        Assert.areEqual(
+            1,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE Agent_Registration__c = :reg.Id AND Status__c = :AgentGovConstants.ACTION_DENIED
+            ],
+            'The refusal is audited'
+        );
+    }
+
+    @IsTest
     static void reportedUsageIsChargedAndSummedPerAgent() {
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
             'Report Usage Agent',
@@ -107,7 +146,9 @@ private class AgentGovReportUsageTest {
         req.apiCallsUsed = 900;
 
         Test.startTest();
-        AgentGovReportUsage.reportUsage(new List<AgentGovReportUsage.Request>{ req });
+        List<AgentGovReportUsage.Result> results = AgentGovReportUsage.reportUsage(
+            new List<AgentGovReportUsage.Request>{ req }
+        );
         Test.stopTest();
 
         Assert.areEqual(
@@ -120,5 +161,62 @@ private class AgentGovReportUsageTest {
             .API_Calls_Consumed__c,
             'The emergency bypass suspends reporting charges too'
         );
+        // The Flow still receives the agent's real status. It used to be told the agent did
+        // not exist.
+        Assert.isNull(results[0].errorMessage, 'The bypassed report returns no error');
+        Assert.areEqual(AgentGovConstants.BUDGET_NORMAL, results[0].budgetStatus);
+    }
+
+    @IsTest
+    static void negativeUsageIsRefusedAndNothingIsCharged() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
+            'Negative Usage Agent',
+            AgentGovConstants.AGENT_TYPE_FLOW_BASED,
+            true
+        );
+        AgentGovReportUsage.Request req = new AgentGovReportUsage.Request();
+        req.registrationId = reg.Id;
+        req.apiCallsUsed = -5;
+
+        Test.startTest();
+        List<AgentGovReportUsage.Result> results = AgentGovReportUsage.reportUsage(
+            new List<AgentGovReportUsage.Request>{ req }
+        );
+        Test.stopTest();
+
+        Assert.isFalse(results[0].allowed);
+        Assert.areEqual(AgentGovConstants.ERR_NEGATIVE_USAGE, results[0].errorMessage);
+        Assert.areEqual(
+            0,
+            [SELECT API_Calls_Consumed__c FROM AgentGov_Budget__c WHERE Agent_Registration__c = :reg.Id]
+            .API_Calls_Consumed__c
+        );
+    }
+
+    @IsTest
+    static void eachReportIsAuditedWithTheCallersCorrelationId() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
+            'Audited Usage Agent',
+            AgentGovConstants.AGENT_TYPE_FLOW_BASED,
+            true
+        );
+        AgentGovReportUsage.Request req = new AgentGovReportUsage.Request();
+        req.registrationId = reg.Id;
+        req.soqlQueriesUsed = 3;
+        req.correlationId = 'flow-interview-1';
+
+        Test.startTest();
+        AgentGovReportUsage.reportUsage(new List<AgentGovReportUsage.Request>{ req });
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        AgentGov_Action_Log__c row = [
+            SELECT Action_Type__c, Status__c, Correlation_Id__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :reg.Id
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_REPORT, row.Action_Type__c);
+        Assert.areEqual(AgentGovConstants.ACTION_SUCCESS, row.Status__c);
+        Assert.areEqual('flow-interview-1', row.Correlation_Id__c);
     }
 }
