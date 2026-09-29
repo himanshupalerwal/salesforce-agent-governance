@@ -8,6 +8,10 @@
         <visible>true</visible>
     </applicationVisibilities>
     <classAccesses>
+        <apexClass>AgentGovAdminController</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
         <apexClass>AgentGovBudgetManager</apexClass>
         <enabled>true</enabled>
     </classAccesses>
@@ -60,6 +64,10 @@
         <enabled>true</enabled>
     </classAccesses>
     <classAccesses>
+        <apexClass>AgentGovJobScheduler</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
         <apexClass>AgentGovLogAction</apexClass>
         <enabled>true</enabled>
     </classAccesses>
@@ -88,6 +96,10 @@
         <enabled>true</enabled>
     </classAccesses>
     <classAccesses>
+        <apexClass>AgentGovRequestContext</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
         <apexClass>AgentGovRestApi</apexClass>
         <enabled>true</enabled>
     </classAccesses>
@@ -108,12 +120,24 @@
         <enabled>true</enabled>
     </classAccesses>
     <classAccesses>
+        <apexClass>AgentGovSessionTracker</apexClass>
+        <enabled>true</enabled>
+    </classAccesses>
+    <classAccesses>
         <apexClass>AgentGovTriggerHandler</apexClass>
         <enabled>true</enabled>
     </classAccesses>
     <customPermissions>
         <enabled>true</enabled>
         <name>AgentGov_Admin_Access</name>
+    </customPermissions>
+    <customPermissions>
+        <enabled>true</enabled>
+        <name>AgentGov_Manage_Keys</name>
+    </customPermissions>
+    <customPermissions>
+        <enabled>true</enabled>
+        <name>AgentGov_Operate_Agents</name>
     </customPermissions>
     <fieldPermissions>
         <editable>true</editable>
@@ -158,6 +182,21 @@
     <fieldPermissions>
         <editable>true</editable>
         <field>AgentGov_Settings__c.Max_Concurrent_Agents__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>AgentGov_Settings__c.Budget_Retention_Days__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>AgentGov_Settings__c.Notify_Agent_Owners__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>true</editable>
+        <field>AgentGov_Settings__c.Session_Idle_Minutes__c</field>
         <readable>true</readable>
     </fieldPermissions>
     <fieldPermissions>
@@ -332,6 +371,26 @@
     </fieldPermissions>
     <fieldPermissions>
         <editable>false</editable>
+        <field>AgentGov_Session__c.Active_Session_Key__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>AgentGov_Session__c.Duration_Minutes__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>AgentGov_Session__c.End_Reason__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>AgentGov_Session__c.Last_Activity__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
         <field>AgentGov_Budget__c.Budget_Key__c</field>
         <readable>true</readable>
     </fieldPermissions>
@@ -367,6 +426,11 @@
     </fieldPermissions>
     <fieldPermissions>
         <editable>false</editable>
+        <field>AgentGov_Budget__c.Peak_Usage_Percent__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
         <field>AgentGov_Action_Log__c.Agent_Registration__c</field>
         <readable>true</readable>
     </fieldPermissions>
@@ -398,6 +462,11 @@
     <fieldPermissions>
         <editable>false</editable>
         <field>AgentGov_Action_Log__c.Details__c</field>
+        <readable>true</readable>
+    </fieldPermissions>
+    <fieldPermissions>
+        <editable>false</editable>
+        <field>AgentGov_Action_Log__c.Correlation_Id__c</field>
         <readable>true</readable>
     </fieldPermissions>
     <fieldPermissions>

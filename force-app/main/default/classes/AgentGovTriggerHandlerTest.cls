@@ -233,6 +233,8 @@ private class AgentGovTriggerHandlerTest {
             )
         };
 
+        Boolean canSend = orgCanSendEmail(1);
+
         // The event trigger runs in its own execution context, so the handler is exercised
         // directly to observe the email invocation; publishing is asserted separately.
         Test.startTest();
@@ -243,11 +245,143 @@ private class AgentGovTriggerHandlerTest {
 
         Assert.isTrue(published[0].isSuccess(), 'The alert is accepted by the event bus');
         Assert.areEqual(1, emails, 'One email is sent per delivered batch');
-        Assert.areEqual(
-            0,
-            [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM],
-            'No delivery failure was recorded'
+        assertDelivery(canSend);
+    }
+
+    @IsTest
+    static void deliveredAlertsAreRecordedAsHistoryEvenWithoutARecipient() {
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('History', 'Agentforce', true);
+
+        Test.startTest();
+        AgentGovTriggerHandler.handleAlerts(
+            new List<AgentGov_Alert__e>{
+                new AgentGov_Alert__e(
+                    Agent_Id__c = agent.Id,
+                    Agent_Name__c = 'History',
+                    Alert_Type__c = AgentGovConstants.ALERT_THROTTLE,
+                    Limit_Type__c = AgentGovConstants.LIMIT_API_CALLS,
+                    Usage_Percentage__c = 90,
+                    Timestamp__c = DateTime.now()
+                )
+            }
         );
+        Test.stopTest();
+
+        AgentGov_Action_Log__c row = [
+            SELECT Action_Type__c, Details__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :agent.Id
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_ALERT, row.Action_Type__c);
+        Assert.areEqual('Throttled: API calls at 90% of today\'s budget.', row.Details__c);
+    }
+
+    @IsTest
+    static void alertRowsSayWhatHappenedInWords() {
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('Worded', 'Agentforce', true);
+
+        Test.startTest();
+        AgentGovTriggerHandler.handleAlerts(
+            new List<AgentGov_Alert__e>{
+                new AgentGov_Alert__e(
+                    Agent_Id__c = agent.Id,
+                    Agent_Name__c = 'Worded',
+                    Alert_Type__c = AgentGovConstants.ALERT_BLOCK,
+                    Limit_Type__c = AgentGovConstants.LIMIT_SOQL_QUERIES,
+                    Usage_Percentage__c = 95.4,
+                    Current_Usage__c = 19,
+                    Budget_Allocated__c = 20,
+                    Timestamp__c = DateTime.now()
+                ),
+                new AgentGov_Alert__e(
+                    Agent_Id__c = agent.Id,
+                    Agent_Name__c = 'Worded',
+                    Alert_Type__c = AgentGovConstants.ALERT_BLOCK,
+                    Limit_Type__c = AgentGovConstants.ALERT_LIMIT_CIRCUIT_BREAKER,
+                    Usage_Percentage__c = 100,
+                    Current_Usage__c = 3,
+                    Budget_Allocated__c = 3,
+                    Timestamp__c = DateTime.now()
+                )
+            }
+        );
+        Test.stopTest();
+
+        Set<String> details = new Set<String>();
+        for (AgentGov_Action_Log__c row : [
+            SELECT Details__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :agent.Id AND Action_Type__c = :AgentGovConstants.ACTION_ALERT
+        ]) {
+            details.add(row.Details__c);
+        }
+        Assert.isTrue(
+            details.contains('Blocked: SOQL queries at 95% of today\'s budget (19 of 20).'),
+            'Budget alert: ' + details
+        );
+        Assert.isTrue(
+            details.contains('Breaker open: 3 failures reached the threshold of 3.'),
+            'Breaker alert: ' + details
+        );
+    }
+
+    @IsTest
+    static void ownersAreEmailedAboutTheirOwnAgentsWhenEnabled() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Admin_Notification_Email__c = 'ops@example.com';
+        settings.Notify_Agent_Owners__c = true;
+        update settings;
+        AgentGovSelector.clearCache();
+        List<AgentGov_Registration__c> agents = AgentGovTestDataFactory.createRegistrations(2, 'Agentforce');
+        agents[1].Owner_Email__c = 'second-owner@example.com';
+        update agents;
+        List<AgentGov_Alert__e> alerts = new List<AgentGov_Alert__e>();
+        for (AgentGov_Registration__c agent : agents) {
+            alerts.add(
+                new AgentGov_Alert__e(
+                    Agent_Id__c = agent.Id,
+                    Agent_Name__c = 'Owned',
+                    Alert_Type__c = AgentGovConstants.ALERT_WARNING,
+                    Limit_Type__c = AgentGovConstants.LIMIT_API_CALLS,
+                    Timestamp__c = DateTime.now()
+                )
+            );
+        }
+
+        Boolean canSend = orgCanSendEmail(3);
+
+        Test.startTest();
+        AgentGovTriggerHandler.handleAlerts(alerts);
+        Integer emails = Limits.getEmailInvocations();
+        Test.stopTest();
+
+        Assert.areEqual(1, emails, 'The administrator and both owners are emailed in one send');
+        assertDelivery(canSend);
+    }
+
+    // An org that has used its daily email allowance, as a busy sandbox or scratch org can,
+    // refuses every send, tests included. The tests then prove the other half of the contract:
+    // the refused send is recorded rather than lost.
+    private static Boolean orgCanSendEmail(Integer emails) {
+        try {
+            Messaging.reserveSingleEmailCapacity(emails);
+            return true;
+        } catch (System.HandledException e) {
+            return false;
+        }
+    }
+
+    private static void assertDelivery(Boolean canSend) {
+        Integer failures = [
+            SELECT COUNT()
+            FROM AgentGov_Action_Log__c
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM
+        ];
+        if (canSend) {
+            Assert.areEqual(0, failures, 'No delivery failure was recorded');
+        } else {
+            Assert.isTrue(failures > 0, 'The send the org refused was recorded as a delivery failure');
+        }
     }
 
     @IsTest

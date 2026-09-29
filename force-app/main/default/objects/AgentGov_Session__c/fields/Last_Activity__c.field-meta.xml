@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Last_Activity__c</fullName>
+    <label>Last Activity</label>
+    <type>DateTime</type>
+    <required>false</required>
+    <externalId>false</externalId>
+    <description>When the agent last did governed work in this session. A session with no activity for the idle window in AgentGov Settings is closed, and its end time is set to this value.</description>
+    <trackTrending>false</trackTrending>
+</CustomField>

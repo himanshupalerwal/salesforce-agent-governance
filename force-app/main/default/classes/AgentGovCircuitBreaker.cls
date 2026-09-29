@@ -170,9 +170,24 @@ public inherited sharing class AgentGovCircuitBreaker {
      * @throws AgentGovException AGENT_NOT_FOUND when the registration does not exist
      */
     public static void resetBreaker(Id registrationId) {
-        AgentGov_Registration__c registration = requireRegistration(registrationId);
-        close(registration);
-        persist(new List<AgentGov_Registration__c>{ registration });
+        requireRegistration(registrationId);
+        resetBreakers(new Set<Id>{ registrationId });
+    }
+
+    /**
+     * @description Manually closes several breakers at once and reactivates their blocked
+     *              agents. The rows are re-read under a lock, so a probe claimed at the same
+     *              moment is not overwritten by a stale copy.
+     * @param registrationIds Agents whose breakers to close
+     * @return The registrations that were found
+     */
+    public static List<AgentGov_Registration__c> resetBreakers(Set<Id> registrationIds) {
+        Map<Id, AgentGov_Registration__c> locked = AgentGovSelector.getRegistrationsForUpdate(registrationIds);
+        for (AgentGov_Registration__c registration : locked.values()) {
+            close(registration);
+        }
+        persist(locked.values());
+        return locked.values();
     }
 
     /**

@@ -14,8 +14,8 @@ public inherited sharing class AgentGovRegistryService {
      * @param description Optional description
      * @param apiKey Optional plaintext API key chosen by the caller; pass null to issue one later with issueApiKey
      * @param ownerEmail Contact email for the agent owner
-     * @return The created registration
-     * @throws AgentGovException INVALID_INPUT for a blank name or unknown type
+     * @return The created registration as saved, including its registration number
+     * @throws AgentGovException INVALID_INPUT for a blank name, an unknown type, a key that is too short or already in use, or a value the database rejects, such as a malformed owner email
      */
     public static AgentGov_Registration__c registerAgent(
         String agentName,
@@ -82,10 +82,37 @@ public inherited sharing class AgentGovRegistryService {
                     AgentGovConstants.ERR_REGISTRATION_REJECTED
                 );
             }
+            // A value the database rejects, such as a malformed owner email, is the caller's
+            // input to correct, so it is named rather than reported as an internal failure.
+            if (AgentGovDml.isRejectedValueFailure(e)) {
+                throw new AgentGovException(
+                    AgentGovException.ErrorCode.INVALID_INPUT,
+                    String.format(
+                        AgentGovConstants.ERR_REGISTRATION_INVALID_VALUE,
+                        new List<String>{ rejectedFieldLabels(e) }
+                    )
+                );
+            }
             throw e;
         }
-        AgentGovSelector.cacheRegistration(registration);
-        return registration;
+        // The insert assigns the registration number, which the in-memory record does not
+        // show, so the saved row is read back for callers that report it.
+        return AgentGovSelector.getRegistrationById(registration.Id);
+    }
+
+    private static String rejectedFieldLabels(DmlException failure) {
+        Map<String, Schema.SObjectField> fields = Schema.SObjectType.AgentGov_Registration__c.fields.getMap();
+        List<String> labels = new List<String>();
+        for (Integer i = 0; i < failure.getNumDml(); i++) {
+            for (String fieldName : failure.getDmlFieldNames(i)) {
+                Schema.SObjectField field = fields.get(fieldName);
+                String label = field == null ? fieldName : field.getDescribe().getLabel();
+                if (!labels.contains(label)) {
+                    labels.add(label);
+                }
+            }
+        }
+        return labels.isEmpty() ? 'a field' : String.join(labels, ', ');
     }
 
     /**
@@ -149,28 +176,87 @@ public inherited sharing class AgentGovRegistryService {
     }
 
     /**
-     * @description Deactivates an agent and terminates its active session, if any.
+     * @description Activates several agents at once, subject to the org's concurrent-agent
+     *              limit applied to the batch as a whole. Agents that are already active are
+     *              left as they are.
+     * @param registrationIds Agents to activate
+     * @return The registrations that were found
+     * @throws AgentGovException MAX_CONCURRENT_AGENTS when the batch would exceed the limit
+     */
+    public static List<AgentGov_Registration__c> activateAgents(Set<Id> registrationIds) {
+        Map<Id, AgentGov_Registration__c> found = AgentGovSelector.getRegistrationsForUpdate(registrationIds);
+        List<AgentGov_Registration__c> toActivate = new List<AgentGov_Registration__c>();
+        for (AgentGov_Registration__c registration : found.values()) {
+            if (registration.Status__c != AgentGovConstants.STATUS_ACTIVE) {
+                toActivate.add(registration);
+            }
+        }
+        if (toActivate.isEmpty()) {
+            return found.values();
+        }
+        // Checked for the batch as a whole: checking agent by agent would let one batch
+        // activate past the limit.
+        if (AgentGovSelector.getActiveAgentCount() + toActivate.size() > maxConcurrentAgents()) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.MAX_CONCURRENT_AGENTS,
+                AgentGovConstants.ERR_MAX_CONCURRENT_AGENTS
+            );
+        }
+        DateTime now = DateTime.now();
+        for (AgentGov_Registration__c registration : toActivate) {
+            registration.Status__c = AgentGovConstants.STATUS_ACTIVE;
+            registration.Last_Active__c = now;
+        }
+        persist(toActivate);
+        return found.values();
+    }
+
+    /**
+     * @description Deactivates an agent and ends all of its active sessions.
      * @param registrationId The agent registration Id
      * @return The updated registration
      * @throws AgentGovException AGENT_NOT_FOUND when the registration does not exist
      */
     public static AgentGov_Registration__c deactivateAgent(Id registrationId) {
-        AgentGov_Registration__c registration = requireRegistration(registrationId);
-        registration.Status__c = AgentGovConstants.STATUS_INACTIVE;
-        AgentGovDml.updateRecord(registration);
-        AgentGovSelector.cacheRegistration(registration);
-
-        AgentGov_Session__c activeSession = AgentGovSelector.getActiveSession(registrationId);
-        if (activeSession != null) {
-            activeSession.Status__c = AgentGovConstants.SESSION_TERMINATED;
-            activeSession.Session_End__c = DateTime.now();
-            AgentGovDml.updateRecord(activeSession);
-        }
-        return registration;
+        requireRegistration(registrationId);
+        return deactivateAgents(new Set<Id>{ registrationId })[0];
     }
 
     /**
-     * @description Starts a session for an active agent.
+     * @description Deactivates several agents at once and ends all of their active sessions,
+     *              including duplicates left by releases before v1.3. This is the per-agent
+     *              kill switch: a deactivated agent is refused on every entry point.
+     * @param registrationIds Agents to deactivate
+     * @return The registrations that were found
+     */
+    public static List<AgentGov_Registration__c> deactivateAgents(Set<Id> registrationIds) {
+        Map<Id, AgentGov_Registration__c> found = AgentGovSelector.getRegistrationsForUpdate(registrationIds);
+        for (AgentGov_Registration__c registration : found.values()) {
+            registration.Status__c = AgentGovConstants.STATUS_INACTIVE;
+        }
+        persist(found.values());
+        AgentGovSessionTracker.endAllForAgents(found.keySet(), AgentGovConstants.SESSION_END_DEACTIVATED);
+        return found.values();
+    }
+
+    /**
+     * @description Ends sessions on an administrator's instruction, for example a run that
+     *              should not continue. The agent's next governed call opens a new session.
+     * @param sessionIds Sessions to end
+     * @return The sessions that were ended
+     */
+    public static List<AgentGov_Session__c> terminateSessions(Set<Id> sessionIds) {
+        return AgentGovSessionTracker.endSessions(
+            sessionIds,
+            AgentGovConstants.SESSION_TERMINATED,
+            AgentGovConstants.SESSION_END_ADMINISTRATOR
+        );
+    }
+
+    /**
+     * @description Starts a new session for an active agent, ending its current one first.
+     *              Sessions open and close automatically with governed activity, so this is
+     *              only needed by callers that want an explicit boundary between runs.
      * @param registrationId The agent registration Id
      * @return The created session
      * @throws AgentGovException AGENT_NOT_FOUND or AGENT_NOT_ACTIVE
@@ -186,18 +272,7 @@ public inherited sharing class AgentGovRegistryService {
         registration.Last_Active__c = DateTime.now();
         AgentGovDml.updateRecord(registration);
         AgentGovSelector.cacheRegistration(registration);
-
-        AgentGov_Session__c session = new AgentGov_Session__c(
-            Agent_Registration__c = registrationId,
-            Session_Start__c = DateTime.now(),
-            Status__c = AgentGovConstants.SESSION_ACTIVE,
-            API_Calls_Used__c = 0,
-            SOQL_Queries_Used__c = 0,
-            DML_Statements_Used__c = 0,
-            Actions_Count__c = 0
-        );
-        AgentGovDml.insertRecord(session);
-        return session;
+        return AgentGovSessionTracker.startSession(registrationId);
     }
 
     /**
@@ -221,10 +296,12 @@ public inherited sharing class AgentGovRegistryService {
             // the historical fact; rewriting it would move when the session actually ended.
             return session;
         }
-        session.Status__c = AgentGovConstants.SESSION_COMPLETED;
-        session.Session_End__c = DateTime.now();
-        AgentGovDml.updateRecord(session);
-        return session;
+        AgentGovSessionTracker.endSessions(
+            new Set<Id>{ sessionId },
+            AgentGovConstants.SESSION_COMPLETED,
+            AgentGovConstants.SESSION_END_CALLER
+        );
+        return AgentGovSelector.getSessionById(sessionId);
     }
 
     /**
@@ -234,6 +311,23 @@ public inherited sharing class AgentGovRegistryService {
      */
     public static AgentGov_Registration__c getAgent(Id registrationId) {
         return AgentGovSelector.getRegistrationById(registrationId);
+    }
+
+    private static Integer maxConcurrentAgents() {
+        AgentGov_Settings__c settings = AgentGovSelector.getSettings();
+        return settings.Max_Concurrent_Agents__c != null
+            ? (Integer) settings.Max_Concurrent_Agents__c
+            : AgentGovConstants.DEFAULT_MAX_CONCURRENT_AGENTS;
+    }
+
+    private static void persist(List<AgentGov_Registration__c> registrations) {
+        if (registrations.isEmpty()) {
+            return;
+        }
+        AgentGovDml.assertAllSucceeded(AgentGovDml.updateRecords(registrations, false), 'Registration update');
+        for (AgentGov_Registration__c registration : registrations) {
+            AgentGovSelector.cacheRegistration(registration);
+        }
     }
 
     private static AgentGov_Registration__c requireRegistration(Id registrationId) {

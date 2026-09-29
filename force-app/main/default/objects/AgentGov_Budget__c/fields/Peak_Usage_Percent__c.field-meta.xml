@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Peak_Usage_Percent__c</fullName>
+    <label>Peak Usage</label>
+    <type>Percent</type>
+    <precision>10</precision>
+    <scale>1</scale>
+    <formula>MAX(
+IF(API_Calls_Allocated__c &gt; 0, BLANKVALUE(API_Calls_Consumed__c, 0) / API_Calls_Allocated__c, IF(BLANKVALUE(API_Calls_Consumed__c, 0) &gt; 0, 1, 0)),
+IF(SOQL_Queries_Allocated__c &gt; 0, BLANKVALUE(SOQL_Queries_Consumed__c, 0) / SOQL_Queries_Allocated__c, IF(BLANKVALUE(SOQL_Queries_Consumed__c, 0) &gt; 0, 1, 0)),
+IF(DML_Operations_Allocated__c &gt; 0, BLANKVALUE(DML_Operations_Consumed__c, 0) / DML_Operations_Allocated__c, IF(BLANKVALUE(DML_Operations_Consumed__c, 0) &gt; 0, 1, 0))
+)</formula>
+    <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
+    <externalId>false</externalId>
+    <description>Usage of the most-used limit type as a share of its allocation. This is the figure the budget status is decided on, so it is the one to sort and report by. A zero allocation with any usage counts as full.</description>
+    <trackTrending>false</trackTrending>
+</CustomField>

@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ListView xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>All</fullName>
+    <columns>NAME</columns>
+    <columns>Agent_Registration__c</columns>
+    <columns>Budget_Date__c</columns>
+    <columns>Budget_Status__c</columns>
+    <columns>Peak_Usage_Percent__c</columns>
+    <columns>API_Calls_Consumed__c</columns>
+    <columns>SOQL_Queries_Consumed__c</columns>
+    <columns>DML_Operations_Consumed__c</columns>
     <filterScope>Everything</filterScope>
     <label>All</label>
 </ListView>

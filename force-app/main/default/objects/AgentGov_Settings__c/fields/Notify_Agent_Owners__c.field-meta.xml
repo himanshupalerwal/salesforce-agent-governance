@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Notify_Agent_Owners__c</fullName>
+    <defaultValue>false</defaultValue>
+    <description>When checked, alerts are also emailed to each agent's Owner Email, listing only that owner's agents.</description>
+    <externalId>false</externalId>
+    <label>Notify Agent Owners</label>
+    <trackTrending>false</trackTrending>
+    <type>Checkbox</type>
+</CustomField>

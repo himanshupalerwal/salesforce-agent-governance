@@ -127,8 +127,10 @@ private class AgentGovSelectorTest {
         Assert.isTrue(AgentGovSelector.getActiveSessionsByAgent(new Set<Id>()).isEmpty());
 
         // Orphan detection is time-based, so the session is aged explicitly rather than
-        // relying on the difference between the setup and test transactions.
-        AgentGov_Session__c stale = AgentGovTestDataFactory.createSession(agentId, false);
+        // relying on the difference between the setup and test transactions. It belongs to a
+        // second agent because an agent can have only one active session.
+        AgentGov_Registration__c second = AgentGovTestDataFactory.createRegistration('Second', 'Agentforce', true);
+        AgentGov_Session__c stale = AgentGovTestDataFactory.createSession(second.Id, false);
         stale.Session_Start__c = DateTime.now().addHours(-48);
         insert stale;
         List<AgentGov_Session__c> orphans = AgentGovSelector.getOrphanedSessions(24);
