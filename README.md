@@ -42,6 +42,7 @@ flowchart TB
 
     subgraph AgentGov["AgentGov Framework"]
         AUTH["REST Auth\nAPI key or bound user"]
+        API["REST API\n/register /authorize\n/report /rotate-key"]
         PROXY["Proxy API\n/query /create /update\n/delete /upsert (user mode)"]
         CTX["AgentGov Context\n(Limits measurement)"]
         INV["Flow Actions"]
@@ -49,7 +50,9 @@ flowchart TB
         PE["Policy Engine"]
         CR["Conflict Resolver"]
         BM["Budget Manager"]
-        AL["Audit Trail"]
+        ST["Session Tracker\n(opens and closes sessions)"]
+        AL["Audit Trail\n(every request, refused or not)"]
+        JOBS["Scheduled Jobs\n(daily reset, health check, cleanup)"]
     end
 
     subgraph Platform["Salesforce Platform"]
@@ -60,26 +63,40 @@ flowchart TB
         SF["Customer Data\n(Database in USER_MODE)"]
     end
 
+    subgraph People["Administrators"]
+        ADMIN["Administrator / Responder"]
+        CONSOLE["AgentGov Console\nand record pages"]
+    end
+
     A2 -->|"REST"| AUTH
+    AUTH --> API
     AUTH --> PROXY
     A1 -->|"Flow / Apex"| INV
     A3 -->|"Apex"| CTX
     A4 -->|"Flow"| INV
 
+    API --> CB
     PROXY --> CB
     INV --> CB
     CTX --> BM
     CB -->|"CLOSED?"| PE
     PE -->|"Allowed?"| CR
     CR -->|"No conflict?"| BM
-    BM -->|"Has budget?"| AL
+    BM -->|"Has budget?"| ST
+    ST --> AL
 
     PROXY -->|"Executes"| SF
     PE -.-> MD
     BM -.-> MD
     BM -.-> CS
+    ST -.-> CO
     AL -.-> CO
     AL -.-> EVT
+    JOBS -.->|"reset budgets, reopen breakers,\nclose idle sessions, purge"| CO
+
+    ADMIN --> CONSOLE
+    CONSOLE -.->|"reads, acts, audits"| CO
+    EVT -.->|"live updates"| CONSOLE
 ```
 
 ### Request Lifecycle
