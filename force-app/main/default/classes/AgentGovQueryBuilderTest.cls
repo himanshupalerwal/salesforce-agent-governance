@@ -213,6 +213,18 @@ private class AgentGovQueryBuilderTest {
                 Assert.fail('A user without access must be refused');
             } catch (AgentGovException e) {
                 Assert.areEqual(AgentGovException.ErrorCode.ACCESS_DENIED, e.getErrorCode());
+                // The refusal is worded by the framework and names what was refused, never the
+                // platform's own message, which describes internals.
+                Assert.isTrue(
+                    e.getMessage().contains('not permitted to read AgentGov_Registration__c'),
+                    e.getMessage()
+                );
+                Assert.isFalse(
+                    e.getMessage().containsIgnoreCase('sObject type') ||
+                        e.getMessage().containsIgnoreCase('not supported') ||
+                        e.getMessage().containsIgnoreCase('exception'),
+                    'Platform text leaked: ' + e.getMessage()
+                );
             }
         }
     }

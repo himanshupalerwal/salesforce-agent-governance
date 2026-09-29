@@ -20,6 +20,29 @@ private class AgentGovRestAuthTest {
     }
 
     @IsTest
+    static void aUserBoundToTwoAgentsMustSendAKey() {
+        User shared = AgentGovTestDataFactory.createRestrictedUser(new List<String>{ 'AgentGov_Agent' });
+        List<AgentGov_Registration__c> agents = AgentGovTestDataFactory.createRegistrations(2, 'Agentforce');
+        for (AgentGov_Registration__c agent : agents) {
+            agent.Agent_User__c = shared.Id;
+        }
+        update agents;
+
+        AgentGovException refusal;
+        System.runAs(shared) {
+            try {
+                AgentGovRestAuth.resolveRegistration(requestWithHeader(null, null), null);
+            } catch (AgentGovException e) {
+                refusal = e;
+            }
+        }
+
+        Assert.isNotNull(refusal, 'The login alone cannot say which agent is calling');
+        Assert.areEqual(AgentGovException.ErrorCode.ACCESS_DENIED, refusal.getErrorCode());
+        Assert.areEqual(AgentGovConstants.ERR_AMBIGUOUS_AGENT_USER, refusal.getMessage());
+    }
+
+    @IsTest
     static void hashIsDeterministicSha256Hex() {
         String hash = AgentGovRestAuth.hashKey('example-key');
         Assert.areEqual(64, hash.length());

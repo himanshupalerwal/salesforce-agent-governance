@@ -25,15 +25,24 @@ global with sharing class AgentGovRestApi {
     private static final String PATH_BUDGET = '/budget/';
     private static final String PATH_HEALTH = '/health/';
 
+    // Lets a test fail an authorization after its budget is charged, to prove the charge is undone.
+    @TestVisible
+    private static Exception failureAfterCharge;
+
     /** @description Routes POST requests. */
     @HttpPost
     global static void doPost() {
         RestRequest request = RestContext.request;
         RestResponse response = RestContext.response;
         String correlationId = AgentGovRestResponder.correlationId(request);
+        AgentGovRequestContext.begin(correlationId);
         AgentGov_Registration__c registration;
+        // An unexpected failure undoes what the request wrote, such as a budget charge for an
+        // authorization the caller never received. Refusals keep their audit rows.
+        Savepoint savepoint;
 
         try {
+            savepoint = Database.setSavepoint();
             String path = request.requestURI.substringAfter(AgentGovConstants.REST_BASE_PATH.removeEnd('/'));
             Map<String, Object> body = parseBody(request);
             switch on path {
@@ -41,13 +50,17 @@ global with sharing class AgentGovRestApi {
                     AgentGovRestResponder.success(response, 201, handleRegister(body), correlationId);
                 }
                 when '/authorize' {
-                    registration = admitForGovernedCall(AgentGovRestAuth.resolveRegistration(request, body));
-                    AgentGovRestResponder.success(response, 200, handleAuthorize(registration, body), correlationId);
+                    registration = AgentGovRestAuth.resolveRegistration(request, body);
+                    admitOrAudit(registration, body.get('operation'), body.get('objectName'), body.get('recordId'));
+                    Map<String, Object> authorized = handleAuthorize(registration, body);
+                    failIfSimulated();
+                    AgentGovRestResponder.success(response, 200, authorized, correlationId);
                 }
                 when '/report' {
                     // Reporting changes the ledger, so it is held to the same status check as
                     // /authorize. A suspended agent must not be able to alter its own budget.
-                    registration = admitForGovernedCall(AgentGovRestAuth.resolveRegistration(request, body));
+                    registration = AgentGovRestAuth.resolveRegistration(request, body);
+                    admitOrAudit(registration, AgentGovConstants.ACTION_REPORT, null, null);
                     AgentGovRestResponder.success(response, 200, handleReport(registration, body), correlationId);
                 }
                 when '/rotate-key' {
@@ -66,9 +79,27 @@ global with sharing class AgentGovRestApi {
                 }
             }
         } catch (AgentGovException e) {
+            undoInternalError(savepoint, e);
             AgentGovRestResponder.error(response, e, correlationId);
         } catch (Exception e) {
+            if (savepoint != null) {
+                Database.rollback(savepoint);
+            }
             AgentGovRestResponder.internalError(response, e, correlationId, registration?.Id);
+        }
+    }
+
+    // An internal failure raised as an AgentGovException, such as a ledger write that fails
+    // after the charge, is undone like any other unexpected error. Refusals keep their rows.
+    private static void undoInternalError(Savepoint savepoint, AgentGovException failure) {
+        if (savepoint != null && failure.getErrorCode() == AgentGovException.ErrorCode.INTERNAL_ERROR) {
+            Database.rollback(savepoint);
+        }
+    }
+
+    private static void failIfSimulated() {
+        if (failureAfterCharge != null) {
+            throw failureAfterCharge;
         }
     }
 
@@ -78,6 +109,7 @@ global with sharing class AgentGovRestApi {
         RestRequest request = RestContext.request;
         RestResponse response = RestContext.response;
         String correlationId = AgentGovRestResponder.correlationId(request);
+        AgentGovRequestContext.begin(correlationId);
         AgentGov_Registration__c caller;
 
         try {
@@ -247,6 +279,7 @@ global with sharing class AgentGovRestApi {
         Map<String, Object> payload = new Map<String, Object>{
             'authorized' => true,
             'agentId' => registration.Id,
+            'sessionId' => AgentGovSessionTracker.currentSessionFor(registration.Id),
             'budgetStatus' => budget.budgetStatus,
             'remainingBudget' => AgentGovRestResponder.remainingBudget(budget)
         };
@@ -300,9 +333,11 @@ global with sharing class AgentGovRestApi {
         Boolean governed = AgentGovSelector.isFrameworkEnabled();
         AgentGovBudgetManager.BudgetResult budget;
         try {
+            // A report describes work that was already counted as an action when it was
+            // authorized, so it adds usage to the agent's session but no action.
             budget = (consumption.isEmpty() || !governed)
                 ? AgentGovBudgetManager.checkBudget(registration.Id)
-                : AgentGovBudgetManager.consumeBudget(registration.Id, consumption);
+                : AgentGovBudgetManager.consumeBudget(registration.Id, consumption, 0);
         } catch (AgentGovException denied) {
             // The consumption is already persisted by this point, so the report must be
             // audited before the denial propagates. Otherwise the usage that pushed the agent
@@ -470,13 +505,51 @@ global with sharing class AgentGovRestApi {
      * @return The same registration once it is cleared to proceed
      * @throws AgentGovException AGENT_NOT_ACTIVE when the agent is genuinely not usable
      */
+    /**
+     * @description Admits a resolved agent to a governed call and audits a refusal. An agent
+     *              whose breaker has tripped is Blocked, and its refused attempts are exactly
+     *              the activity an administrator needs to see.
+     * @param registration The resolved calling agent
+     * @param operation The requested operation as sent by the caller, which may be invalid
+     * @param objectName The requested object as sent by the caller
+     * @param recordId The requested record as sent by the caller
+     */
+    private static void admitOrAudit(
+        AgentGov_Registration__c registration,
+        Object operation,
+        Object objectName,
+        Object recordId
+    ) {
+        try {
+            admitForGovernedCall(registration);
+        } catch (AgentGovException refused) {
+            String requested = operation == null ? null : String.valueOf(operation);
+            logAction(
+                registration,
+                AgentGovConstants.VALID_OPERATIONS.contains(requested) || requested == AgentGovConstants.ACTION_REPORT
+                    ? requested
+                    : AgentGovConstants.ACTION_SYSTEM,
+                objectName == null ? null : String.valueOf(objectName).left(255),
+                recordId == null ? null : String.valueOf(recordId).left(18),
+                AgentGovConstants.ACTION_DENIED,
+                refused.getMessage()
+            );
+            throw refused;
+        }
+    }
+
     private static AgentGov_Registration__c admitForGovernedCall(AgentGov_Registration__c registration) {
         // Throttled is the status a HALF_OPEN breaker carries, so it is admitted. A Blocked
         // agent whose cooldown has elapsed is admitted too, because otherwise the status check
         // would refuse it before the breaker could ever readmit it. Nothing is written here:
         // the OPEN to HALF_OPEN transition and the probe claim happen together under the row
-        // lock in allowRequests, which handleAuthorize calls next.
-        return AgentGovRestAuth.requireActive(registration, true, AgentGovCircuitBreaker.mayProbe(registration));
+        // lock in allowRequests, which handleAuthorize calls next. During the emergency bypass
+        // the breaker is not consulted, so a Blocked agent is admitted as the Flow actions admit it.
+        return AgentGovRestAuth.requireActive(
+            registration,
+            true,
+            !AgentGovSelector.isFrameworkEnabled() || AgentGovCircuitBreaker.mayProbe(registration)
+        );
     }
 
     private static Integer readCount(Map<String, Object> source, String key, Integer defaultValue) {

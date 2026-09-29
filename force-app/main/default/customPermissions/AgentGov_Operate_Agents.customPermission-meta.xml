@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomPermission xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Allows the holder to act on agents from the AgentGov console: reset circuit breakers, activate and deactivate agents, end sessions, credit budgets, and schedule the background jobs. Every action is recorded in the action log.</description>
+    <isLicensed>false</isLicensed>
+    <label>AgentGov Operate Agents</label>
+</CustomPermission>

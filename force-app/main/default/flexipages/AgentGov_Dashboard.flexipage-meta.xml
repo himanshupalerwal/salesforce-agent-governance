@@ -3,26 +3,8 @@
     <flexiPageRegions>
         <itemInstances>
             <componentInstance>
-                <componentName>c:agentGovDashboard</componentName>
-                <identifier>agentGovDashboard</identifier>
-            </componentInstance>
-        </itemInstances>
-        <itemInstances>
-            <componentInstance>
-                <componentName>c:agentHealthMonitor</componentName>
-                <identifier>agentHealthMonitor</identifier>
-            </componentInstance>
-        </itemInstances>
-        <itemInstances>
-            <componentInstance>
-                <componentName>c:agentBudgetAllocation</componentName>
-                <identifier>agentBudgetAllocation</identifier>
-            </componentInstance>
-        </itemInstances>
-        <itemInstances>
-            <componentInstance>
-                <componentName>c:agentConflictViewer</componentName>
-                <identifier>agentConflictViewer</identifier>
+                <componentName>c:agentGovConsole</componentName>
+                <identifier>agentGovConsole</identifier>
             </componentInstance>
         </itemInstances>
         <name>main</name>

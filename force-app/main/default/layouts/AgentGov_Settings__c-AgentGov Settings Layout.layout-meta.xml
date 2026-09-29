@@ -28,6 +28,14 @@
                 <behavior>Edit</behavior>
                 <field>Log_Retention_Days__c</field>
             </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Budget_Retention_Days__c</field>
+            </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Session_Idle_Minutes__c</field>
+            </layoutItems>
         </layoutColumns>
         <style>TwoColumnsLeftToRight</style>
     </layoutSections>
@@ -63,6 +71,10 @@
             <layoutItems>
                 <behavior>Edit</behavior>
                 <field>Admin_Notification_Email__c</field>
+            </layoutItems>
+            <layoutItems>
+                <behavior>Edit</behavior>
+                <field>Notify_Agent_Owners__c</field>
             </layoutItems>
         </layoutColumns>
         <layoutColumns>

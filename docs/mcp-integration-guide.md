@@ -10,7 +10,7 @@ registration, and the governed proxy as the tool surface the MCP server exposes.
 ## How the pieces fit
 
 ```
-MCP client (Claude, an IDE, a custom host)
+MCP client (a desktop assistant, an IDE, a custom host)
         │  MCP
         ▼
 Your MCP server ──── OAuth 2.0 (External Client App) ────▶ Salesforce
@@ -19,9 +19,9 @@ Your MCP server ──── OAuth 2.0 (External Client App) ────▶ Sal
         └──────────────────────────────────────────────────▶ AgentGov
                                                              ├─ circuit breaker
                                                              ├─ policy (object, operation, fields, record cap)
-                                                             ├─ conflict detection
-                                                             ├─ field-level security (user mode)
+                                                             ├─ field access check (create, update, upsert)
                                                              ├─ budget (charged by real record count)
+                                                             ├─ execution in user mode
                                                              └─ audit log
 ```
 
@@ -31,7 +31,7 @@ what it actually did.
 
 If your org is on Enterprise Edition or above, Salesforce Hosted MCP Servers can expose
 Apex invocable actions and Flows as MCP tools directly; wrapping those actions with
-AgentGov's governance pipeline is on the roadmap for v1.3. The approach in this guide works
+AgentGov's governance pipeline is on the roadmap for v1.4. The approach in this guide works
 on any edition that supports Apex.
 
 ---
@@ -78,7 +78,9 @@ AgentGovRegistryService.activateAgent(agent.Id);
 Once bound, every REST call the integration user makes is attributed to this registration
 without any key. If your server must serve several agents through one user, give each
 registration its own key instead (`AgentGovRegistryService.issueApiKey(agent.Id)`) and send
-it in the `X-AgentGov-Key` header.
+it in the `X-AgentGov-Key` header. A keyless call from a user bound to more than one
+registration is refused with `ACCESS_DENIED`, because the login alone cannot say which agent
+is calling.
 
 ---
 
@@ -94,7 +96,10 @@ MCP_External_Account_Delete    Agent Type: MCP_External   Object: Account   Oper
 
 The proxy enforces all three dimensions: an operation that is denied returns
 `POLICY_VIOLATION`; a request that reads or writes a restricted field is denied rather
-than silently trimmed; a request over the record cap is rejected before anything runs.
+than silently trimmed; a write with more records than the cap is rejected with
+`POLICY_VIOLATION` before anything is charged or written. A query is capped rather than
+rejected: `/query` returns at most the cap's number of rows, never more than 2,000, and
+succeeds with 200.
 
 Daily budgets come from the registration (`Daily_API_Budget__c`, `Daily_SOQL_Budget__c`,
 `Daily_DML_Budget__c`). See the configuration guide for thresholds.
@@ -165,19 +170,27 @@ async function salesforceQuery(args, session) {
 Define `salesforce_create`, `salesforce_update`, `salesforce_delete`, and
 `salesforce_upsert` the same way against `/create`, `/update`, `/delete`, and `/upsert`.
 Send an `X-Correlation-Id` so a denied or failed tool call can be matched to its audit row.
+A call refused with 400 `INVALID_INPUT`, or whose credential does not resolve to an agent,
+leaves no audit row; its `message` says what to correct.
 
 ---
 
 ## Step 5: Handle governance outcomes
 
-| `errorCode`            | What the server should do                                                            |
-| ---------------------- | ------------------------------------------------------------------------------------ |
-| `BUDGET_EXCEEDED`      | Stop for the day, or fall back to a lower-cost plan. The budget resets at midnight.  |
-| `CIRCUIT_BREAKER_OPEN` | Back off. The breaker probes recovery after the cooldown; retrying sooner is denied. |
-| `POLICY_VIOLATION`     | Do not retry; tell the model which operation, field, or record count was refused.    |
-| `ACCESS_DENIED`        | The integration user lacks object or field access; an administrator must grant it.   |
-| `RECORD_LOCKED`        | Another agent holds the record; retry later or work on other records.                |
-| `INTERNAL_ERROR`       | Report the `correlationId` to an administrator; the details are in the action log.   |
+| `errorCode`            | What the server should do                                                                                                                                                                                                                                                                                    |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `BUDGET_EXCEEDED`      | Stop for the day, or fall back to a lower-cost plan. The budget resets at midnight in the org's default time zone.                                                                                                                                                                                           |
+| `AGENT_NOT_ACTIVE`     | The agent is deactivated, or its circuit breaker tripped and set it to `Blocked`. Back off: a Blocked agent is admitted again once the cooldown has passed, when the next request becomes the breaker's single probe. A deactivated agent stays refused until an administrator activates it.                 |
+| `CIRCUIT_BREAKER_OPEN` | Back off. The breaker admits a single probe request and another request already holds it, or the breaker is OPEN while the agent was set back to Active by hand. Retry after the probe has settled or the cooldown has passed.                                                                               |
+| `POLICY_VIOLATION`     | Do not retry; tell the model which operation, field, or record count was refused.                                                                                                                                                                                                                            |
+| `ACCESS_DENIED`        | The integration user lacks object or field access; an administrator must grant it. A refused query still costs its one SOQL unit. The same code is returned for a keyless call from a user bound to more than one registration. Granting access does not fix that; send the agent's key in `X-AgentGov-Key`. |
+| `INTERNAL_ERROR`       | Report the `correlationId` to an administrator; the details are in the action log. Everything the request wrote, budget charges included, was rolled back before the error row was recorded, so a retry cannot create anything twice.                                                                        |
+
+The proxy does not return `RECORD_LOCKED` in practice. Conflicts are detected between agents
+within one transaction, in practice a Register Agent Action batch in Flow, and each proxy
+request serves one agent in its own transaction. Two agents that write the same record through
+separate requests are not stopped by AgentGov, so coordinate them in your server where that
+matters. Locking across requests is on the roadmap for v2.0.
 
 Successful writes return per-record results, so partial failures (a validation rule, a
 duplicate rule) are visible to the model without failing the whole call.
@@ -186,12 +199,20 @@ duplicate rule) are visible to the model without failing the whole call.
 
 ## Monitoring
 
-- **AgentGov Dashboard** app: budgets, breaker state, sessions, conflicts, live-updating.
-- **`AgentGov_Action_Log__c`**: every proxy call with status `Success`, `Failure`, or
-  `Denied`, plus `System` rows for framework-level problems.
+- The **AgentGov** app's **AgentGov Dashboard** tab opens the console: agents, budgets,
+  breaker state, sessions, activity, and conflicts. It refreshes when AgentGov platform events
+  arrive.
+- **`AgentGov_Action_Log__c`**: each governed proxy call, with status `Success`, `Failure`, or
+  `Denied`, plus `System` rows for framework-level problems such as unhandled errors. A call
+  refused with 400 `INVALID_INPUT`, or whose credential does not resolve to an agent, leaves no
+  row.
 - **Platform events** `AgentGov_Alert__e` (budget thresholds, breaker trips) and
-  `AgentGov_Action_Event__e` (every action). Subscribe from a Streaming API client or a
-  Flow, and set `Admin_Notification_Email__c` in AgentGov Settings to receive alert emails.
+  `AgentGov_Action_Event__e` (logged actions). Both are published only while
+  `Enable_Real_Time_Events__c` is checked; with it unchecked, action-log rows are written
+  directly and no alerts are raised. When the calling user cannot publish an action event, the
+  row is written directly and no event is published, so the action log, not the event stream,
+  is the complete record. Subscribe from a Streaming API client or a Flow, and set
+  `Admin_Notification_Email__c` in AgentGov Settings to receive alert emails.
 
 ---
 
@@ -199,7 +220,8 @@ duplicate rule) are visible to the model without failing the whole call.
 
 - Store the ECA consumer secret and any API keys in a secret manager; never in code.
 - Prefer the user binding over API keys. When keys are unavoidable, send them only in the
-  `X-AgentGov-Key` header and rotate them with `POST /rotate-key`.
+  `X-AgentGov-Key` header and rotate them with `POST /services/apexrest/agentgov/rotate-key`,
+  or with **Rotate key** in the console, which needs the AgentGov Manage Keys permission.
 - Keep the integration user's data access to the minimum the agent needs; the proxy
   enforces exactly that access.
 - Use `Max_Records_Per_Transaction__c` and `Field_Restrictions__c` on policies to bound what

@@ -20,6 +20,57 @@ private class AgentGovRegisterActionTest {
     }
 
     @IsTest
+    static void aDeactivatedAgentIsRefusedAndTheRefusalAudited() {
+        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
+        AgentGovRegistryService.deactivateAgent(reg.Id);
+        AgentGovSelector.clearCache();
+
+        Test.startTest();
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(
+            new List<AgentGovRegisterAction.Request>{ request(reg.Id, AgentGovConstants.ACTION_QUERY) }
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.isFalse(results[0].authorized, 'Deactivation refuses the agent here as it does over REST');
+        Assert.areEqual(AgentGovConstants.ERR_AGENT_NOT_ACTIVE, results[0].denialReason);
+        Assert.areEqual(
+            0,
+            [SELECT SOQL_Queries_Consumed__c FROM AgentGov_Budget__c WHERE Agent_Registration__c = :reg.Id]
+            .SOQL_Queries_Consumed__c,
+            'Nothing is charged to a deactivated agent'
+        );
+        Assert.areEqual(
+            1,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE Agent_Registration__c = :reg.Id AND Status__c = :AgentGovConstants.ACTION_DENIED
+            ],
+            'The refusal is audited'
+        );
+    }
+
+    @IsTest
+    static void aDeactivatedAgentIsRefusedDuringTheEmergencyBypass() {
+        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
+        AgentGovRegistryService.deactivateAgent(reg.Id);
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Is_Enabled__c = false;
+        update settings;
+        AgentGovSelector.clearCache();
+
+        Test.startTest();
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(
+            new List<AgentGovRegisterAction.Request>{ request(reg.Id, AgentGovConstants.ACTION_QUERY) }
+        );
+        Test.stopTest();
+
+        Assert.isFalse(results[0].authorized, 'The bypass suspends governance checks, not deactivation');
+        Assert.areEqual(AgentGovConstants.ERR_AGENT_NOT_ACTIVE, results[0].denialReason);
+    }
+
+    @IsTest
     static void authorizedRequestConsumesBudgetAndLogs() {
         AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
 
@@ -199,7 +250,11 @@ private class AgentGovRegisterActionTest {
         List<AgentGov_Registration__c> agents = AgentGovTestDataFactory.createRegistrations(5, 'Flow_Based');
         List<AgentGovRegisterAction.Request> requests = new List<AgentGovRegisterAction.Request>();
         for (Integer i = 0; i < 200; i++) {
-            requests.add(request(agents[Math.mod(i, 5)].Id, AgentGovConstants.ACTION_QUERY));
+            AgentGovRegisterAction.Request req = request(agents[Math.mod(i, 5)].Id, AgentGovConstants.ACTION_QUERY);
+            // Each agent works on its own records here; agents contending for one record are
+            // covered by the conflict tests.
+            req.recordId = null;
+            requests.add(req);
         }
 
         Test.startTest();
@@ -219,5 +274,74 @@ private class AgentGovRegisterActionTest {
             [SELECT SOQL_Queries_Consumed__c FROM AgentGov_Budget__c WHERE Agent_Registration__c = :agents[0].Id]
             .SOQL_Queries_Consumed__c
         );
+    }
+
+    private static List<AgentGov_Registration__c> contenders() {
+        AgentGov_Registration__c urgent = AgentGovTestDataFactory.createRegistration('Urgent', 'Flow_Based', false);
+        urgent.Priority__c = 1;
+        AgentGov_Registration__c routine = AgentGovTestDataFactory.createRegistration('Routine', 'Flow_Based', false);
+        routine.Priority__c = 5;
+        List<AgentGov_Registration__c> agents = new List<AgentGov_Registration__c>{ urgent, routine };
+        insert agents;
+        return agents;
+    }
+
+    @IsTest
+    static void theHigherPriorityAgentKeepsARecordWhateverTheOrder() {
+        List<AgentGov_Registration__c> agents = contenders();
+        // The lower-priority agent asks first, so it takes the record before being overridden.
+        List<AgentGovRegisterAction.Request> requests = new List<AgentGovRegisterAction.Request>{
+            request(agents[1].Id, AgentGovConstants.ACTION_UPDATE),
+            request(agents[0].Id, AgentGovConstants.ACTION_UPDATE)
+        };
+
+        Test.startTest();
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(requests);
+        Test.stopTest();
+
+        Assert.isFalse(results[0].authorized, 'The overridden agent is refused even though it asked first');
+        Assert.isTrue(results[0].denialReason.contains('Urgent'), results[0].denialReason);
+        Assert.isTrue(results[1].authorized, 'Denied: ' + results[1].denialReason);
+        Assert.areEqual(
+            1,
+            [SELECT COUNT() FROM AgentGov_Conflict_Log__c WHERE Record_Id__c = '001000000000001AAA'],
+            'The conflict is logged'
+        );
+        Assert.areEqual(
+            0,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Budget__c
+                WHERE Agent_Registration__c = :agents[1].Id AND DML_Operations_Consumed__c > 0
+            ],
+            'The refused agent is not charged'
+        );
+    }
+
+    @IsTest
+    static void manyConflictsInOneBatchAreLoggedInOneStatement() {
+        List<AgentGov_Registration__c> agents = contenders();
+        List<AgentGovRegisterAction.Request> requests = new List<AgentGovRegisterAction.Request>();
+        for (Integer i = 0; i < 100; i++) {
+            String recordId = '001000000000' + String.valueOf(i).leftPad(3, '0') + 'AAA';
+            for (AgentGov_Registration__c agent : agents) {
+                AgentGovRegisterAction.Request req = request(agent.Id, AgentGovConstants.ACTION_UPDATE);
+                req.recordId = recordId;
+                requests.add(req);
+            }
+        }
+
+        Test.startTest();
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(requests);
+        Integer dml = Limits.getDmlStatements();
+        Test.stopTest();
+
+        Integer authorized = 0;
+        for (AgentGovRegisterAction.Result result : results) {
+            authorized += result.authorized ? 1 : 0;
+        }
+        Assert.areEqual(100, authorized, 'One agent per record');
+        Assert.areEqual(100, [SELECT COUNT() FROM AgentGov_Conflict_Log__c]);
+        Assert.isTrue(dml < 12, 'Conflict logs are written together; the batch used ' + dml + ' DML statements');
     }
 }

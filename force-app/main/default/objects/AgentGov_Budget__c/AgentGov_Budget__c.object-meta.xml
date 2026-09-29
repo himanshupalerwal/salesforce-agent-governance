@@ -61,7 +61,18 @@
         <type>AutoNumber</type>
     </nameField>
     <pluralLabel>Governor Budgets</pluralLabel>
-    <searchLayouts/>
+    <searchLayouts>
+        <customTabListAdditionalFields>Agent_Registration__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Budget_Date__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Budget_Status__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Peak_Usage_Percent__c</customTabListAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_Registration__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Budget_Date__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Budget_Status__c</lookupDialogsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_Registration__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Budget_Date__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Budget_Status__c</searchResultsAdditionalFields>
+    </searchLayouts>
     <sharingModel>ControlledByParent</sharingModel>
     <visibility>Public</visibility>
 </CustomObject>

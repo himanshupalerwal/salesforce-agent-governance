@@ -1,0 +1,69 @@
+@import 'c/agentGovStyles';
+
+:host {
+    display: block;
+}
+.overview-card {
+    margin-bottom: var(--slds-g-spacing-4, 1rem);
+}
+.ag-kpi_alert .kpi-icon {
+    --slds-c-icon-color-foreground-default: var(--slds-g-color-error-1, #ba0517);
+}
+.overview-split {
+    align-items: stretch;
+    margin-bottom: var(--slds-g-spacing-4, 1rem);
+}
+.overview-split > .overview-card {
+    margin-bottom: 0;
+}
+.usage-list,
+.alert-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.usage-row + .usage-row {
+    margin-top: var(--slds-g-spacing-3, 0.75rem);
+}
+.usage-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    min-width: 0;
+    margin-bottom: var(--slds-g-spacing-1, 0.25rem);
+}
+.usage-figure {
+    display: inline-flex;
+    flex: none;
+    align-items: center;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+}
+.usage-status {
+    min-width: 2.25rem;
+}
+.alert-row {
+    padding: var(--slds-g-spacing-3, 0.75rem) 0;
+    border-bottom: 1px solid var(--slds-g-color-border-1, #e5e5e5);
+}
+.alert-row:first-child {
+    padding-top: 0;
+}
+.alert-row:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+.alert-head {
+    display: flex;
+    align-items: center;
+    gap: var(--slds-g-spacing-2, 0.5rem);
+    min-width: 0;
+    margin-bottom: var(--slds-g-spacing-1, 0.25rem);
+}
+.alert-time {
+    flex: none;
+    margin-left: auto;
+}
+.alert-text {
+    overflow-wrap: anywhere;
+}

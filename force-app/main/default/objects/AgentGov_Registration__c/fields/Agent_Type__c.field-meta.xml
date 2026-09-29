@@ -18,17 +18,17 @@
             <value>
                 <fullName>MCP_External</fullName>
                 <default>false</default>
-                <label>MCP_External</label>
+                <label>MCP External</label>
             </value>
             <value>
                 <fullName>Custom_Apex</fullName>
                 <default>false</default>
-                <label>Custom_Apex</label>
+                <label>Custom Apex</label>
             </value>
             <value>
                 <fullName>Flow_Based</fullName>
                 <default>false</default>
-                <label>Flow_Based</label>
+                <label>Flow Based</label>
             </value>
         </valueSetDefinition>
     </valueSet>

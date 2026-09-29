@@ -3,86 +3,125 @@
  * Refreshes on demand and on AgentGov platform events.
  */
 import { LightningElement, wire } from 'lwc';
+import { NavigationMixin } from 'lightning/navigation';
 import { refreshApex } from '@salesforce/apex';
 import { ShowToastEvent } from 'lightning/platformShowToastEvent';
 import getAllTodaysBudgets from '@salesforce/apex/AgentGovDashboardController.getAllTodaysBudgets';
 import {
-    reduceErrors,
-    usageLevel,
+    budgetStatusView,
+    combineErrors,
+    describeError,
+    followRecordLink,
+    formatNumber,
+    formatTime,
+    listenToAgentGovEvents,
     percentOf,
-    subscribeToAgentGovEvents,
-    unsubscribeFromAgentGovEvents
+    recordUrl,
+    refreshedMessage,
+    usageLevel
 } from 'c/agentGovUtils';
 
-const STATUS_ICON = { Normal: 'utility:success', Warning: 'utility:warning' };
 const WARNING_PERCENT = 80;
 
-export default class AgentBudgetAllocation extends LightningElement {
+export default class AgentBudgetAllocation extends NavigationMixin(LightningElement) {
     rawBudgets = [];
-    error;
+    lastUpdated;
+    announcement = '';
+    refreshing = false;
+    errors = {};
 
     wiredBudgets;
-    subscriptions = [];
     refreshInFlight = false;
     refreshQueued = false;
+    manualRefreshPending = false;
     lastToastedError;
 
     @wire(getAllTodaysBudgets)
     handleBudgets(result) {
         this.wiredBudgets = result;
         if (result.error) {
-            this.reportError(result.error);
+            this.reportError('load', result.error);
             this.rawBudgets = [];
         } else if (result.data !== undefined) {
-            this.error = undefined;
+            this.clearError('load');
             this.rawBudgets = result.data || [];
+            this.lastUpdated = new Date();
         }
     }
 
     connectedCallback() {
-        this.connected = true;
-        subscribeToAgentGovEvents(() => this.refresh())
-            .then((subscriptions) => {
-                this.subscriptions = subscriptions;
-            })
-            .catch(() => {
-                this.subscriptions = [];
-            });
+        this.releaseEvents = listenToAgentGovEvents(() => this.refresh());
     }
 
     disconnectedCallback() {
-        this.connected = false;
-        unsubscribeFromAgentGovEvents(this.subscriptions);
-        this.subscriptions = [];
+        if (this.releaseEvents) {
+            this.releaseEvents();
+            this.releaseEvents = undefined;
+        }
     }
 
     handleRefresh() {
-        this.refresh();
+        this.refresh({ manual: true });
     }
 
-    async refresh() {
+    handleRecordLink(event) {
+        followRecordLink(this, event);
+    }
+
+    /**
+     * Refreshes the budgets. A refresh requested while one is running is performed once the
+     * running one completes. A refresh the user asked for disables the button while it runs and
+     * is announced when it completes.
+     * @param {{manual?: boolean}} [options]
+     */
+    async refresh({ manual = false } = {}) {
+        if (manual) {
+            this.refreshing = true;
+            this.manualRefreshPending = true;
+        }
         if (this.refreshInFlight) {
             this.refreshQueued = true;
             return;
         }
         this.refreshInFlight = true;
+        const announce = this.manualRefreshPending;
+        this.manualRefreshPending = false;
         try {
             if (this.wiredBudgets) {
                 await refreshApex(this.wiredBudgets);
             }
+            this.clearError('refresh');
+            this.lastUpdated = new Date();
+            if (announce) {
+                this.announcement = refreshedMessage(this.lastUpdated);
+            }
         } catch (error) {
-            this.reportError(error);
+            this.reportError('refresh', error);
         } finally {
             this.refreshInFlight = false;
             if (this.refreshQueued) {
                 this.refreshQueued = false;
                 this.refresh();
+            } else {
+                this.refreshing = false;
             }
         }
     }
 
     get isLoading() {
         return !this.wiredBudgets || (this.wiredBudgets.data === undefined && this.wiredBudgets.error === undefined);
+    }
+
+    get error() {
+        return combineErrors(this.errors);
+    }
+
+    get refreshLabel() {
+        return this.refreshing ? 'Refreshing…' : 'Refresh';
+    }
+
+    get lastUpdatedLabel() {
+        return this.lastUpdated ? `Updated ${formatTime(this.lastUpdated, { seconds: true })}` : '';
     }
 
     get budgets() {
@@ -106,29 +145,33 @@ export default class AgentBudgetAllocation extends LightningElement {
                 budget.DML_Operations_Consumed__c,
                 budget.DML_Operations_Allocated__c
             );
+            const status = budgetStatusView(budget.Budget_Status__c);
             return {
                 ...budget,
                 agentName,
+                agentUrl: recordUrl(budget.Agent_Registration__c),
                 api,
                 soql,
                 dml,
                 isWarning: [api, soql, dml].some((limit) => limit.percent >= WARNING_PERCENT),
-                statusIcon: STATUS_ICON[budget.Budget_Status__c] || 'utility:error',
-                statusAltText: `Budget status ${budget.Budget_Status__c}`
+                statusLabel: budget.Budget_Status__c || 'Unknown',
+                statusPillClass: `${status.pillClass} status-label`
             };
         });
     }
 
     get totalApiAllocated() {
-        return this.rawBudgets.reduce((sum, budget) => sum + (budget.API_Calls_Allocated__c || 0), 0);
+        return formatNumber(this.rawBudgets.reduce((sum, budget) => sum + (budget.API_Calls_Allocated__c || 0), 0));
     }
 
     get totalSoqlAllocated() {
-        return this.rawBudgets.reduce((sum, budget) => sum + (budget.SOQL_Queries_Allocated__c || 0), 0);
+        return formatNumber(this.rawBudgets.reduce((sum, budget) => sum + (budget.SOQL_Queries_Allocated__c || 0), 0));
     }
 
     get totalDmlAllocated() {
-        return this.rawBudgets.reduce((sum, budget) => sum + (budget.DML_Operations_Allocated__c || 0), 0);
+        return formatNumber(
+            this.rawBudgets.reduce((sum, budget) => sum + (budget.DML_Operations_Allocated__c || 0), 0)
+        );
     }
 
     get hasBudgets() {
@@ -138,18 +181,26 @@ export default class AgentBudgetAllocation extends LightningElement {
     limitView(agentName, label, consumed, allocated) {
         const percent = percentOf(consumed, allocated);
         return {
-            consumed: consumed || 0,
-            allocated: allocated || 0,
+            consumed: formatNumber(consumed),
+            allocated: formatNumber(allocated),
             percent,
             barStyle: `width: ${percent}%`,
-            barClass: `progress-fill bar-${usageLevel(percent)}`,
+            barClass: `ag-bar ag-bar_${usageLevel(percent)} progress-fill`,
             ariaLabel: `${agentName} ${label} ${percent} percent used`
         };
     }
 
-    reportError(error) {
-        const message = reduceErrors(error).join('. ');
-        this.error = message;
+    clearError(key) {
+        if (this.errors[key]) {
+            const remaining = { ...this.errors };
+            delete remaining[key];
+            this.errors = remaining;
+        }
+    }
+
+    reportError(key, error) {
+        const message = describeError(error);
+        this.errors = { ...this.errors, [key]: message };
         if (message && message !== this.lastToastedError) {
             this.lastToastedError = message;
             this.dispatchEvent(

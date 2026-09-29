@@ -14,17 +14,17 @@
             <value>
                 <fullName>CLOSED</fullName>
                 <default>true</default>
-                <label>CLOSED</label>
+                <label>Closed</label>
             </value>
             <value>
                 <fullName>OPEN</fullName>
                 <default>false</default>
-                <label>OPEN</label>
+                <label>Open</label>
             </value>
             <value>
                 <fullName>HALF_OPEN</fullName>
                 <default>false</default>
-                <label>HALF_OPEN</label>
+                <label>Half-Open</label>
             </value>
         </valueSetDefinition>
     </valueSet>

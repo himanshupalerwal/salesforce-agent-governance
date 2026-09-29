@@ -4,7 +4,9 @@
  *              Wraps a unit of agent work and measures the SOQL queries, DML statements, and
  *              callouts it actually consumed using the Limits class, then charges that
  *              measured amount to the agent's budget. Contexts nest: an inner context's
- *              consumption is charged to its own agent and excluded from the outer one.
+ *              consumption is charged to its own agent and excluded from the outer one. Each
+ *              unit is recorded in the action log as an Apex row carrying its measured usage,
+ *              its duration, and whether it succeeded, failed, or crossed the budget.
  *
  *              executeGoverned charges the measured usage even when the action throws, then
  *              rethrows the action's exception unchanged. A failed action still spent the
@@ -19,6 +21,7 @@ public inherited sharing class AgentGovContext {
 
     private Id registrationId;
     private Id sessionId;
+    private Long startedAt;
     private Integer startQueries;
     private Integer startDml;
     private Integer startCallouts;
@@ -43,15 +46,32 @@ public inherited sharing class AgentGovContext {
      * @param registrationId The agent registration Id
      * @param sessionId Optional session Id
      * @return The new context
-     * @throws AgentGovException INVALID_INPUT for a null Id
+     * @throws AgentGovException INVALID_INPUT for a null Id, AGENT_NOT_ACTIVE for a deactivated agent
      */
     public static AgentGovContext startTracking(Id registrationId, Id sessionId) {
         if (registrationId == null) {
             throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NULL_AGENT_ID);
         }
+        // Deactivation refuses an agent on every entry point, Apex included. The check is
+        // governance overhead: its query is taken before this context's baseline and removed
+        // from every enclosing context, so no agent is charged for it.
+        Integer queriesBefore = Limits.getQueries();
+        AgentGov_Registration__c registration = AgentGovSelector.getRegistrationsByIds(new Set<Id>{ registrationId })
+            .get(registrationId);
+        Integer overhead = Limits.getQueries() - queriesBefore;
+        for (AgentGovContext open : contextStack) {
+            open.startQueries += overhead;
+        }
+        if (registration != null && registration.Status__c == AgentGovConstants.STATUS_INACTIVE) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.AGENT_NOT_ACTIVE,
+                AgentGovConstants.ERR_AGENT_NOT_ACTIVE
+            );
+        }
         AgentGovContext context = new AgentGovContext();
         context.registrationId = registrationId;
         context.sessionId = sessionId;
+        context.startedAt = System.currentTimeMillis();
         context.startQueries = Limits.getQueries();
         context.startDml = Limits.getDmlStatements();
         context.startCallouts = Limits.getCallouts();
@@ -65,6 +85,14 @@ public inherited sharing class AgentGovContext {
      * @throws AgentGovException INVALID_INPUT when no context is active, BUDGET_EXCEEDED when the charge exhausts the budget
      */
     public static AgentGovBudgetManager.BudgetResult stopTracking() {
+        return stop(null);
+    }
+
+    /**
+     * Stops the innermost context, charges its consumption, and records the unit in the
+     * action log. failure is the action's error message when the unit threw, otherwise null.
+     */
+    private static AgentGovBudgetManager.BudgetResult stop(String failure) {
         AgentGovContext context = getCurrentContext();
         if (context == null) {
             throw new AgentGovException(
@@ -101,6 +129,8 @@ public inherited sharing class AgentGovContext {
         // enclosing agent either, so its cost is excluded from the parent as well.
         Integer bookkeepingQueries = Limits.getQueries();
         Integer bookkeepingDml = Limits.getDmlStatements();
+        String status = failure == null ? AgentGovConstants.ACTION_SUCCESS : AgentGovConstants.ACTION_FAILURE;
+        String error = failure;
         try {
             // With governance switched off the usage is measured and reported but not charged,
             // so the emergency bypass cannot leave an Apex agent blocked mid-migration.
@@ -108,7 +138,14 @@ public inherited sharing class AgentGovContext {
                 return AgentGovBudgetManager.checkBudget(context.registrationId);
             }
             return AgentGovBudgetManager.consumeBudget(context.registrationId, consumption);
+        } catch (AgentGovException denied) {
+            status = AgentGovConstants.ACTION_DENIED;
+            error = denied.getMessage();
+            throw denied;
         } finally {
+            // Written inside the bookkeeping window, so the enclosing agent is not charged for
+            // the audit row either.
+            logUnit(context, status, consumption, error);
             if (parent != null) {
                 parent.startQueries += Limits.getQueries() - bookkeepingQueries;
                 parent.startDml += Limits.getDmlStatements() - bookkeepingDml;
@@ -147,10 +184,33 @@ public inherited sharing class AgentGovContext {
         try {
             action.execute();
         } catch (Exception actionFailure) {
-            chargeAfterFailure();
+            chargeAfterFailure(actionFailure.getTypeName() + ': ' + actionFailure.getMessage());
             throw actionFailure;
         }
         return stopTracking();
+    }
+
+    // One Apex row per unit of work, carrying the unit's own duration rather than that of the
+    // enclosing request.
+    private static void logUnit(
+        AgentGovContext context,
+        String status,
+        Map<String, Integer> consumption,
+        String error
+    ) {
+        AgentGov_Registration__c agent = AgentGovSelector.getRegistrationById(context.registrationId);
+        AgentGov_Action_Event__e event = AgentGovTriggerHandler.buildEvent(
+            context.registrationId,
+            agent != null ? agent.Agent_Name__c : AgentGovConstants.UNKNOWN_AGENT_NAME,
+            AgentGovConstants.ACTION_APEX,
+            null,
+            null,
+            status,
+            JSON.serialize(consumption)
+        );
+        event.Execution_Time_Ms__c = System.currentTimeMillis() - context.startedAt;
+        event.Error_Message__c = error;
+        AgentGovTriggerHandler.logActions(new List<AgentGov_Action_Event__e>{ event });
     }
 
     /** @description Clears every active context. For tests only. */
@@ -163,12 +223,12 @@ public inherited sharing class AgentGovContext {
     // deliberately not propagated: the action's own exception is the one the caller must
     // see, and the budget row has already been written by the time it is raised.
     @SuppressWarnings('PMD.EmptyCatchBlock')
-    private static void chargeAfterFailure() {
+    private static void chargeAfterFailure(String failure) {
         // Catches everything, not just AgentGovException. The caller is on its way to
         // rethrowing the action's own exception, and anything escaping here would replace it
         // with a bookkeeping error, hiding the real failure from the agent.
         try {
-            stopTracking();
+            stop(failure);
         } catch (Exception bookkeepingFailure) {
             try {
                 AgentGovTriggerHandler.recordFrameworkEvent(

@@ -13,12 +13,12 @@
             <value>
                 <fullName>Agent1_Won</fullName>
                 <default>false</default>
-                <label>Agent1 Won</label>
+                <label>Agent 1 Won</label>
             </value>
             <value>
                 <fullName>Agent2_Won</fullName>
                 <default>false</default>
-                <label>Agent2 Won</label>
+                <label>Agent 2 Won</label>
             </value>
             <value>
                 <fullName>Queued</fullName>

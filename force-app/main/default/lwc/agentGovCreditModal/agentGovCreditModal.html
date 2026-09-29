@@ -1,0 +1,50 @@
+<template>
+    <lightning-modal-header label="Credit budget"></lightning-modal-header>
+    <lightning-modal-body>
+        <p class="slds-m-bottom_small">
+            Give usage back to today's budget for <strong>{agentName}</strong>, for example after an incident is
+            resolved. The budget status is worked out again from the corrected usage.
+        </p>
+        <template lwc:if={errorMessage}>
+            <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                <span class="slds-assistive-text">Error</span>
+                <h2 class="error-message">{errorMessage}</h2>
+            </div>
+        </template>
+        <lightning-combobox
+            name="limitType"
+            label="Limit"
+            value={limitType}
+            options={limitOptions}
+            onchange={handleLimitChange}
+            required
+        ></lightning-combobox>
+        <lightning-input
+            class="slds-m-top_small"
+            name="amount"
+            type="number"
+            label="Units to credit"
+            min="1"
+            step="1"
+            value={amount}
+            required
+            lwc:ref="amountInput"
+            onchange={handleAmountChange}
+        ></lightning-input>
+    </lightning-modal-body>
+    <lightning-modal-footer>
+        <lightning-button
+            class="slds-m-right_x-small cancel-button"
+            label="Cancel"
+            disabled={saving}
+            onclick={handleCancel}
+        ></lightning-button>
+        <lightning-button
+            class="submit-button"
+            variant="brand"
+            label="Credit budget"
+            disabled={saving}
+            onclick={handleSubmit}
+        ></lightning-button>
+    </lightning-modal-footer>
+</template>

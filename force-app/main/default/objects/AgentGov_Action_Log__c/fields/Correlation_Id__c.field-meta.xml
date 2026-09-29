@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>Correlation_Id__c</fullName>
+    <label>Correlation Id</label>
+    <type>Text</type>
+    <length>255</length>
+    <required>false</required>
+    <unique>false</unique>
+    <externalId>true</externalId>
+    <caseSensitive>false</caseSensitive>
+    <description>Correlation id of the request that produced this row: the caller's X-Correlation-Id header, or one generated for the request. Returned in every REST response, so a request can be traced to its audit rows. Marked as an external id so it is indexed.</description>
+    <trackTrending>false</trackTrending>
+</CustomField>

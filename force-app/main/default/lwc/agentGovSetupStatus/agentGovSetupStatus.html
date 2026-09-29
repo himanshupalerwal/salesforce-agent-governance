@@ -1,0 +1,125 @@
+<template>
+    <section class="slds-card ag-card setup-status" aria-labelledby="setup-heading">
+        <div class="slds-card__header slds-grid">
+            <header class="slds-media slds-media_center slds-has-flexi-truncate">
+                <div class="slds-media__figure">
+                    <lightning-icon icon-name="standard:settings" size="small"></lightning-icon>
+                </div>
+                <div class="slds-media__body">
+                    <h2
+                        id="setup-heading"
+                        class="slds-card__header-title setup-heading"
+                        tabindex="-1"
+                        lwc:ref="heading"
+                    >
+                        Setup
+                    </h2>
+                </div>
+            </header>
+            <div class="slds-no-flex slds-grid slds-grid_vertical-align-center">
+                <span class="ag-meta slds-m-right_small last-updated">{lastUpdatedLabel}</span>
+                <lightning-button
+                    class="slds-m-right_x-small refresh-button"
+                    label={refreshLabel}
+                    icon-name="utility:refresh"
+                    disabled={refreshing}
+                    onclick={handleRefresh}
+                ></lightning-button>
+                <template lwc:if={canSchedule}>
+                    <lightning-button
+                        class="schedule-button"
+                        variant="brand"
+                        label={scheduleLabel}
+                        icon-name="utility:clock"
+                        disabled={scheduleDisabled}
+                        onclick={handleSchedule}
+                    ></lightning-button>
+                </template>
+            </div>
+        </div>
+        <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
+
+        <div class="slds-card__body slds-card__body_inner">
+            <template lwc:if={errorMessage}>
+                <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">
+                    <span class="slds-assistive-text">Error</span>
+                    <h2 class="error-message">{errorMessage}</h2>
+                </div>
+            </template>
+
+            <template lwc:if={isLoading}>
+                <div class="slds-p-vertical_small loading-region" aria-busy="true">
+                    <span class="ag-skeleton ag-skeleton_title"></span>
+                    <span class="ag-skeleton"></span>
+                    <span class="ag-skeleton ag-skeleton_short"></span>
+                    <span class="slds-assistive-text">Loading setup status</span>
+                </div>
+            </template>
+            <template lwc:elseif={hasStatus}>
+                <h3 class="section-title">Checklist</h3>
+                <ul class="slds-m-bottom_medium checklist">
+                    <template for:each={checks} for:item="check">
+                        <li
+                            key={check.key}
+                            class="slds-grid slds-grid_vertical-align-start slds-m-bottom_x-small check"
+                        >
+                            <lightning-icon
+                                class="slds-m-right_x-small"
+                                icon-name={check.icon}
+                                variant={check.variant}
+                                size="x-small"
+                            ></lightning-icon>
+                            <span>
+                                <span class="slds-assistive-text">{check.stateText}:</span>
+                                <span class="check-label">{check.label}</span>
+                            </span>
+                        </li>
+                    </template>
+                </ul>
+
+                <h3 class="section-title">Background jobs</h3>
+                <div class="slds-scrollable_x slds-m-bottom_large">
+                    <table class="slds-table slds-table_cell-buffer slds-table_bordered jobs-table">
+                        <caption class="slds-assistive-text">
+                            AgentGov background jobs and when each runs next
+                        </caption>
+                        <thead>
+                            <tr class="slds-line-height_reset">
+                                <th scope="col"><div class="slds-truncate">Job</div></th>
+                                <th scope="col"><div class="slds-truncate">What it does</div></th>
+                                <th scope="col"><div class="slds-truncate">State</div></th>
+                                <th scope="col"><div class="slds-truncate">Next run</div></th>
+                                <th scope="col"><div class="slds-truncate">Schedule</div></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <template for:each={jobs} for:item="job">
+                                <tr key={job.name} class="job-row">
+                                    <th scope="row">{job.name}</th>
+                                    <td class="slds-cell-wrap">{job.purpose}</td>
+                                    <td>
+                                        <span class={job.stateClass}>{job.scheduledText}</span>
+                                    </td>
+                                    <td class="ag-nowrap job-next">{job.nextRun}</td>
+                                    <td class="ag-nowrap"><code class="cron">{job.cron}</code></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+
+                <h3 class="section-title">Policies</h3>
+                <template lwc:if={hasPolicyProblems}>
+                    <ul class="slds-list_dotted policy-problems">
+                        <template for:each={policyProblems} for:item="problem">
+                            <li key={problem.key} class="policy-problem">{problem.text}</li>
+                        </template>
+                    </ul>
+                </template>
+                <template lwc:else>
+                    <p class="ag-meta no-problems">Every active policy is valid.</p>
+                </template>
+            </template>
+        </div>
+    </section>
+</template>

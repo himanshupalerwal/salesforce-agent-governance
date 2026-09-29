@@ -1,0 +1,31 @@
+<template>
+    <h1 class="slds-assistive-text">AgentGov Console</h1>
+    <div class="slds-assistive-text announcement" aria-live="polite" aria-atomic="true">{announcement}</div>
+    <div class="console">
+        <span class={liveStatusClass} title={liveUpdatesTitle}>{liveUpdatesLabel}</span>
+
+        <lightning-tabset active-tab-value={activeTab}>
+            <lightning-tab label="Overview" value="overview" onactive={handleTabActive}>
+                <c-agent-gov-overview ondrilldown={handleDrilldown}></c-agent-gov-overview>
+            </lightning-tab>
+            <lightning-tab label="Agents" value="agents" onactive={handleTabActive}>
+                <c-agent-gov-agent-list
+                    filter={agentFilter}
+                    focus-request={agentsFocusRequest}
+                    onfilterchange={handleFilterChange}
+                ></c-agent-gov-agent-list>
+            </lightning-tab>
+            <lightning-tab label="Activity" value="activity" onactive={handleTabActive}>
+                <c-agent-gov-activity-log focus-request={activityFocusRequest}></c-agent-gov-activity-log>
+            </lightning-tab>
+            <lightning-tab label="Conflicts" value="conflicts" onactive={handleTabActive}>
+                <c-agent-conflict-viewer></c-agent-conflict-viewer>
+            </lightning-tab>
+            <template lwc:if={showSetup}>
+                <lightning-tab label="Setup" value="setup" onactive={handleTabActive}>
+                    <c-agent-gov-setup-status></c-agent-gov-setup-status>
+                </lightning-tab>
+            </template>
+        </lightning-tabset>
+    </div>
+</template>

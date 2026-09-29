@@ -4,20 +4,22 @@ Two runbooks. **Part 1** is everything the person installing AgentGov does, once
 **Part 2** is everything the administrator running it does afterwards. Each step says what
 it does and how to confirm it worked.
 
-Installing into an org that already runs AgentGov v1.1? Read
-[Upgrading from v1.1](#upgrading-from-v11) first; one step must happen before you deploy.
+Installing into an org that already runs AgentGov v1.1 or v1.2? Follow
+[Upgrading from v1.2](#upgrading-from-v12) or [Upgrading from v1.1](#upgrading-from-v11)
+instead of deploying straight away. The scheduled jobs must be removed before you deploy,
+because Salesforce refuses to deploy a class that a scheduled job uses.
 
 ---
 
 ## Prerequisites
 
-| Requirement    | Detail                                                                                    |
-| -------------- | ----------------------------------------------------------------------------------------- |
-| Salesforce org | Summer '26 (API 67.0) or later. Enterprise, Unlimited, Performance, or Developer Edition. |
-| Permissions    | System Administrator, or a profile that can deploy metadata and assign permission sets.   |
-| Salesforce CLI | Version 2.x. [Install guide](https://developer.salesforce.com/tools/salesforcecli)        |
-| Git            | To clone the repository.                                                                  |
-| Node.js        | Version 20 or later, only if you intend to run the Lightning component tests.             |
+| Requirement    | Detail                                                                                                |
+| -------------- | ----------------------------------------------------------------------------------------------------- |
+| Salesforce org | Summer '26 (API 67.0) or later. Enterprise, Unlimited, Performance, or Developer Edition.             |
+| Permissions    | System Administrator, or a profile that can deploy metadata and assign permission sets.               |
+| Salesforce CLI | Version 2.x. [Install guide](https://developer.salesforce.com/tools/salesforcecli)                    |
+| Git            | To clone the repository.                                                                              |
+| Node.js        | Version 20 or later, only if you intend to run the Lightning component tests or the end-to-end suite. |
 
 Check the CLI and pick the org you are installing into:
 
@@ -26,15 +28,7 @@ sf version
 sf org login web --alias agentgov --set-default
 ```
 
-Prefer a scratch org for a first look:
-
-```bash
-sf org create scratch --definition-file config/project-scratch-def.json \
-  --alias agentgov --duration-days 30 --set-default
-```
-
-The scratch org definition enables Agentforce, so you can build agents alongside the
-framework.
+For a first look, use a scratch org instead; Step 1 shows how, once you have the source.
 
 ---
 
@@ -47,16 +41,31 @@ git clone https://github.com/himanshupalerwal/salesforce-agent-governance.git
 cd salesforce-agent-governance
 ```
 
+To install into a scratch org, authorize the Dev Hub that creates it once, then create the org
+from the project you just cloned:
+
+```bash
+sf org login web --alias devhub --set-default-dev-hub
+sf org create scratch --definition-file config/project-scratch-def.json \
+  --alias agentgov --duration-days 30 --set-default
+```
+
+The scratch org definition enables Agentforce, so you can build agents alongside the
+framework.
+
 ## Step 2. Deploy
 
 ```bash
 sf project deploy start --source-dir force-app --target-org agentgov
 ```
 
-This deploys 198 components: five custom objects, one custom setting, two custom metadata
-types, two platform events, the Apex classes and triggers, the Lightning Web Components and
-the dashboard page, page layouts, tabs, the app, three permission sets, one permission set
-group, and one custom permission.
+This deploys 238 components: five custom objects, one custom setting, two custom metadata
+types, and two platform events, with their fields and list views; five custom metadata records
+(the three limit configurations and two example policies); the Apex classes and triggers; the
+Lightning Web Components; three Lightning pages (the console, the agent record page, and the
+session record page); page layouts and two compact layouts; tabs; the app; four permission
+sets, one permission set group, and three custom permissions; and a report folder and a
+dashboard folder.
 
 **Confirm it worked.** The command reports `Status: Succeeded` with a component count. A
 failed deploy applies nothing, so fix the reported error and run it again.
@@ -69,23 +78,26 @@ This is the step that decides who can see anything. Assign yourself the administ
 sf org assign permset --name AgentGov_Admin --target-org agentgov
 ```
 
-AgentGov ships four ways to grant access. Give each person or integration exactly one:
+AgentGov ships five ways to grant access. Give each person or integration one of them;
+`AgentGov_Responder` is the exception, added on top of `AgentGov_User`:
 
-| Grant                | Give it to                                             | What it allows                                                                                                                                                                      |
-| -------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AgentGov_Admin`     | Administrators who configure and operate the framework | Read and write on every AgentGov object and field, all tabs, all Apex classes, and the `AgentGov_Admin_Access` custom permission that allows reading any agent through the REST API |
-| `AgentGov_User`      | People who only need to watch the dashboards           | Read-only on the AgentGov objects and every field the dashboards show, all tabs, and the dashboard controller. The API key and key hash fields are deliberately excluded            |
-| `AgentGov_Agent`     | The Salesforce user an AI agent runs as                | The two REST resources and nothing else. The framework records its own bookkeeping in system mode, so this user needs no access to AgentGov objects                                 |
-| `AgentGov_Operators` | Administrators, as a single assignment                 | A permission set group containing `AgentGov_Admin` and `AgentGov_User`                                                                                                              |
+| Grant                | Give it to                                             | What it allows                                                                                                                                                                                                                                                                                                           |
+| -------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AgentGov_Admin`     | Administrators who configure and operate the framework | Full access to the five AgentGov custom objects, with the audit, key, and bookkeeping fields read-only; all tabs; all Apex classes; the `AgentGov_Admin_Access` custom permission that allows reading any agent through the REST API; and both console permissions: `AgentGov_Operate_Agents` and `AgentGov_Manage_Keys` |
+| `AgentGov_User`      | People who only need to watch the dashboards           | Read-only on the AgentGov objects and every field the dashboards show, all tabs, and the dashboard controller. The API key and key hash fields are deliberately excluded                                                                                                                                                 |
+| `AgentGov_Responder` | On-call staff, together with `AgentGov_User`           | The console's actions on agents (reset breakers, activate and deactivate, end sessions, credit budgets, schedule jobs) through `AgentGov_Operate_Agents`, without the right to rotate API keys                                                                                                                           |
+| `AgentGov_Agent`     | The Salesforce user an AI agent runs as                | The two REST resources and nothing else. The framework records its own bookkeeping in system mode, so this user needs no access to AgentGov objects                                                                                                                                                                      |
+| `AgentGov_Operators` | Administrators, as a single assignment                 | A permission set group containing `AgentGov_Admin` and `AgentGov_User`                                                                                                                                                                                                                                                   |
 
 ```bash
 # The group, if you prefer one assignment for administrators
 sf org assign permset --name AgentGov_Operators --target-org agentgov
 ```
 
-**Confirm it worked.** Open the App Launcher and find the **AgentGov** app. It has six tabs:
-Dashboard, Agent Registrations, Governor Budgets, Agent Sessions, Agent Action Logs, and
-Agent Conflict Logs.
+**Confirm it worked.** Open the App Launcher and find the **AgentGov** app. Its navigation bar
+shows Home and six tabs: AgentGov Dashboard, Agent Registrations, Governor Budgets, Agent
+Sessions, Agent Action Logs, and Agent Conflict Logs. AgentGov Dashboard is the console, which
+says there are no agents yet.
 
 ```bash
 sf org open --target-org agentgov --path lightning/n/AgentGov_Dashboard
@@ -111,7 +123,9 @@ APEX
 Every field and its default is documented in the
 [Configuration Guide](configuration-guide.md). The one worth setting now is **Admin
 Notification Email**, because budget and circuit breaker alerts are emailed to it. Leave it
-blank and no emails are sent.
+blank and no administrator email is sent, though agent owners are still emailed about their own
+agents when **Notify Agent Owners** is checked. Every alert is recorded in the action log
+either way.
 
 **Confirm it worked.** The Custom Settings page shows your record at the organization level.
 
@@ -122,32 +136,27 @@ first use and breakers recover when an agent next calls. Schedule them anyway so
 dashboards stay accurate and logs do not grow without limit.
 
 ```bash
-sf apex run --target-org agentgov <<'APEX'
-System.schedule('AgentGov Daily Reset', '0 0 0 * * ?', new AgentGovDailyReset());
-System.schedule('AgentGov Health Check', '0 0 * * * ?', new AgentGovHealthCheck());
-System.schedule('AgentGov Cleanup', '0 0 2 ? * SUN', new AgentGovCleanup());
-APEX
+sf apex run --file scripts/setup/schedule-jobs.apex --target-org agentgov
 ```
 
-| Job                   | Runs            | Does                                                                               |
-| --------------------- | --------------- | ---------------------------------------------------------------------------------- |
-| AgentGov Daily Reset  | Midnight daily  | Creates today's budget row for every active agent                                  |
-| AgentGov Health Check | Hourly          | Moves OPEN circuit breakers to HALF_OPEN after their cooldown, ends stale sessions |
-| AgentGov Cleanup      | Sunday at 02:00 | Deletes action logs older than the retention period and records a summary          |
+The **Schedule jobs** button on the console's Setup tab does the same. Running either again
+replaces the jobs rather than duplicating them.
 
-**Confirm it worked.** Setup, **Scheduled Jobs** lists all three with a next run time.
+| Job                   | Runs            | Does                                                                                                        |
+| --------------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
+| AgentGov Daily Reset  | Midnight daily  | Creates today's budget row for every active agent                                                           |
+| AgentGov Health Check | Hourly          | Moves OPEN circuit breakers to HALF_OPEN after their cooldown, closes idle sessions                         |
+| AgentGov Cleanup      | Sunday at 02:00 | Deletes logs, conflicts, finished sessions, and budget rows past their retention, with a summary per object |
+
+**Confirm it worked.** The console's Setup tab, or Setup, **Scheduled Jobs**, lists all three
+with a next run time.
 
 > **Before you next deploy.** Salesforce refuses to deploy an Apex class that a scheduled
-> job refers to. When you upgrade AgentGov later, either tick **Allow deployments of
-> components when corresponding Apex jobs are pending or in progress** in Setup →
-> Deployment Settings, or cancel the jobs first and schedule them again afterwards:
+> job refers to. When you upgrade AgentGov later, remove the jobs first and schedule them
+> again afterwards. The script works whichever AgentGov version is installed:
 >
 > ```bash
-> sf apex run --target-org agentgov <<'APEX'
-> for (CronTrigger t : [SELECT Id FROM CronTrigger WHERE CronJobDetail.Name LIKE 'AgentGov%']) {
->     System.abortJob(t.Id);
-> }
-> APEX
+> sf apex run --file scripts/setup/unschedule-jobs.apex --target-org agentgov
 > ```
 
 ## Step 6. Load the sample data (optional)
@@ -159,8 +168,8 @@ real.
 sf apex run --file scripts/setup/load-sample-data.apex --target-org agentgov
 ```
 
-This creates five agents, today's budgets, sessions, 25 action logs, and three conflict
-logs. The sample agents use fixed API keys, `agk_sample_lead_enrichment_001` through
+This creates five agents, today's budgets, five sessions (three of them live), 25 action logs,
+three alerts, and three conflict logs. The sample agents use fixed API keys, `agk_sample_lead_enrichment_001` through
 `agk_sample_email_campaign_005`, stored hashed exactly as real keys are. They exist so you
 can try the REST endpoints in a sandbox or scratch org. **Never load sample data into
 production.**
@@ -179,8 +188,11 @@ APEX
 > org. Never run it against an org that holds anything you want to keep. It purges in bounded
 > passes, so repeat it until it returns 0.
 
-**Confirm it worked.** The AgentGov Dashboard shows five agents, budget bars, active
-sessions, and a conflict table.
+**Confirm it worked.** The console's Overview shows five agents, one of them needing attention
+for a half-open breaker, three live sessions, budget bars, and three recent alerts. Its
+Conflicts tab lists three conflicts. The **Agent Registrations** tab's **All** list view shows
+the five agents with their type, status, breaker state, and priority, and opening one shows its
+sessions, budgets, action logs, and conflicts beside its governance panel.
 
 ## Step 7. Verify the install
 
@@ -190,8 +202,11 @@ sf apex run test --target-org agentgov --test-level RunLocalTests \
 ```
 
 Every test must pass and org-wide coverage must be at least 85%, which is what CI enforces.
-The suite currently reports 237 tests and about 92% coverage. Every test must pass; a failure
-means the deploy is incomplete.
+The suite currently reports 303 tests and about 92% coverage. A failure means the deploy is
+incomplete.
+
+In a scratch org you can also run the end-to-end suite, which drives the deployed
+framework over real HTTP and in a browser. See the [Testing Guide](testing-guide.md).
 
 ---
 
@@ -213,7 +228,7 @@ For an Agentforce Agent User, or an integration user behind an External Client A
 ```bash
 sf apex run --target-org agentgov <<'APEX'
 AgentGov_Registration__c agent = AgentGovRegistryService.registerAgent(
-    'Lead Enrichment Agent',                    // name shown on the dashboards
+    'Account Research Agent',                   // name shown on the console
     AgentGovConstants.AGENT_TYPE_AGENTFORCE,    // Agentforce, MCP_External, Custom_Apex, Flow_Based
     'Enriches leads with firmographic data',    // description
     null,                                       // no API key
@@ -233,7 +248,7 @@ data the agent legitimately needs. The proxy enforces exactly that access and no
 ```bash
 sf apex run --target-org agentgov <<'APEX'
 AgentGov_Registration__c agent = AgentGovRegistryService.registerAgent(
-    'Data Sync MCP Agent', AgentGovConstants.AGENT_TYPE_MCP_EXTERNAL,
+    'Warehouse Sync MCP Agent', AgentGovConstants.AGENT_TYPE_MCP_EXTERNAL,
     'Synchronises accounts with the data warehouse', null, 'integrations@your-company.example'
 );
 String apiKey = AgentGovRegistryService.issueApiKey(agent.Id);
@@ -258,7 +273,7 @@ Agents can also rotate their own key through `POST /agentgov/rotate-key`.
 
 Open the agent's record and edit the **Budget Configuration** section. Defaults are 10,000
 API calls, 5,000 SOQL queries, and 3,000 DML operations per day. **Priority** decides who
-wins a record conflict, where 1 is the highest.
+wins a record conflict: the lower number wins.
 
 Budgets are consumed in three ways, described in the README under _How Budget Tracking
 Works_: the governed proxy counts real records, `AgentGovContext` measures Apex usage, and
@@ -275,11 +290,17 @@ them.
 
 Rules worth knowing before you write your own:
 
-- An explicit deny always beats an allow.
-- If nothing matches, the action is **allowed**. Add a deny-all policy first if you want the
-  opposite posture.
-- `Field_Restrictions__c` and `Max_Records_Per_Transaction__c` are enforced by the proxy. A
-  request naming a restricted field is refused, not quietly trimmed.
+- Policies are default-allow and deny-wins. An action that no policy matches is **allowed**,
+  and any matching deny refuses it, even when an allow matches too. A deny-all policy (object
+  `*`, operation `*`) therefore refuses every action, including the ones you allow.
+- To restrict an agent type, add deny policies for the specific objects and operations it must
+  not use. An allow policy never refuses anything, so an allow list ("only these objects")
+  cannot be written with allow policies.
+- `Field_Restrictions__c` and `Max_Records_Per_Transaction__c` on matching allow policies apply
+  only to requests made through the proxy. A request naming a restricted field is refused, not
+  quietly trimmed. A `/query` limit above the cap is reduced to the cap, and a write with more
+  records than the cap is refused with `POLICY_VIOLATION`. Register Agent Action and
+  `/authorize` use only the allow or deny decision.
 - `Operation__c` must be one of `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`,
   `Flow_Trigger`, or `*`. `Read` is not an operation and will never match.
 
@@ -295,19 +316,26 @@ APEX
 ## Tune the limit thresholds
 
 **Setup → Custom Metadata Types → AgentGov Limit Config** holds one record per limit type
-with the warning, throttle, and block percentages. Defaults are 80, 90, and 95. A budget's
-status is the most severe status across all three limit types, and Blocked or Exhausted
-denies every operation until a credit or the daily reset.
+with the warning, throttle, and block percentages. Edit those records rather than adding more;
+only one active record per limit type is used. Defaults are 80, 90, and 95. A budget's status
+is the most severe status across all three limit types. Warning and Throttled raise an alert
+and still allow requests; Blocked or Exhausted denies every operation until a credit or the
+next budget day, which starts at midnight in the org's default time zone.
 
 ## Watch it run
 
-- **AgentGov Dashboard** shows agents, budgets, sessions, and conflicts, and refreshes by
-  itself when agents act.
+- **AgentGov Dashboard** is the console. Overview shows what needs attention, live sessions,
+  budget usage, and alerts; Agents, Activity, and Conflicts list them in full; Setup checks the
+  installation. It refreshes by itself when agents act, and people with the console
+  permissions act on agents from it.
+- **An agent's record page** shows its state, usage, credentials, actions, and recent
+  activity above the record details.
 - **Agent Action Logs** records every action, including denials. Rows with the action type
   `System` are the framework reporting about itself: alert delivery failures, purge
   summaries, and unhandled REST errors with their correlation id.
-- **Alert emails** go to `Admin_Notification_Email__c` whenever a budget crosses a threshold
-  or a circuit breaker trips.
+- **Alert emails** go to `Admin_Notification_Email__c`, and to each affected agent's owner
+  when `Notify_Agent_Owners__c` is checked, whenever a budget crosses a threshold or a circuit
+  breaker trips.
 - **Platform events** `AgentGov_Alert__e` and `AgentGov_Action_Event__e` are available to any
   subscriber, including Flows and Streaming API clients.
 
@@ -328,10 +356,19 @@ AgentGovRegistryService.deactivateAgent(agentId);
 APEX
 ```
 
-To stop **every** agent at once, uncheck **Is Enabled** in AgentGov Settings. That is the
-master kill switch: policy, budget, circuit-breaker and conflict checks are all bypassed and
-actions are allowed, so use it to unblock a migration, not as a security control. The audit
-trail keeps recording while the switch is off, so you can still see what ran during the window.
+To stop an agent, deactivate it (above, or **Deactivate** in the console). A deactivated
+agent is refused by the REST API (`/authorize`, `/report`, and `/rotate-key`), by every proxy
+endpoint, by the Register Agent Action and Report Agent Usage Flow actions, and by
+`AgentGovContext`. Apex that calls `AgentGovCircuitBreaker`, `AgentGovPolicyEngine`, or
+`AgentGovBudgetManager` directly must check the agent's `Status__c` itself, and Log Agent
+Action records rows for any agent.
+
+**Is Enabled** in AgentGov Settings does the opposite, and does not stop anything. Unchecking it
+is an emergency bypass: every entry point (REST, the proxy, the Flow actions, and
+`AgentGovContext`) skips the circuit breaker, policy, budget, and conflict checks and charges
+nothing. Every action is allowed, whatever the agent's breaker or budget state, except that a
+deactivated agent is still refused. Use it only to unblock a migration. The audit trail keeps
+recording, so you can see what ran during the window.
 
 ## Connect an external or MCP agent
 
@@ -342,10 +379,43 @@ and the error codes.
 
 ---
 
+## Upgrading from v1.2
+
+1. Remove the scheduled jobs, because Salesforce refuses to deploy a class a scheduled job
+   uses:
+
+   ```bash
+   sf apex run --file scripts/setup/unschedule-jobs.apex --target-org agentgov
+   ```
+
+   The script also removes copies you scheduled under names of your own, such as a second
+   health check at half past the hour, because those block the deploy too. Its log lists every
+   job it removed.
+
+2. Deploy this version.
+3. Give on-call staff `AgentGov_Responder` if they should act on agents from the console.
+   `AgentGov_Admin` already includes both new console permissions.
+4. Schedule the jobs again:
+
+   ```bash
+   sf apex run --file scripts/setup/schedule-jobs.apex --target-org agentgov
+   ```
+
+   Then recreate any copies of your own that step 1 listed.
+
+Read the **Breaking and behavior changes** in [CHANGELOG.md](../CHANGELOG.md) first. The ones
+most likely to affect you: sessions now open and close automatically, budget days follow the
+org's time zone, and a user bound to several agents must send a key.
+
 ## Upgrading from v1.1
 
+Follow these steps, which also bring you through v1.2, then the v1.2 steps above.
+`npm run e2e:upgrade` rehearses the whole path in a scratch org.
+
 1. **If your org ever created duplicate daily budget rows, run this first.** v1.2 adds a
-   unique key that cannot deploy while duplicates exist.
+   unique key to budget rows. It deploys over existing duplicates, but a later write to a
+   duplicate row is rejected once the other row of its pair carries the key. The script merges
+   each duplicate group into its oldest row; run it again until it reports that none remain.
 
    ```bash
    sf apex run --file scripts/migrate/dedupe-budgets.apex --target-org agentgov
@@ -354,18 +424,14 @@ and the error codes.
 2. **Clear the scheduled jobs.** Salesforce refuses to deploy an Apex class that a scheduled
    job refers to, and a v1.1 install following this guide will have three of them. Either tick
    **Allow deployments of components when corresponding Apex jobs are pending or in progress**
-   in Setup, Deployment Settings, or cancel them and schedule them again after the deploy:
+   in Setup, Deployment Settings, or remove them and schedule them again after the deploy:
 
    ```bash
-   sf apex run --target-org agentgov <<'APEX'
-   for (CronTrigger t : [SELECT Id FROM CronTrigger WHERE CronJobDetail.Name LIKE 'AgentGov%']) {
-       System.abortJob(t.Id);
-   }
-   APEX
+   sf apex run --file scripts/setup/unschedule-jobs.apex --target-org agentgov
    ```
 
-3. Deploy v1.2 and assign permission sets as in Part 1. Re-schedule the jobs afterwards using
-   the commands in Part 1, Step 5.
+3. Deploy and assign permission sets as in Part 1. Schedule the jobs again afterwards using
+   the command in Part 1, Step 5.
 
 4. Move any remaining plaintext API keys to hashed storage. Keys are also upgraded
    automatically the first time each agent connects, so this is optional but tidy.
@@ -375,8 +441,9 @@ and the error codes.
    ```
 
 5. Update your REST clients. Two changes break v1.1 callers:
-   - Send the API key in the `X-AgentGov-Key` header. The body `apiKey` still works and every
-     response says so, but it is removed in v1.3.
+   - Send the API key in the `X-AgentGov-Key` header. The body `apiKey` still works, and every
+     successful response to a request that used it carries a `deprecation` notice, but it is
+     removed in v1.4.
    - `/agentgov-proxy/query` no longer accepts SOQL. Send `objectName`, `fields`, and
      optional `where`, `orderBy`, and `limit`.
 

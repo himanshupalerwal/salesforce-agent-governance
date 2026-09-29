@@ -20,6 +20,93 @@ private class AgentGovSampleDataTest {
         Assert.isTrue([SELECT COUNT() FROM AgentGov_Session__c] > 0, 'Sample sessions are created');
         Assert.isTrue([SELECT COUNT() FROM AgentGov_Action_Log__c] > 0, 'Sample action logs are created');
         Assert.isTrue([SELECT COUNT() FROM AgentGov_Conflict_Log__c] > 0, 'Sample conflicts are created');
+        Assert.isTrue(
+            [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_ALERT] > 0,
+            'Sample alerts are created, so the console shows recent alerts'
+        );
+    }
+
+    @IsTest
+    static void sampleSessionsIncludeLiveOnesTheConsoleLists() {
+        Test.startTest();
+        AgentGovSampleData.createAll();
+        Test.stopTest();
+
+        DateTime idleCutoff = DateTime.now().addMinutes(-AgentGovConstants.DEFAULT_SESSION_IDLE_MINUTES);
+        Integer live = [
+            SELECT COUNT()
+            FROM AgentGov_Session__c
+            WHERE Status__c = :AgentGovConstants.SESSION_ACTIVE AND Last_Activity__c > :idleCutoff
+        ];
+        Assert.isTrue(live > 0, 'Sample data shows live sessions on the console, not sessions already idle');
+        Assert.areEqual(
+            0,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Session__c
+                WHERE Status__c != :AgentGovConstants.SESSION_ACTIVE AND Session_End__c = NULL
+            ],
+            'Every finished sample session has an end time'
+        );
+    }
+
+    @IsTest
+    static void sampleConflictsAreOnesTheResolverRecords() {
+        Test.startTest();
+        AgentGovSampleData.createAll();
+        Test.stopTest();
+
+        // The only combinations AgentGovConflictResolver writes, so the demonstration shows
+        // outcomes a real org can produce.
+        Set<String> recorded = new Set<String>{
+            String.join(
+                new List<String>{
+                    AgentGovConstants.CONFLICT_PRIORITY_OVERRIDE,
+                    AgentGovConstants.RESOLUTION_AGENT1_WON,
+                    AgentGovConstants.SEVERITY_MEDIUM
+                },
+                '/'
+            ),
+            String.join(
+                new List<String>{
+                    AgentGovConstants.CONFLICT_CONCURRENT_WRITE,
+                    AgentGovConstants.RESOLUTION_AGENT2_WON,
+                    AgentGovConstants.SEVERITY_MEDIUM
+                },
+                '/'
+            ),
+            String.join(
+                new List<String>{
+                    AgentGovConstants.CONFLICT_LOCK_CONTENTION,
+                    AgentGovConstants.RESOLUTION_FAILED,
+                    AgentGovConstants.SEVERITY_HIGH
+                },
+                '/'
+            )
+        };
+        List<AgentGov_Conflict_Log__c> conflicts = [
+            SELECT Conflict_Type__c, Resolution__c, Severity__c, Agent_1__r.Priority__c, Agent_2__r.Priority__c
+            FROM AgentGov_Conflict_Log__c
+        ];
+        Assert.isFalse(conflicts.isEmpty(), 'Sample conflicts are created');
+        for (AgentGov_Conflict_Log__c conflict : conflicts) {
+            String outcome = String.join(
+                new List<String>{ conflict.Conflict_Type__c, conflict.Resolution__c, conflict.Severity__c },
+                '/'
+            );
+            Assert.isTrue(recorded.contains(outcome), 'The resolver never records ' + outcome);
+            if (conflict.Resolution__c == AgentGovConstants.RESOLUTION_AGENT1_WON) {
+                Assert.isTrue(
+                    conflict.Agent_1__r.Priority__c < conflict.Agent_2__r.Priority__c,
+                    'An override goes to the agent with the better priority: ' + outcome
+                );
+            } else if (conflict.Resolution__c == AgentGovConstants.RESOLUTION_AGENT2_WON) {
+                Assert.isTrue(
+                    conflict.Agent_2__r.Priority__c <= conflict.Agent_1__r.Priority__c,
+                    'A refused request comes from an agent with no better priority than the holder: ' + outcome
+                );
+            }
+        }
     }
 
     @IsTest

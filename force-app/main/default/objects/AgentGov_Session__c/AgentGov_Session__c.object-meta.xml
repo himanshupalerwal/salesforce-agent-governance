@@ -4,9 +4,18 @@
         <actionName>Accept</actionName>
         <type>Default</type>
     </actionOverrides>
+    <actionOverrides>
+        <actionName>View</actionName>
+        <comment>Opens the session's details with its action log, without an activity timeline.</comment>
+        <content>AgentGov_Session_Record_Page</content>
+        <formFactor>Large</formFactor>
+        <skipRecordTypeSelect>false</skipRecordTypeSelect>
+        <type>Flexipage</type>
+    </actionOverrides>
+    <compactLayoutAssignment>AgentGov_Session_Highlights</compactLayoutAssignment>
     <deploymentStatus>Deployed</deploymentStatus>
     <description>Tracks active agent sessions with start/end times and resource consumption.</description>
-    <enableActivities>true</enableActivities>
+    <enableActivities>false</enableActivities>
     <enableBulkApi>true</enableBulkApi>
     <enableReports>true</enableReports>
     <enableSearch>true</enableSearch>
@@ -19,6 +28,20 @@
         <type>AutoNumber</type>
     </nameField>
     <pluralLabel>Agent Sessions</pluralLabel>
+    <searchLayouts>
+        <customTabListAdditionalFields>Agent_Registration__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Status__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Session_Start__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Last_Activity__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>End_Reason__c</customTabListAdditionalFields>
+        <customTabListAdditionalFields>Actions_Count__c</customTabListAdditionalFields>
+        <lookupDialogsAdditionalFields>Agent_Registration__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Status__c</lookupDialogsAdditionalFields>
+        <lookupDialogsAdditionalFields>Session_Start__c</lookupDialogsAdditionalFields>
+        <searchResultsAdditionalFields>Agent_Registration__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Status__c</searchResultsAdditionalFields>
+        <searchResultsAdditionalFields>Session_Start__c</searchResultsAdditionalFields>
+    </searchLayouts>
     <sharingModel>ControlledByParent</sharingModel>
     <visibility>Public</visibility>
 </CustomObject>
