@@ -33,3 +33,6 @@ coverage/
 # Misc
 .config
 retrieve-temp/
+
+# End-to-end suite output (results, screenshots) stays local
+e2e/results/
