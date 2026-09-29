@@ -1,12 +1,14 @@
 'use strict';
 
 /**
- * ESLint flat configuration for the AgentGov Lightning Web Components.
+ * ESLint flat configuration for the AgentGov Lightning Web Components and the
+ * end-to-end suite.
  *
  * Component sources use the Salesforce-recommended LWC rule set. Jest specs
  * and the shared Jest mocks additionally receive the Jest and Node globals,
  * and the wire-adapter rule is relaxed for specs because they exercise wire
- * adapters through the test utilities rather than real adapters.
+ * adapters through the test utilities rather than real adapters. The
+ * end-to-end suite is plain Node ES modules checked with the recommended rules.
  */
 const { defineConfig } = require('eslint/config');
 const eslintJs = require('@eslint/js');
@@ -41,5 +43,17 @@ module.exports = defineConfig([
             ecmaVersion: 'latest',
             globals: { ...globals.node, ...globals.browser, ...globals.jest }
         }
+    },
+    {
+        files: ['e2e/**/*.mjs'],
+        extends: [eslintJs.configs.recommended],
+        languageOptions: {
+            sourceType: 'module',
+            ecmaVersion: 'latest',
+            globals: { ...globals.node }
+        }
+    },
+    {
+        ignores: ['e2e/results/**']
     }
 ]);
