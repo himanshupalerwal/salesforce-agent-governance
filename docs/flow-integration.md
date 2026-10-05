@@ -10,13 +10,13 @@ All five actions are bulk-safe: a Flow that submits 200 requests in one batch ca
 
 All actions appear in Flow Builder under the **AgentGov** category when you add an Action element. The tables below give each variable's label as Flow Builder shows it; a formula or merge field refers to an output by its API name, such as `{!Register_Agent_Action.authorized}`, as the examples do.
 
-| Action Label              | Apex Class               | Description                                                      |
-| ------------------------- | ------------------------ | ---------------------------------------------------------------- |
-| **Register Agent Action** | `AgentGovRegisterAction` | All-in-one: checks policy, consumes budget, logs action          |
-| **Check Agent Budget**    | `AgentGovCheckBudget`    | Read-only budget status check                                    |
-| **Get Agent Status**      | `AgentGovGetStatus`      | Health and circuit breaker state                                 |
-| **Log Agent Action**      | `AgentGovLogAction`      | Records an action for audit logging                              |
-| **Report Agent Usage**    | `AgentGovReportUsage`    | Reports actual resource consumption for accurate budget tracking |
+| Action Label              | Apex Class               | Description                                                                 |
+| ------------------------- | ------------------------ | --------------------------------------------------------------------------- |
+| **Register Agent Action** | `AgentGovRegisterAction` | All-in-one: checks policy, consumes budget, logs action                     |
+| **Check Agent Budget**    | `AgentGovCheckBudget`    | Budget status check; consumes no budget                                     |
+| **Get Agent Status**      | `AgentGovGetStatus`      | Health and circuit breaker state                                            |
+| **Log Agent Action**      | `AgentGovLogAction`      | Records an action for audit, and the work's outcome for the circuit breaker |
+| **Report Agent Usage**    | `AgentGovReportUsage`    | Reports actual resource consumption for accurate budget tracking            |
 
 ---
 
@@ -24,26 +24,27 @@ All actions appear in Flow Builder under the **AgentGov** category when you add 
 
 This is the most commonly used action. It runs the full governance pipeline in a single call:
 
-1. Checks if the framework is enabled. While it is not (`Is_Enabled__c` unchecked), every request is authorized with Budget Status `Bypassed` and audited, except that a deactivated agent is still refused.
-2. Refuses a deactivated agent, and an action type it does not recognise
-3. Validates the circuit breaker state, admitting a single probe while the breaker is half-open
+1. Checks if the framework is enabled. While it is not (`Is_Enabled__c` unchecked), every request is authorized with Budget Status `Bypassed` and audited, except that a deactivated agent is still refused, and so is a request whose Agent Registration ID names no agent, which is not logged.
+2. Refuses a deactivated agent, an action type it does not recognise, and an Agent Registration ID that names no agent. An unrecognised or blank action type is audited as a `System` row with the reason `Invalid action type: <value>`, linked to the agent; an ID that names no agent leaves no audit row, as there is no agent to record it against
+3. Asks the circuit breaker. An OPEN breaker refuses until its cooldown has passed; then the agent's first request in the batch is admitted as the breaker's single probe, and the breaker stays HALF_OPEN until the outcome of that work is logged. A request the breaker refuses gets the Denial Reason `Circuit breaker is OPEN. Agent is temporarily disabled.`
 4. Evaluates policies for the agent type, object, and operation
 5. Resolves record conflicts between agents in the batch
 6. Consumes governor budget and records the requests on the agent's session
-7. Logs every request, authorized or refused
-8. Records a success on the circuit breaker for each authorized request
+7. Logs every request for a known agent, authorized or refused
 
-Register Agent Action runs before the Flow does its work, so it can only record that the request was admitted. Log Agent Action reports the status it logs: a `Failure` counts as a failure and a `Success` as a success, so a Flow that logs the outcome of its work trips its breaker after the configured number of failures and closes a half-open one with its next success. One batch is one outcome per agent, and a failure anywhere in the batch counts as a failure. `Denied` and `Throttled` count for nothing, Report Agent Usage records no outcome, and nothing is recorded for a deactivated agent or while governance is switched off.
+Register Agent Action records no outcome on the circuit breaker: it runs before the work, so there is nothing yet to report. A Flow agent follows the same pattern as a REST agent that calls `/authorize`, does the work, and calls `/report`: **Register Agent Action**, then the work, then **Log Agent Action** with `Success` or `Failure`. The logged outcome is what trips the breaker after the configured number of consecutive failures, and once the cooldown has passed it is the outcome logged for the probe that closes the breaker (`Success`) or re-opens it for twice the cooldown (`Failure`). If the work was refused, log it as `Denied`, not `Failure`: a refusal says nothing about the agent's health. [Log Agent Action](#log-agent-action) describes how each status counts.
+
+A Flow that authorizes but never logs gives the breaker no outcomes. If the breaker trips on outcomes recorded elsewhere for the same agent, such a Flow never resolves its probe: Register Agent Action admits one request per cooldown window until a `Success` is logged or someone resets the breaker.
 
 ### Input Variables
 
-| Variable              | Type | Required | Description                                                                                                                                              |
-| --------------------- | ---- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Agent Registration ID | Id   | Yes      | The agent's registration record ID                                                                                                                       |
-| Action Type           | Text | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger`                                                                           |
-| Object Name           | Text | Yes      | Salesforce object API name (e.g., `Lead`, `Case`)                                                                                                        |
-| Record ID             | Text | No       | The specific record being acted upon                                                                                                                     |
-| Correlation ID        | Text | No       | Stored on the audit rows so they can be traced, for example `{!$Flow.InterviewGuid}`. Flow runs batched into one transaction share the first id supplied |
+| Variable              | Type | Required | Description                                                                                                                                                                                                                                |
+| --------------------- | ---- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Agent Registration ID | Id   | Yes      | The agent's registration record ID                                                                                                                                                                                                         |
+| Action Type           | Text | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger`                                                                                                                                                             |
+| Object Name           | Text | Yes      | Salesforce object API name (e.g., `Lead`, `Case`)                                                                                                                                                                                          |
+| Record ID             | Text | No       | The specific record being acted upon                                                                                                                                                                                                       |
+| Correlation ID        | Text | No       | Stored on the audit rows so they can be traced, for example `{!$Flow.InterviewGuid}`. Every AgentGov action in one transaction uses the id of the first one that ran: the first id supplied in its batch, or a generated id if it had none |
 
 ### Output Variables
 
@@ -53,7 +54,7 @@ Register Agent Action runs before the Flow does its work, so it can only record 
 | Budget Status | Text    | `Normal`, `Warning`, `Throttled`, or `Bypassed` |
 | Denial Reason | Text    | Reason for denial (empty if authorized)         |
 
-When several requests in one batch belong to the same agent and their combined consumption would exceed its budget, every request for that agent is denied, so the outcome does not depend on the order of the batch.
+When several requests in one batch belong to the same agent and their combined consumption would take its budget to `Blocked` or `Exhausted` (from 95% of an allocation by default), every request for that agent is denied, so the outcome does not depend on the order of the batch. As with any request that crosses the line, the consumption is still recorded.
 
 When several agents in one batch name the same record, the agent with the best priority (the lowest number) keeps the record and the others are refused with a reason that names the winner, including an agent that claimed the record first and was then overridden. Between agents of equal priority, the request that comes first in the batch keeps the record. Every agent is registered with `Default_Agent_Priority__c` (5 unless changed), so set priorities on the agents whose order matters. Each conflict is recorded in the Conflict Log.
 
@@ -70,12 +71,15 @@ When several agents in one batch name the same record, the agent with the best p
 3. **Decision:** Is Authorized?
    - If `{!Register_Agent_Action.authorized}` = true: Proceed with case routing logic
    - If `{!Register_Agent_Action.authorized}` = false: Create a Task for admin review with `{!Register_Agent_Action.denialReason}`
+4. **Action:** Log Agent Action, on the authorized path after the routing logic
+   - Agent Registration ID, Action Type, Object Name and Record ID: as in step 2
+   - Status: `Success` if the routing worked, `Failure` if it failed, so the agent's circuit breaker sees how the work went
 
 ---
 
 ## Check Agent Budget
 
-A read-only check that does not consume budget. Use this when you need to know budget status before committing to an expensive operation.
+A check that does not consume budget; it creates today's budget row if the agent has none yet. Use this when you need to know budget status before committing to an expensive operation.
 
 ### Input Variables
 
@@ -109,7 +113,7 @@ A read-only check that does not consume budget. Use this when you need to know b
 
 ## Get Agent Status
 
-Retrieves the health status of an agent, including circuit breaker state. Use this for monitoring dashboards or before delegating work to an agent.
+Retrieves the health status of an agent, including circuit breaker state. Use it to show an agent's state or to choose between agents, not to decide whether to call Register Agent Action: an agent whose breaker has tripped recovers only through the probe request that Register Agent Action admits once the cooldown has passed, so a Flow that skips unhealthy agents keeps a tripped agent blocked until someone resets its breaker.
 
 ### Input Variables
 
@@ -128,36 +132,42 @@ Retrieves the health status of an agent, including circuit breaker state. Use th
 | Failure Count         | Number  | Current consecutive failure count                      |
 | Error Message         | Text    | Error details if the check failed                      |
 
-### Example: Agent Health Gate
+### Example: Agent Health Notice
 
-**Scenario:** Before routing a Case to an AI agent, verify the agent is healthy.
+**Scenario:** A Screen Flow for supervisors shows whether the case-routing agent is healthy.
 
 1. **Action:** Get Agent Status
    - Agent Registration ID: `{!varCaseRoutingAgentId}`
-2. **Decision:** Is agent healthy?
-   - If `{!Get_Agent_Status.isHealthy}` = true: Route case to the AI agent
-   - If not healthy: Route case to a human queue instead
+2. **Screen:** Show `{!Get_Agent_Status.agentStatus}` and `{!Get_Agent_Status.circuitBreakerState}`, and a warning when `{!Get_Agent_Status.isHealthy}` is false
+
+To decide where to route a case, call Register Agent Action and branch on its Authorized output, as in [Pattern 2](#pattern-2-fallback-to-human).
 
 ---
 
 ## Log Agent Action
 
-Records an agent action for audit purposes without running governance checks. Use this when you have already performed governance checks separately, or for logging informational events.
+Records an agent action in the audit log without running governance checks. Its main use is after the work that Register Agent Action authorized: logging `Success` or `Failure` tells the agent's circuit breaker how the work went. It also records informational events.
 
 ### Input Variables
 
-| Variable              | Type   | Required | Description                                                                                 |
-| --------------------- | ------ | -------- | ------------------------------------------------------------------------------------------- |
-| Agent Registration ID | Id     | Yes      | The agent's registration record ID                                                          |
-| Action Type           | Text   | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger`              |
-| Object Name           | Text   | No       | Salesforce object API name                                                                  |
-| Record ID             | Text   | No       | The specific record acted upon                                                              |
-| Status                | Text   | Yes      | `Success`, `Failure`, `Denied`, or `Throttled`                                              |
-| Details               | Text   | No       | Additional context or error details                                                         |
-| Execution Time (ms)   | Number | No       | How long the action took, when the Flow measured it                                         |
-| Correlation ID        | Text   | No       | Stored on the audit row; Flow runs batched into one transaction share the first id supplied |
+| Variable              | Type   | Required | Description                                                                                                                               |
+| --------------------- | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Agent Registration ID | Id     | Yes      | The agent's registration record ID                                                                                                        |
+| Action Type           | Text   | Yes      | `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, or `Flow_Trigger`                                                            |
+| Object Name           | Text   | No       | Salesforce object API name                                                                                                                |
+| Record ID             | Text   | No       | The specific record acted upon                                                                                                            |
+| Status                | Text   | Yes      | `Success`, `Failure`, `Denied`, or `Throttled`                                                                                            |
+| Details               | Text   | No       | Additional context or error details                                                                                                       |
+| Execution Time (ms)   | Number | No       | How long the action took, when the Flow measured it                                                                                       |
+| Correlation ID        | Text   | No       | Stored on the audit row; every AgentGov action in one transaction uses the id of the first one that ran, or a generated id if it had none |
 
-A `Failure` logged here counts toward the agent's circuit breaker, and a `Success` clears its run of failures or closes a half-open breaker. `Denied` and `Throttled` are recorded for audit only.
+`Success` and `Failure` are the outcomes the circuit breaker counts, one per agent per batch; a `Failure` anywhere in the batch makes the batch a failure.
+
+- On a closed breaker, a `Failure` adds to the agent's run of consecutive failures and trips the breaker at the configured threshold (5 by default); a `Success` clears the run.
+- On a half-open breaker, the outcome logged for the probe resolves it: `Success` closes the breaker and returns the agent to Active, `Failure` re-opens it for twice the cooldown.
+- On an open breaker, outcomes are ignored: logging does not extend the cooldown, and a `Success` does not close it.
+- `Denied` and `Throttled` are recorded for audit only, so log work that was refused as `Denied`.
+- No outcome is recorded for a deactivated agent, or while governance is switched off. The row itself is still written.
 
 ### Output Variables
 
@@ -175,14 +185,12 @@ A `Failure` logged here counts toward the agent's circuit breaker, and a `Succes
 A Screen Flow that lets a user trigger an AI agent action:
 
 1. Screen: User selects action and target record
-2. Action: Get Agent Status (verify health)
-3. Decision: Healthy?
-4. Action: Check Agent Budget (verify budget)
-5. Decision: Has budget?
-6. Action: Register Agent Action (authorize and log)
-7. Decision: Authorized?
-8. Custom logic: Perform the agent's work
-9. Action: Log Agent Action (log completion)
+2. Action: Register Agent Action (checks the circuit breaker, policy, conflicts, and budget, and logs the request)
+3. Decision: Authorized? If not, show `{!Register_Agent_Action.denialReason}` to the user
+4. Custom logic: Perform the agent's work
+5. Action: Log Agent Action with `Success` or `Failure`, the outcome the circuit breaker counts
+
+Register Agent Action makes every check itself, so the Flow needs no separate status or budget check before it; one would also keep a tripped agent from ever being probed.
 
 ### Pattern 2: Fallback to Human
 
@@ -190,20 +198,21 @@ When an agent is blocked or over budget, fall back to a human:
 
 1. Action: Register Agent Action
 2. Decision: Authorized?
-   - Yes: Agent processes automatically
+   - Yes: Agent processes automatically, then Log Agent Action with `Success` or `Failure`
    - No: Create Task assigned to human queue with denial reason
 
 ### Pattern 3: Multi-Agent Orchestration
 
 When a Flow needs to choose between multiple agents:
 
-1. Action: Get Agent Status (Agent A)
-2. Action: Get Agent Status (Agent B)
-3. Decision: Which agent is healthy?
-   - Both healthy: Check budgets, use the one with more remaining
-   - Only A healthy: Use Agent A
-   - Only B healthy: Use Agent B
-   - Neither healthy: Escalate to human
+1. Optionally, Check Agent Budget for Agent A and Agent B to decide which to try first, for example the one with more remaining
+2. Action: Register Agent Action for the preferred agent
+3. Decision: Authorized?
+   - Yes: That agent does the work, then Log Agent Action with `Success` or `Failure` for it
+   - No: Register Agent Action for the other agent, and do the same if it is authorized
+4. If neither is authorized: Escalate to a human with both denial reasons
+
+Trying each agent through Register Agent Action, rather than skipping one that Get Agent Status reports as unhealthy, is what lets a tripped agent be probed and recover. A request refused by the breaker, a policy, or a conflict is not charged; one refused for budget still records its consumption.
 
 ---
 
@@ -229,7 +238,7 @@ Output:
   - Error Message → {!varErrorMessage}          (Text, set when the report is refused or the budget is exceeded)
 ```
 
-Usage reported for the same agent by several requests in one batch is summed and charged once.
+Usage reported for the same agent by several requests in one batch is summed and charged once. A report records no circuit-breaker outcome; log how the work went with Log Agent Action.
 
 A report is refused, and nothing is charged, when the Agent Registration ID is missing or names no agent, when the agent is deactivated (`Agent is not in Active status.`), or when a count is negative (`Usage counts must not be negative.`). While governance is switched off (`Is_Enabled__c` unchecked) nothing is charged either, and the Flow receives the agent's current budget.
 
@@ -258,6 +267,7 @@ A report is refused, and nothing is charged, when the Agent Registration ID is m
 
 - Store agent registration IDs in Custom Labels or Custom Settings for easy maintenance.
 - Prefer running Flow-based agents as a dedicated user bound to the registration (`Agent_User__c`); the framework records its bookkeeping in system mode, so that user needs only the `AgentGov_Agent` permission set for REST calls and no access to AgentGov objects for Flow actions.
-- Use the `Register Agent Action` for most cases -- it handles the full governance pipeline in one call.
+- Use the `Register Agent Action` for most cases -- it handles the full governance pipeline in one call. Follow the work with `Log Agent Action`, so that the circuit breaker learns how it went.
 - Use `Check Agent Budget` separately only when you need to make decisions based on remaining budget amounts.
+- Do not skip Register Agent Action because Get Agent Status reports an agent as unhealthy. A tripped breaker recovers through the probe that Register Agent Action admits after the cooldown, and the outcome you log for it.
 - `Denial Reason` (Register Agent Action) and `Error Message` (the other actions) say why a request was refused, so display or log them. The actions do not catch unexpected errors, which fault the Flow, so give each AgentGov action a fault path.

@@ -24,9 +24,9 @@ AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
 | -------------------------------------- | ----------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Is_Enabled__c`                        | Checkbox    | `true`  | Governance on or off. When unchecked, every entry point (REST, the proxy, the Flow actions, and `AgentGovContext`) skips the circuit breaker, policy, budget, and conflict checks and charges nothing. Every action is allowed and audited, except that a deactivated agent is still refused. This is an emergency bypass for data migrations, not a way to stop agents. To stop an agent, deactivate it. |
 | `Default_Agent_Priority__c`            | Number(2,0) | `5`     | Default priority assigned to newly registered agents. Priority decides record conflicts: the lower number wins. 1 (highest) to 10 (lowest) is a convention, not an enforced range; the field accepts any whole number of up to two digits.                                                                                                                                                                |
-| `Max_Concurrent_Agents__c`             | Number(3,0) | `10`    | Maximum number of agents that can be in Active status simultaneously. Prevents overwhelming the org with too many concurrent agents. Attempts to activate beyond this limit throw an error.                                                                                                                                                                                                               |
+| `Max_Concurrent_Agents__c`             | Number(3,0) | `10`    | Maximum number of agents in Active status. It is checked when an agent is activated: activating beyond the limit throws an error. An agent that returns to Active when its tripped breaker closes is not checked, so the count can briefly exceed the limit.                                                                                                                                              |
 | `Circuit_Breaker_Failure_Threshold__c` | Number(3,0) | `5`     | Number of consecutive failures before an agent's circuit breaker trips from CLOSED to OPEN.                                                                                                                                                                                                                                                                                                               |
-| `Circuit_Breaker_Cooldown_Minutes__c`  | Number(5,0) | `30`    | Minutes an agent remains in OPEN state before a single probe request is admitted. Doubles when the probe fails, capped at one day.                                                                                                                                                                                                                                                                        |
+| `Circuit_Breaker_Cooldown_Minutes__c`  | Number(5,0) | `30`    | Minutes an agent remains in OPEN state before a single probe request is admitted. A failed probe reopens the breaker for twice this value; it does not keep doubling on later failures. Every cooldown is capped at one day (1,440 minutes).                                                                                                                                                              |
 | `Log_Retention_Days__c`                | Number(4,0) | `90`    | Days to keep action logs, conflict logs, and finished sessions. The AgentGovCleanup job deletes older rows, one object after another.                                                                                                                                                                                                                                                                     |
 | `Budget_Retention_Days__c`             | Number(4,0) | `400`   | Days of daily budget rows to keep. They are the source of the console's usage history, so they are kept longer than logs by default.                                                                                                                                                                                                                                                                      |
 | `Session_Idle_Minutes__c`              | Number(4,0) | `30`    | Minutes without governed activity after which an agent's session closes. The agent's next governed call opens a new session. Values outside 1 to 1440 fall back to 30.                                                                                                                                                                                                                                    |
@@ -158,7 +158,7 @@ List<AgentGov_Policy__mdt> agentforcePolicies =
 
 | Field API Name                   | Type         | Description                                                                                                                                                                                          |
 | -------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Agent_Type__c`                  | Text(100)    | Agent type: `Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`, or `All`                                                                                                                      |
+| `Agent_Type__c`                  | Text(100)    | Agent type: the stored value (`Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`) or the label shown on records (MCP External, Custom Apex, Flow Based), in any letter case, or `All`         |
 | `Object_Name__c`                 | Text(255)    | Salesforce object API name (e.g., `Lead`, `Case`, `Account`) or `*` for all objects                                                                                                                  |
 | `Operation__c`                   | Text(100)    | Operation: `Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*` for all operations                                                                                    |
 | `Is_Allowed__c`                  | Checkbox     | `true` = allow, `false` = deny. **Explicit deny always overrides allow.**                                                                                                                            |
@@ -168,12 +168,12 @@ List<AgentGov_Policy__mdt> agentforcePolicies =
 
 ### Policy Evaluation Rules
 
-1. Policies are matched by `Agent_Type__c` (exact match or `All`).
-2. Within matching policies, `Object_Name__c` and `Operation__c` are checked (exact match or `*` wildcard).
+1. Policies are matched by `Agent_Type__c`, against the registration's stored agent type (`MCP_External`) or its label (`MCP External`), in any letter case, or `All` for every type. Text that names no agent type matches no agent, and the policy validation below reports it.
+2. Within matching policies, `Object_Name__c` and `Operation__c` are checked, in any letter case, or match anything with the `*` wildcard.
 3. **Explicit deny overrides explicit allow.** If any matching policy has `Is_Allowed__c = false`, the action is denied, even when an allow policy also matches.
 4. If no policies match, the action is **allowed by default**.
 5. Field restrictions and max records are collected from all matching allow policies, and only requests made through the proxy are held to them. Register Agent Action and `/authorize` use only the allow or deny decision. Apex that calls `AgentGovPolicyEngine.evaluatePolicy` directly can enforce them with `AgentGovPolicyEngine.assertFieldsAllowed` and `assertRecordCount`.
-6. `Operation__c` must be one of the action types (`Query`, not `Read`); `AgentGovPolicyEngine.validatePolicies()` reports anything else.
+6. `Operation__c` must be one of the action types, in any letter case (`Query` or `query`, not `Read`); `AgentGovPolicyEngine.validatePolicies()` reports anything else.
 
 Rules 3 and 4 make policies default-allow and deny-wins. An allow policy never refuses an action, so it cannot restrict an agent on its own, and an allow list ("only these objects") cannot be expressed. Restrict an agent type with deny policies for the objects and operations it must not use.
 
@@ -257,14 +257,14 @@ A proxy write with more than 200 records is denied with `POLICY_VIOLATION`, and 
 
 Beyond the org-level metadata, each agent has individual configuration on the `AgentGov_Registration__c` record:
 
-| Field                                          | Description                                                                                                                      |
-| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `Priority__c`                                  | Agent priority for conflict resolution; the lower number wins. 1 (highest) to 10 (lowest) is a convention, not an enforced range |
-| `Daily_API_Budget__c`                          | Daily API call budget (overrides metadata default)                                                                               |
-| `Daily_SOQL_Budget__c`                         | Daily SOQL query budget (overrides metadata default)                                                                             |
-| `Daily_DML_Budget__c`                          | Daily DML operation budget (overrides metadata default)                                                                          |
-| `Agent_User__c`                                | The Salesforce user the agent runs as; REST calls by that user authenticate without a key                                        |
-| `API_Key_Prefix__c`, `API_Key_Last_Rotated__c` | Read-only view of the current key (the key itself is stored only as a hash)                                                      |
+| Field                                          | Description                                                                                                                                                                                                             |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Priority__c`                                  | Agent priority for conflict resolution; the lower number wins. 1 (highest) to 10 (lowest) is a convention, not an enforced range                                                                                        |
+| `Daily_API_Budget__c`                          | Daily API call budget (overrides metadata default)                                                                                                                                                                      |
+| `Daily_SOQL_Budget__c`                         | Daily SOQL query budget (overrides metadata default)                                                                                                                                                                    |
+| `Daily_DML_Budget__c`                          | Daily DML operation budget (overrides metadata default)                                                                                                                                                                 |
+| `Agent_User__c`                                | The Salesforce user the agent runs as. REST and proxy calls by that user need no key while this is the only registration bound to the user; a user bound to several registrations must send the `X-AgentGov-Key` header |
+| `API_Key_Prefix__c`, `API_Key_Last_Rotated__c` | Read-only view of the current key (the key itself is stored only as a hash)                                                                                                                                             |
 
 To give a critical agent a larger budget, raise its allocations. A day's budget row copies the agent's allocations when the row is created, so new values apply from the next budget day, which starts at midnight in the org's default time zone. Today's row keeps the allocations it was created with.
 
@@ -302,6 +302,7 @@ if (!issues.isEmpty()) {
 
 This checks for:
 
+- Blank Agent_Type__c, or one that names no agent type (neither a stored value, a label, nor `All`)
 - Blank Object_Name__c
 - Blank Operation__c
 - Invalid operation values (not in the valid set and not a wildcard)
