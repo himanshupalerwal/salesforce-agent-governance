@@ -6,5 +6,5 @@
     <required>false</required>
     <externalId>false</externalId>
     <trackHistory>true</trackHistory>
-    <description>When the agent's API key was last issued or rotated.</description>
+    <description>When the agent's API key was last issued or rotated, or, for a key created before v1.2, converted to hashed storage.</description>
 </CustomField>

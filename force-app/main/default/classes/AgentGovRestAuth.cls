@@ -5,8 +5,8 @@
  *              1. An API key in the X-AgentGov-Key header (the legacy X-AgentGov-API-Key
  *                 header name is accepted as an alias).
  *              2. An API key in the request body's apiKey property. Supported for
- *                 compatibility with v1.1 clients, flagged as deprecated in every response,
- *                 and scheduled for removal in v1.4.
+ *                 compatibility with v1.1 clients, flagged as deprecated in every successful
+ *                 response, and scheduled for removal in v1.4.
  *              3. No key at all, when the running user is bound to a registration through
  *                 Agent_User__c. This is the intended path for Agentforce Agent Users and
  *                 External Client App integration users: the OAuth identity is the credential.
@@ -14,10 +14,11 @@
  *                 login alone cannot say which agent is calling.
  *
  *              Keys are never stored. Only a SHA-256 hash and a short identifying prefix are
- *              kept on the registration. Keys are 256 random bits, so the hash is not salted;
- *              the salt in a password hash defends against guessable inputs, and these are
- *              not guessable. Plaintext keys stored by releases before v1.2 are upgraded to
- *              hashed storage the first time they are presented.
+ *              kept on the registration. Generated keys are 256 random bits, so their hash is
+ *              not salted: a salt defends against guessable inputs. A key supplied at
+ *              registration is only required to be API_KEY_MINIMUM_LENGTH characters long, so
+ *              its strength is the caller's responsibility. Plaintext keys stored by releases
+ *              before v1.2 are upgraded to hashed storage the first time they are presented.
  *
  *              Security posture: inherited sharing. Reads go through AgentGovSelector and
  *              writes through AgentGovDml, both of which run in system mode.
@@ -30,7 +31,8 @@ public inherited sharing class AgentGovRestAuth {
      * @param request The current REST request
      * @param body The parsed JSON body, or null for requests without one
      * @return The calling agent's registration
-     * @throws AgentGovException AGENT_NOT_FOUND when no credential resolves to a registration
+     * @throws AgentGovException AGENT_NOT_FOUND when no credential resolves to a registration,
+     *         ACCESS_DENIED when no key is sent and the running user is bound to more than one
      */
     public static AgentGov_Registration__c resolveRegistration(RestRequest request, Map<String, Object> body) {
         bodyKeyUsed = false;
@@ -75,7 +77,8 @@ public inherited sharing class AgentGovRestAuth {
 
     /**
      * @description Ensures the agent may act. Active agents always may; Throttled agents may
-     *              when the caller allows it (the proxy does, so a half-open breaker can probe).
+     *              when the caller allows it. Blocked agents may not: /rotate-key uses this
+     *              stricter form, and governed calls use the three-argument form.
      * @param registration The resolved registration
      * @param allowThrottled Whether Throttled status is acceptable
      * @return The same registration, for chaining
@@ -92,10 +95,12 @@ public inherited sharing class AgentGovRestAuth {
      * @description Ensures an agent may make a governed call.
      * @param registration The resolved calling agent
      * @param allowThrottled Admit Throttled, the status a HALF_OPEN breaker carries
-     * @param allowBlockedProbe Admit Blocked when the circuit breaker says a probe is due.
-     *                          Tripping leaves an agent Blocked, so without this the status
-     *                          check refuses it before the breaker can readmit it and a
-     *                          REST-only agent never recovers. The breaker still decides
+     * @param allowBlockedProbe Admit Blocked. Callers pass true when the circuit breaker says a
+     *                          probe is due, and while governance is switched off, when the
+     *                          breaker is not consulted at all. Tripping leaves an agent
+     *                          Blocked, so without this the status check refuses it before
+     *                          the breaker can readmit it and a REST-only agent never
+     *                          recovers. When governance is on, the breaker still decides
      *                          whether this particular call is the single admitted probe.
      * @return The same registration once it is cleared to proceed
      * @throws AgentGovException AGENT_NOT_ACTIVE otherwise
@@ -137,17 +142,28 @@ public inherited sharing class AgentGovRestAuth {
         );
     }
 
-    /** @description True when the running user holds the AgentGov_Admin_Access custom permission. */
+    /**
+     * @description Reports whether the running user holds the AgentGov_Admin_Access custom
+     *              permission.
+     * @return True when the permission is held
+     */
     public static Boolean hasAdminAccess() {
         return FeatureManagement.checkPermission(AgentGovConstants.CUSTOM_PERMISSION_ADMIN_ACCESS);
     }
 
-    /** @description True when the most recent resolution used the deprecated body apiKey. */
+    /**
+     * @description Reports whether the most recent resolution used the deprecated body apiKey.
+     * @return True when the key came from the request body
+     */
     public static Boolean wasBodyKeyUsed() {
         return bodyKeyUsed;
     }
 
-    /** @description Generates a new random API key. The caller must hand it to the agent; it is never stored. */
+    /**
+     * @description Generates a new random API key. The caller must hand it to the agent; it is
+     *              never stored.
+     * @return The key: the agk_ prefix followed by 256 random bits in hex
+     */
     public static String generateKey() {
         return AgentGovConstants.API_KEY_PREFIX + EncodingUtil.convertToHex(Crypto.generateAesKey(256));
     }

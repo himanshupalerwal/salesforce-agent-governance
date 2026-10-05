@@ -50,7 +50,12 @@ public inherited sharing class AgentGovConflictResolver {
     }
 
     /**
-     * @description Checks whether another agent holds the record and resolves by priority.
+     * @description Claims a record for an agent in this transaction and resolves a clash by
+     *              priority. A free record is claimed and a record the agent already holds stays
+     *              its own. When another agent holds it, the agent with the lower priority number
+     *              takes it over and a tie leaves it with the holder; the clash, or an unknown
+     *              agent on either side, is recorded in the conflict log. Nothing is claimed or
+     *              recorded while conflict detection is switched off.
      * @param agentId The agent attempting the action
      * @param recordId The record being acted upon
      * @param objectName The object API name
@@ -129,8 +134,8 @@ public inherited sharing class AgentGovConflictResolver {
         } else {
             result.winningAgentId = lockHolderId;
             result.resolution = AgentGovConstants.RESOLUTION_AGENT2_WON;
-            // Refused, not queued: there is no queue, and saying otherwise told the caller to
-            // wait for a retry that would never happen.
+            // Reported as refused rather than queued: there is no queue, so nothing will retry
+            // the request on the caller's behalf.
             result.message =
                 'Record locked by ' +
                 lockHolder.Agent_Name__c +
@@ -158,7 +163,7 @@ public inherited sharing class AgentGovConflictResolver {
      * @param agentId The agent attempting the action
      * @param recordId The record being acted upon
      * @param objectName The object API name
-     * @throws AgentGovException RECORD_LOCKED when a higher-priority agent holds the record
+     * @throws AgentGovException RECORD_LOCKED when another agent keeps the record because its priority is better or equal, or when either agent is unknown
      */
     public static void assertNoConflict(Id agentId, String recordId, String objectName) {
         ConflictResult result = checkForConflict(agentId, recordId, objectName);

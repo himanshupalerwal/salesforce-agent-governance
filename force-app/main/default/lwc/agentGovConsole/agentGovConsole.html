@@ -6,7 +6,7 @@
 
         <lightning-tabset active-tab-value={activeTab}>
             <lightning-tab label="Overview" value="overview" onactive={handleTabActive}>
-                <c-agent-gov-overview ondrilldown={handleDrilldown}></c-agent-gov-overview>
+                <c-agent-gov-overview can-drill-down ondrilldown={handleDrilldown}></c-agent-gov-overview>
             </lightning-tab>
             <lightning-tab label="Agents" value="agents" onactive={handleTabActive}>
                 <c-agent-gov-agent-list

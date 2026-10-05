@@ -8,8 +8,11 @@
  *              AgentGov objects at all. Custom metadata is included on purpose: if policy
  *              records were read in user mode, a caller without field access would see
  *              blank policies and the policy engine would fall through to its default-allow
- *              path. Data that is presented to people in the dashboard is read through
- *              AgentGovDashboardController in user mode instead.
+ *              path. Records presented to people on the dashboard and in the console are read
+ *              in user mode through AgentGovDashboardController and AgentGovAdminController
+ *              instead. The configuration the console shows, such as the settings, scheduled
+ *              job status and policy problems on its setup checklist, is read here in system
+ *              mode, behind the AgentGov_Operate_Agents permission the controller checks.
  *
  *              Frequently used records are cached for the duration of the transaction.
  */
@@ -22,7 +25,11 @@ public without sharing class AgentGovSelector {
     private static Map<Id, AgentGov_Registration__c> cachedRegistrations = new Map<Id, AgentGov_Registration__c>();
     private static String cachedOrgTimeZone;
 
-    /** @description Retrieves the org-level AgentGov settings, with defaults when none are configured. Cached per transaction. */
+    /**
+     * @description Retrieves the org-level AgentGov settings, with defaults when none are
+     *              configured. Cached per transaction.
+     * @return The org defaults, or an unsaved record holding the framework defaults
+     */
     public static AgentGov_Settings__c getSettings() {
         if (cachedSettings == null) {
             cachedSettings = AgentGov_Settings__c.getOrgDefaults();
@@ -47,6 +54,7 @@ public without sharing class AgentGovSelector {
      * @description Returns the org's default time zone. Budget days are counted in it, so an
      *              agent's day does not depend on which user's session made the call. Cached
      *              per transaction.
+     * @return The time zone's Id, such as America/Los_Angeles
      */
     public static String getOrgTimeZone() {
         if (cachedOrgTimeZone == null) {
@@ -55,17 +63,27 @@ public without sharing class AgentGovSelector {
         return cachedOrgTimeZone;
     }
 
-    /** @description Checks whether the framework is enabled. An unset flag counts as enabled. */
+    /**
+     * @description Checks whether the framework is enabled. An unset flag counts as enabled.
+     * @return False only while Is_Enabled__c is unchecked
+     */
     public static Boolean isFrameworkEnabled() {
         return getSettings().Is_Enabled__c != false;
     }
 
-    /** @description Checks whether platform-event publishing is enabled. An unset flag counts as enabled. */
+    /**
+     * @description Checks whether platform-event publishing is enabled. An unset flag counts as
+     *              enabled.
+     * @return False only while Enable_Real_Time_Events__c is unchecked
+     */
     public static Boolean isRealTimeEventsEnabled() {
         return getSettings().Enable_Real_Time_Events__c != false;
     }
 
-    /** @description Retrieves all active limit configurations. Cached per transaction. */
+    /**
+     * @description Retrieves all active limit configurations. Cached per transaction.
+     * @return The AgentGov_Limit_Config__mdt records with Is_Active__c checked
+     */
     public static List<AgentGov_Limit_Config__mdt> getLimitConfigs() {
         if (cachedLimitConfigs == null) {
             cachedLimitConfigs = [
@@ -86,7 +104,11 @@ public without sharing class AgentGovSelector {
         return cachedLimitConfigs;
     }
 
-    /** @description Gets the limit configuration for a specific limit type, or null when none is defined. */
+    /**
+     * @description Gets the active limit configuration for a limit type.
+     * @param limitType One of the AgentGovConstants.LIMIT_* values
+     * @return The configuration, or null when none is defined
+     */
     public static AgentGov_Limit_Config__mdt getLimitConfigByType(String limitType) {
         for (AgentGov_Limit_Config__mdt config : getLimitConfigs()) {
             if (config.Limit_Type__c == limitType) {
@@ -96,7 +118,10 @@ public without sharing class AgentGovSelector {
         return null;
     }
 
-    /** @description Retrieves all policies. Cached per transaction. */
+    /**
+     * @description Retrieves all policies. Cached per transaction.
+     * @return Every AgentGov_Policy__mdt record
+     */
     public static List<AgentGov_Policy__mdt> getPolicies() {
         if (cachedPolicies == null) {
             cachedPolicies = [
@@ -117,18 +142,37 @@ public without sharing class AgentGovSelector {
         return cachedPolicies;
     }
 
-    /** @description Gets the policies that apply to an agent type, including policies for all types. */
+    /**
+     * @description Gets the policies that apply to an agent type, including policies for all
+     *              types. A policy may name the type by its stored value or by its label.
+     * @param agentType The Agent_Type__c stored on a registration
+     * @return The applicable policies
+     */
     public static List<AgentGov_Policy__mdt> getPoliciesForAgentType(String agentType) {
         List<AgentGov_Policy__mdt> applicable = new List<AgentGov_Policy__mdt>();
         for (AgentGov_Policy__mdt policy : getPolicies()) {
-            if (policy.Agent_Type__c == agentType || policy.Agent_Type__c == AgentGovConstants.POLICY_ALL) {
+            if (AgentGovPolicyEngine.appliesToAgentType(policy, agentType)) {
                 applicable.add(policy);
             }
         }
         return applicable;
     }
 
-    /** @description Retrieves an agent registration by Id. Cached per transaction. */
+    /**
+     * @description Replaces the policies read from custom metadata for the rest of the
+     *              transaction, so tests can evaluate policy records the org does not hold.
+     * @param policies In-memory policy records
+     */
+    @TestVisible
+    private static void usePolicies(List<AgentGov_Policy__mdt> policies) {
+        cachedPolicies = policies;
+    }
+
+    /**
+     * @description Retrieves an agent registration by Id. Cached per transaction.
+     * @param registrationId The agent registration Id
+     * @return The registration, or null when the Id is null or names none
+     */
     public static AgentGov_Registration__c getRegistrationById(Id registrationId) {
         if (registrationId == null) {
             return null;
@@ -194,8 +238,9 @@ public without sharing class AgentGovSelector {
     }
 
     /**
-     * @description Re-reads registrations with a row lock so that circuit-breaker state
-     *              transitions are serialized across concurrent transactions.
+     * @description Re-reads registrations with a row lock so that changes to them, such as
+     *              circuit-breaker transitions and activation or deactivation, are serialized
+     *              across concurrent transactions.
      * @param registrationIds Ids to lock
      * @return Map of Id to freshly read registration
      */
@@ -239,7 +284,11 @@ public without sharing class AgentGovSelector {
         return locked;
     }
 
-    /** @description Retrieves a registration by the SHA-256 hash of its API key. */
+    /**
+     * @description Retrieves a registration by the SHA-256 hash of its API key.
+     * @param apiKeyHash The hash in hex
+     * @return The registration, or null when the hash is blank or matches none
+     */
     public static AgentGov_Registration__c getRegistrationByApiKeyHash(String apiKeyHash) {
         if (String.isBlank(apiKeyHash)) {
             return null;
@@ -275,10 +324,12 @@ public without sharing class AgentGovSelector {
     }
 
     /**
-     * @description Retrieves the registration bound to a user, or null when the user is not an
-     *              agent. When the user is bound to several registrations this returns the most
-     *              recently modified one; AgentGovRestAuth uses getRegistrationIdsByAgentUser
-     *              instead so that it can refuse to guess.
+     * @description Retrieves the registration bound to a user. When the user is bound to
+     *              several registrations this returns the most recently modified one;
+     *              AgentGovRestAuth uses getRegistrationIdsByAgentUser instead so that it can
+     *              refuse to guess.
+     * @param userId The user to look up
+     * @return The registration, or null when the user is not bound to one
      */
     public static AgentGov_Registration__c getRegistrationByAgentUser(Id userId) {
         List<Id> ids = getRegistrationIdsByAgentUser(userId);
@@ -309,14 +360,20 @@ public without sharing class AgentGovSelector {
         return ids;
     }
 
-    /** @description Replaces the cached copy of a registration after the framework updates it. */
+    /**
+     * @description Replaces the cached copy of a registration after the framework updates it.
+     * @param registration The registration as written; ignored when it has no Id
+     */
     public static void cacheRegistration(AgentGov_Registration__c registration) {
         if (registration != null && registration.Id != null) {
             cachedRegistrations.put(registration.Id, registration);
         }
     }
 
-    /** @description Retrieves all registrations in Active status. */
+    /**
+     * @description Retrieves all registrations in Active status.
+     * @return The active registrations
+     */
     public static List<AgentGov_Registration__c> getActiveRegistrations() {
         return [
             SELECT
@@ -341,7 +398,10 @@ public without sharing class AgentGovSelector {
         ];
     }
 
-    /** @description Counts registrations in Active status. */
+    /**
+     * @description Counts registrations in Active status.
+     * @return The number of active registrations
+     */
     public static Integer getActiveAgentCount() {
         return [
             SELECT COUNT()
@@ -351,7 +411,11 @@ public without sharing class AgentGovSelector {
         ];
     }
 
-    /** @description Retrieves registrations whose breaker is OPEN and whose cooldown has elapsed. */
+    /**
+     * @description Retrieves registrations whose breaker is OPEN and whose cooldown has elapsed,
+     *              without a lock.
+     * @return The registrations due to move to HALF_OPEN
+     */
     public static List<AgentGov_Registration__c> getOpenAgentsPastCooldown() {
         DateTime now = DateTime.now();
         return [
@@ -404,7 +468,11 @@ public without sharing class AgentGovSelector {
         return budgets;
     }
 
-    /** @description Reads today's budget for one agent with a row lock, or null when none exists. */
+    /**
+     * @description Reads today's budget for one agent with a row lock.
+     * @param registrationId The agent registration Id
+     * @return Today's budget, or null when none exists
+     */
     public static AgentGov_Budget__c getTodaysBudgetForUpdate(Id registrationId) {
         return getTodaysBudgetsForUpdate(new Set<Id>{ registrationId }).get(registrationId);
     }
@@ -442,7 +510,11 @@ public without sharing class AgentGovSelector {
         return budgets;
     }
 
-    /** @description Reads today's budget for one agent without a lock, or null when none exists. */
+    /**
+     * @description Reads today's budget for one agent without a lock.
+     * @param registrationId The agent registration Id
+     * @return Today's budget, or null when none exists
+     */
     public static AgentGov_Budget__c getTodaysBudget(Id registrationId) {
         return getTodaysBudgets(new Set<Id>{ registrationId }).get(registrationId);
     }
@@ -523,7 +595,8 @@ public without sharing class AgentGovSelector {
     /**
      * @description Reads every active session of the given agents under a row lock. Used when
      *              an agent is deactivated, which must end all of its sessions, including any
-     *              duplicates left by releases before v1.3.
+     *              duplicates left by releases before v1.3, and when a caller starts a new
+     *              session explicitly, which ends the agent's current ones first.
      * @param registrationIds Agents whose sessions to read
      * @return The active sessions
      */
@@ -588,12 +661,20 @@ public without sharing class AgentGovSelector {
         ];
     }
 
-    /** @description Reads the most recent active session for an agent, or null. */
+    /**
+     * @description Reads the most recent active session for an agent.
+     * @param registrationId The agent registration Id
+     * @return The session, or null when the agent has no active session
+     */
     public static AgentGov_Session__c getActiveSession(Id registrationId) {
         return getActiveSessionsByAgent(new Set<Id>{ registrationId }).get(registrationId);
     }
 
-    /** @description Reads a session by Id, or null when it does not exist. */
+    /**
+     * @description Reads a session by Id.
+     * @param sessionId The session Id
+     * @return The session, or null when the Id is null or names none
+     */
     public static AgentGov_Session__c getSessionById(Id sessionId) {
         if (sessionId == null) {
             return null;
@@ -622,6 +703,8 @@ public without sharing class AgentGovSelector {
     /**
      * @description Reads sessions that have been active longer than the given number of hours.
      *              Kept for callers written against v1.2; the health check uses getStaleSessions.
+     * @param maxHours Sessions started more than this many hours ago are returned
+     * @return The active sessions older than the cutoff
      */
     public static List<AgentGov_Session__c> getOrphanedSessions(Integer maxHours) {
         DateTime cutoff = DateTime.now().addHours(-maxHours);
@@ -647,7 +730,12 @@ public without sharing class AgentGovSelector {
         ];
     }
 
-    /** @description Reads the most recent action logs for an agent. */
+    /**
+     * @description Reads the most recent action logs for an agent.
+     * @param registrationId The agent registration Id
+     * @param limitCount Most rows to return
+     * @return The agent's rows, newest first
+     */
     public static List<AgentGov_Action_Log__c> getRecentActionLogs(Id registrationId, Integer limitCount) {
         return [
             SELECT

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Max_Records_Per_Transaction__c</fullName>
-    <description>Maximum records this agent type can process per transaction</description>
+    <description>Most records one Governed Proxy request matched by this allow policy may touch: a create, update, upsert or delete with more records is refused, and a larger /query limit is reduced to this value. When several allow policies match, the lowest value applies. Only the Governed Proxy enforces it; Register Agent Action and /authorize do not.</description>
     <externalId>false</externalId>
     <fieldManageability>DeveloperControlled</fieldManageability>
     <label>Max Records Per Transaction</label>

@@ -33,9 +33,10 @@
             </template>
             <template lwc:else>
                 <template lwc:if={hasConflicts}>
-                    <p class="ag-meta slds-m-bottom_x-small">
-                        When two agents claim one record in the same request, the one with the higher priority goes
-                        ahead and the other is refused.
+                    <p class="ag-meta slds-m-bottom_x-small conflict-rule">
+                        When two agents claim one record in the same transaction, the one with the higher priority (the
+                        lower number) goes ahead and the other is refused. With equal priority, the agent that claimed
+                        the record first keeps it.
                     </p>
                     <div class={tableFrameClass}>
                         <lightning-datatable key-field="Id" data={conflicts} columns={columns} hide-checkbox-column>
@@ -47,8 +48,11 @@
                         <span class="ag-empty__icon">
                             <lightning-icon icon-name="utility:check" size="small"></lightning-icon>
                         </span>
-                        <p class="ag-empty__title">No conflicts</p>
-                        <p class="ag-empty__text">No two agents have claimed the same record at the same time.</p>
+                        <p class="ag-empty__title">No conflicts recorded</p>
+                        <p class="ag-empty__text">
+                            A conflict is recorded when two agents claim the same record in one Register Agent Action
+                            batch or one Apex transaction, while conflict detection is on in AgentGov Settings.
+                        </p>
                     </div>
                 </template>
             </template>

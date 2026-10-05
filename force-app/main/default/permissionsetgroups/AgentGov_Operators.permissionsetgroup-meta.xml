@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <PermissionSetGroup xmlns="http://soap.sforce.com/2006/04/metadata">
-    <description>Everything a person operating AgentGov needs: administrative access to the framework objects plus the dashboard permissions.</description>
+    <description>For administrators, as one assignment: AgentGov_Admin plus AgentGov_User, including every console action and API key rotation. Give on-call staff AgentGov_User and AgentGov_Responder instead.</description>
     <label>AgentGov Operators</label>
     <permissionSets>AgentGov_Admin</permissionSets>
     <permissionSets>AgentGov_User</permissionSets>

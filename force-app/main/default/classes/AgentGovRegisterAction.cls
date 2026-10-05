@@ -3,14 +3,20 @@
  *              breaker, policy, record conflicts, budget, and audit log. This is the primary
  *              entry point for Flow-based agents. When several agents in one batch name the
  *              same record, the agent with the best priority keeps it and the others are
- *              refused, whatever the order of the requests.
+ *              refused, whatever the order of the requests; between agents of equal priority,
+ *              the one whose request comes first in the batch keeps it. Every request for a
+ *              known agent is audited, authorized or refused, and one whose action type is not
+ *              recognised is recorded as System.
  *
  *              The action is bulk-safe. A Flow that submits 200 requests causes one
  *              registration query, one circuit-breaker pass, one budget consumption per
- *              agent, one event publish, and one breaker update. When several requests in a
- *              batch belong to one agent and their combined consumption exceeds its budget,
- *              every request for that agent is denied, so the outcome does not depend on
- *              the order of the batch.
+ *              agent, and one event publish. When several requests in a batch belong to one
+ *              agent and their combined consumption exceeds its budget, every request for
+ *              that agent is denied, so the outcome does not depend on the order of the batch.
+ *
+ *              Authorizing records no outcome for the circuit breaker, because the work has
+ *              not run yet. The Flow reports how it went with Log Agent Action, as a REST
+ *              agent does with /report, and that outcome is what trips or closes the breaker.
  *
  *              Security posture: with sharing. Framework bookkeeping runs in system mode
  *              through the service classes.
@@ -32,7 +38,7 @@ public with sharing class AgentGovRegisterAction {
         public String recordId;
         @InvocableVariable(
             label='Correlation ID'
-            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Flow runs batched into one transaction share the first id supplied.'
+            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Every AgentGov action in one transaction uses the id of the first one that ran, or a generated id if it had none.'
         )
         public String correlationId;
     }
@@ -82,7 +88,8 @@ public with sharing class AgentGovRegisterAction {
                 AgentGov_Registration__c registration = bypassed.get(requests[i].registrationId);
                 if (registration == null) {
                     // The switch suspends governance, not identity. An Id that resolves to no
-                    // registration is still refused, and the refusal still leaves a record.
+                    // registration is still refused; with no agent to attribute it to, no audit
+                    // row is written, as when governance is on.
                     deny(result, AgentGovConstants.ERR_AGENT_NOT_FOUND);
                     continue;
                 }
@@ -142,20 +149,17 @@ public with sharing class AgentGovRegisterAction {
                 deny(result, AgentGovConstants.ERR_AGENT_NOT_FOUND);
                 continue;
             }
-            // Deactivation refuses an agent on every entry point, this one as well as REST.
+            // Deactivation refuses an agent on every governed entry point, this one as well as REST.
             // Blocked and Throttled agents are decided by the circuit breaker below.
             if (isDeactivated(registration)) {
                 deny(result, AgentGovConstants.ERR_AGENT_NOT_ACTIVE);
                 events.add(event(registration, request, AgentGovConstants.ACTION_DENIED, result.denialReason));
                 continue;
             }
-            if (
-                String.isBlank(request.actionType) || !AgentGovConstants.VALID_OPERATIONS.contains(request.actionType)
-            ) {
+            if (!isRecognised(request.actionType)) {
                 deny(result, AgentGovConstants.ERR_INVALID_ACTION_TYPE + request.actionType);
-                // Audited like every other denial. The agent is known at this point, so an
-                // unrecognised action type must leave the same trail as a policy or breaker
-                // refusal rather than disappearing.
+                // Audited against the agent like every other denial; event() records the
+                // unrecognised type as System.
                 events.add(event(registration, request, AgentGovConstants.ACTION_DENIED, result.denialReason));
                 continue;
             }
@@ -194,9 +198,9 @@ public with sharing class AgentGovRegisterAction {
         for (Integer i : candidates) {
             Request request = requests[i];
             AgentGov_Registration__c registration = registrations.get(request.registrationId);
-            // Settled once every claim in the batch is known, so the outcome does not depend on
-            // the order of the requests: an agent overridden later in the batch by a
-            // higher-priority agent is refused here.
+            // Settled once every claim in the batch is known, so an agent overridden later in the
+            // batch by a higher-priority agent is refused here, whatever the order of the
+            // requests. Between agents of equal priority the first claim in the batch stands.
             Id holder = recordHolder(request);
             if (holder != null && holder != registration.Id) {
                 AgentGov_Registration__c winner = registrations.get(holder);
@@ -225,7 +229,6 @@ public with sharing class AgentGovRegisterAction {
         }
 
         AgentGovBudgetManager.BatchOutcome outcome = AgentGovBudgetManager.consumeBudgets(consumption, actionsByAgent);
-        Map<Id, Boolean> breakerOutcomes = new Map<Id, Boolean>();
         for (Integer i : awaitingBudget) {
             Request request = requests[i];
             Result result = results[i];
@@ -237,12 +240,10 @@ public with sharing class AgentGovRegisterAction {
                 result.authorized = true;
                 result.budgetStatus = outcome.results.get(registration.Id).budgetStatus;
                 events.add(event(registration, request, AgentGovConstants.ACTION_SUCCESS, null));
-                breakerOutcomes.put(registration.Id, true);
             }
         }
 
         AgentGovTriggerHandler.logActions(events);
-        AgentGovCircuitBreaker.recordOutcomes(breakerOutcomes);
         return results;
     }
 
@@ -271,21 +272,29 @@ public with sharing class AgentGovRegisterAction {
         result.denialReason = reason;
     }
 
+    // Action_Type__c accepts only the recognised operations, and a row the database rejects is
+    // replaced by a System row with no agent link. An unrecognised type is therefore recorded as
+    // System, as REST records one, so the row stays linked to the agent and names the type.
     private static AgentGov_Action_Event__e event(
         AgentGov_Registration__c registration,
         Request request,
         String status,
         String details
     ) {
+        Boolean recognised = isRecognised(request.actionType);
         return AgentGovTriggerHandler.buildEvent(
             registration.Id,
             registration.Agent_Name__c,
-            request.actionType,
+            recognised ? request.actionType : AgentGovConstants.ACTION_SYSTEM,
             request.objectName,
             request.recordId,
             status,
-            details
+            recognised || details != null ? details : AgentGovConstants.ERR_INVALID_ACTION_TYPE + request.actionType
         );
+    }
+
+    private static Boolean isRecognised(String actionType) {
+        return String.isNotBlank(actionType) && AgentGovConstants.VALID_OPERATIONS.contains(actionType);
     }
 
     private static String limitTypeFor(String actionType) {

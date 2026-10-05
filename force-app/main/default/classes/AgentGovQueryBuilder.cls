@@ -5,9 +5,13 @@
  *              optional list of field/operator/value conditions, an optional sort, and a
  *              limit. Every field must be a plain field API name that exists on the object,
  *              so relationship traversals and subqueries cannot be expressed at all; every
- *              operator comes from a fixed list; and every value is passed as a bind
- *              variable rather than concatenated. The resulting SOQL is executed in user
- *              mode, so the calling user's object, field, and sharing access apply.
+ *              operator comes from a fixed list; and every value is converted to its field's
+ *              type and passed as a bind variable rather than concatenated. A condition on a
+ *              field that cannot be filtered, a sort on a field that cannot be sorted, and LIKE
+ *              on a field that does not hold a single text value are refused while the query
+ *              is compiled, so the proxy refuses them before the request is governed or
+ *              charged. The resulting SOQL is executed in user mode, so the calling user's
+ *              object, field, and sharing access apply.
  *
  *              Security posture: inherited sharing. The query itself always runs with
  *              AccessLevel.USER_MODE regardless of the caller's sharing context.
@@ -16,6 +20,34 @@ public inherited sharing class AgentGovQueryBuilder {
     private static final Pattern FIELD_NAME_PATTERN = Pattern.compile('^[A-Za-z][A-Za-z0-9_]*$');
     private static final String DIRECTION_ASC = 'ASC';
     private static final String DIRECTION_DESC = 'DESC';
+    private static final String OPERATOR_LIKE = 'LIKE';
+
+    // Fields whose values are text. A JSON number or boolean sent for one is matched or stored
+    // as its text.
+    private static final Set<Schema.DisplayType> TEXT_TYPES = new Set<Schema.DisplayType>{
+        Schema.DisplayType.STRING,
+        Schema.DisplayType.TEXTAREA,
+        Schema.DisplayType.PICKLIST,
+        Schema.DisplayType.MULTIPICKLIST,
+        Schema.DisplayType.COMBOBOX,
+        Schema.DisplayType.EMAIL,
+        Schema.DisplayType.PHONE,
+        Schema.DisplayType.URL,
+        Schema.DisplayType.ENCRYPTEDSTRING
+    };
+
+    // Fields LIKE can match. SOQL refuses LIKE on a multi-select picklist as well as on every
+    // field that does not hold text.
+    private static final Set<Schema.DisplayType> LIKE_TYPES = new Set<Schema.DisplayType>{
+        Schema.DisplayType.STRING,
+        Schema.DisplayType.TEXTAREA,
+        Schema.DisplayType.PICKLIST,
+        Schema.DisplayType.COMBOBOX,
+        Schema.DisplayType.EMAIL,
+        Schema.DisplayType.PHONE,
+        Schema.DisplayType.URL,
+        Schema.DisplayType.ENCRYPTEDSTRING
+    };
 
     /** @description A single filter condition. */
     public class Condition {
@@ -46,6 +78,9 @@ public inherited sharing class AgentGovQueryBuilder {
         public Set<String> referencedFields = new Set<String>();
         public Schema.DescribeSObjectResult describe;
         public Integer effectiveLimit;
+        // The statement without its LIMIT clause, so that a record cap can lower the limit
+        // after the query is compiled.
+        private String statement;
     }
 
     /**
@@ -62,7 +97,7 @@ public inherited sharing class AgentGovQueryBuilder {
             );
         }
         QueryRequest request = new QueryRequest();
-        request.objectName = (String) body.get('objectName');
+        request.objectName = AgentGovRestResponder.readString(body, 'objectName');
         if (String.isBlank(request.objectName)) {
             throw new AgentGovException(
                 AgentGovException.ErrorCode.INVALID_INPUT,
@@ -118,8 +153,8 @@ public inherited sharing class AgentGovQueryBuilder {
             request.orderBy.direction = orderMap.get('direction') == null
                 ? DIRECTION_ASC
                 : String.valueOf(orderMap.get('direction')).trim().toUpperCase();
-            // Validated, not coerced. Silently turning a typo into ASC returned a different
-            // ordering than the caller asked for, unlike every other token the builder checks.
+            // Validated rather than coerced, like every other token the builder checks: turning
+            // a typo into ASC would return an ordering the caller did not ask for.
             if (request.orderBy.direction != DIRECTION_ASC && request.orderBy.direction != DIRECTION_DESC) {
                 throw new AgentGovException(
                     AgentGovException.ErrorCode.INVALID_INPUT,
@@ -168,21 +203,25 @@ public inherited sharing class AgentGovQueryBuilder {
     }
 
     /**
-     * @description Compiles a validated request into SOQL with bind variables.
+     * @description Compiles a validated request into SOQL with bind variables and caps its limit.
      * @param request The parsed request
      * @param describe The describe result for request.objectName
-     * @param maxRecords Policy cap on rows, or null when the policy sets none
+     * @param maxRecords Cap on rows, such as a policy's record cap, or null when none applies
      * @return The compiled query
-     * @throws AgentGovException INVALID_INPUT for unknown fields, unsupported operators, or bad values
+     * @throws AgentGovException INVALID_INPUT for an unknown field, an unsupported operator, a
+     *         condition on a field that cannot be filtered, a sort on a field that cannot be
+     *         sorted, LIKE on a field that does not hold a single text value, or a value that
+     *         does not suit its field
      */
     public static BuiltQuery build(QueryRequest request, Schema.DescribeSObjectResult describe, Integer maxRecords) {
         Map<String, Schema.SObjectField> fieldMap = describe.fields.getMap();
+        String objectName = describe.getName();
         BuiltQuery built = new BuiltQuery();
         built.describe = describe;
 
         List<String> selectFields = new List<String>();
         for (String field : request.fields) {
-            String apiName = resolveField(field, fieldMap, describe.getName());
+            String apiName = resolveField(field, fieldMap, objectName);
             if (!built.referencedFields.contains(apiName)) {
                 built.referencedFields.add(apiName);
                 selectFields.add(apiName);
@@ -192,7 +231,7 @@ public inherited sharing class AgentGovQueryBuilder {
         List<String> whereClauses = new List<String>();
         Integer bindIndex = 0;
         for (Condition condition : request.conditions) {
-            String apiName = resolveField(condition.field, fieldMap, describe.getName());
+            String apiName = resolveField(condition.field, fieldMap, objectName);
             built.referencedFields.add(apiName);
             if (condition.operator == null || !AgentGovConstants.QUERY_OPERATORS.contains(condition.operator)) {
                 throw new AgentGovException(
@@ -201,6 +240,7 @@ public inherited sharing class AgentGovQueryBuilder {
                 );
             }
             Schema.DescribeFieldResult fieldDescribe = fieldMap.get(apiName.toLowerCase()).getDescribe();
+            assertUsableInCondition(fieldDescribe, condition.operator, objectName);
             String bindName = 'b' + bindIndex++;
             if (condition.operator == 'IN' || condition.operator == 'NOT IN') {
                 if (!(condition.value instanceof List<Object>)) {
@@ -210,63 +250,102 @@ public inherited sharing class AgentGovQueryBuilder {
                     );
                 }
                 built.binds.put(bindName, typedList((List<Object>) condition.value, fieldDescribe.getType()));
-                whereClauses.add(apiName + ' ' + condition.operator + ' :' + bindName);
             } else {
                 built.binds.put(bindName, convertFieldValue(condition.value, fieldDescribe.getType()));
-                whereClauses.add(apiName + ' ' + condition.operator + ' :' + bindName);
             }
+            whereClauses.add(apiName + ' ' + condition.operator + ' :' + bindName);
         }
 
         String orderClause = '';
         if (request.orderBy != null) {
-            String apiName = resolveField(request.orderBy.field, fieldMap, describe.getName());
+            String apiName = resolveField(request.orderBy.field, fieldMap, objectName);
             built.referencedFields.add(apiName);
+            // Checked here because the database does not refuse such a sort with a QueryException
+            // but with an exception no handler can catch, so the request would end in a bare 500.
+            if (!fieldMap.get(apiName.toLowerCase()).getDescribe().isSortable()) {
+                throw new AgentGovException(
+                    AgentGovException.ErrorCode.INVALID_INPUT,
+                    String.format(AgentGovConstants.ERR_FIELD_NOT_SORTABLE, new List<String>{ objectName, apiName })
+                );
+            }
             String direction = request.orderBy.direction == DIRECTION_DESC ? DIRECTION_DESC : DIRECTION_ASC;
             orderClause = ' ORDER BY ' + apiName + ' ' + direction;
         }
 
-        Integer requested = request.limitCount == null ? AgentGovConstants.DEFAULT_QUERY_LIMIT : request.limitCount;
-        Integer cap = maxRecords == null
-            ? AgentGovConstants.MAX_QUERY_LIMIT
-            : Math.min(maxRecords, AgentGovConstants.MAX_QUERY_LIMIT);
-        built.effectiveLimit = Math.min(requested, cap);
-
-        built.soql =
+        built.statement =
             'SELECT ' +
             String.join(selectFields, ', ') +
             ' FROM ' +
-            describe.getName() +
+            objectName +
             (whereClauses.isEmpty() ? '' : ' WHERE ' + String.join(whereClauses, ' AND ')) +
-            orderClause +
-            ' LIMIT ' +
-            built.effectiveLimit;
+            orderClause;
+        built.effectiveLimit = request.limitCount == null ? AgentGovConstants.DEFAULT_QUERY_LIMIT : request.limitCount;
+        applyRecordCap(built, maxRecords);
         return built;
+    }
+
+    /**
+     * @description Lowers a compiled query's limit to a record cap, such as the one a policy
+     *              sets. The limit is never raised: the query returns at most the smallest of
+     *              the requested limit, every cap applied, and AgentGovConstants.MAX_QUERY_LIMIT.
+     * @param built A query compiled by build
+     * @param maxRecords The cap, or null when none applies
+     */
+    public static void applyRecordCap(BuiltQuery built, Integer maxRecords) {
+        Integer cap = maxRecords == null
+            ? AgentGovConstants.MAX_QUERY_LIMIT
+            : Math.min(maxRecords, AgentGovConstants.MAX_QUERY_LIMIT);
+        built.effectiveLimit = Math.min(built.effectiveLimit, cap);
+        built.soql = built.statement + ' LIMIT ' + built.effectiveLimit;
+    }
+
+    /**
+     * @description Refuses a query the calling user may not run. The user must be able to read
+     *              the object and every field the query selects, filters on, or sorts by. The
+     *              proxy calls this before it charges the budget, so a refused query costs
+     *              nothing.
+     * @param built The compiled query
+     * @throws AgentGovException ACCESS_DENIED naming the object, or the fields, the user may not read
+     */
+    public static void assertReadable(BuiltQuery built) {
+        String refusal = describeReadRefusal(built);
+        if (refusal != null) {
+            throw new AgentGovException(AgentGovException.ErrorCode.ACCESS_DENIED, refusal);
+        }
     }
 
     /**
      * @description Executes a compiled query in user mode.
      * @param built The compiled query
      * @return Matching records
-     * @throws AgentGovException ACCESS_DENIED when the calling user cannot read the object or a field
+     * @throws AgentGovException ACCESS_DENIED when the calling user cannot read the object or a
+     *         field the query refers to, INVALID_INPUT when the database refuses the query for
+     *         any other reason
      */
     public static List<SObject> execute(BuiltQuery built) {
         try {
             return Database.queryWithBinds(built.soql, built.binds, AccessLevel.USER_MODE);
         } catch (QueryException e) {
-            // Reported as an access failure deliberately. The object and every field name are
-            // validated against describe before this point, so a query that still fails in
-            // USER_MODE has been refused for access. Classifying by message text was tried and
-            // reverted: user mode reports an object denial as "sObject type X is not
-            // supported", which reads like malformed input and is not safely distinguishable.
-            // The refusal is described from describe, never from the platform's own message,
-            // which names internals a REST caller should not see.
-            throw new AgentGovException(AgentGovException.ErrorCode.ACCESS_DENIED, describeReadRefusal(built));
+            // The proxy checks read access with assertReadable before it charges, so a refusal here
+            // is usually a query the database will not run, such as one on a field the describe
+            // lists but SOQL cannot use, or with an operator its field type does not allow. Access
+            // is still re-checked from describe, never from the platform's message, which names
+            // internals and words an object denial ("sObject type X is not supported") like
+            // malformed input.
+            String refusal = describeReadRefusal(built);
+            if (refusal != null) {
+                throw new AgentGovException(AgentGovException.ErrorCode.ACCESS_DENIED, refusal);
+            }
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(AgentGovConstants.ERR_QUERY_NOT_RUN, new List<String>{ built.describe.getName() })
+            );
         }
     }
 
+    // Described afresh, so the answer reflects the running user's access at this moment rather
+    // than the access held when the query was compiled. Null when the user may read everything.
     private static String describeReadRefusal(BuiltQuery built) {
-        // Described afresh, so the answer reflects the running user's access at this moment
-        // rather than the access held when the query was compiled.
         Schema.DescribeSObjectResult current = built.describe.getSObjectType().getDescribe();
         String objectName = current.getName();
         if (!current.isAccessible()) {
@@ -280,14 +359,34 @@ public inherited sharing class AgentGovQueryBuilder {
                 refused.add(fieldName);
             }
         }
+        if (refused.isEmpty()) {
+            return null;
+        }
         refused.sort();
-        if (!refused.isEmpty()) {
-            return String.format(
-                AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
-                new List<String>{ 'read', objectName, String.join(refused, ', ') }
+        return String.format(
+            AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
+            new List<String>{ 'read', objectName, String.join(refused, ', ') }
+        );
+    }
+
+    // Refuses a condition the database would refuse only after the request had been governed and
+    // charged.
+    private static void assertUsableInCondition(Schema.DescribeFieldResult field, String operator, String objectName) {
+        if (!field.isFilterable()) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(
+                    AgentGovConstants.ERR_FIELD_NOT_FILTERABLE,
+                    new List<String>{ objectName, field.getName() }
+                )
             );
         }
-        return String.format(AgentGovConstants.ERR_ACCESS_REFUSED, new List<String>{ 'read', objectName });
+        if (operator == OPERATOR_LIKE && !LIKE_TYPES.contains(field.getType())) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(AgentGovConstants.ERR_LIKE_NOT_TEXT, new List<String>{ objectName, field.getName() })
+            );
+        }
     }
 
     /**
@@ -322,6 +421,7 @@ public inherited sharing class AgentGovQueryBuilder {
      * @param items Values as deserialized from JSON
      * @param fieldType The target field's display type
      * @return A typed list suitable for binding
+     * @throws AgentGovException INVALID_INPUT when an item cannot be converted
      */
     public static Object typedList(List<Object> items, Schema.DisplayType fieldType) {
         switch on fieldType {
@@ -336,6 +436,13 @@ public inherited sharing class AgentGovQueryBuilder {
                 List<Date> values = new List<Date>();
                 for (Object item : items) {
                     values.add((Date) convertFieldValue(item, fieldType));
+                }
+                return values;
+            }
+            when TIME {
+                List<Time> values = new List<Time>();
+                for (Object item : items) {
+                    values.add((Time) convertFieldValue(item, fieldType));
                 }
                 return values;
             }
@@ -364,7 +471,8 @@ public inherited sharing class AgentGovQueryBuilder {
             when else {
                 List<String> values = new List<String>();
                 for (Object item : items) {
-                    values.add(item == null ? null : String.valueOf(item));
+                    Object converted = convertFieldValue(item, fieldType);
+                    values.add(converted == null ? null : String.valueOf(converted));
                 }
                 return values;
             }
@@ -373,17 +481,30 @@ public inherited sharing class AgentGovQueryBuilder {
 
     /**
      * @description Converts a JSON value into the Apex type a field expects, so it can be bound
-     *              in a query or assigned to a record.
+     *              in a query or assigned to a record. A value for a text field is used as text,
+     *              so a JSON number or boolean becomes its text form.
      * @param rawValue Value as deserialized from JSON
      * @param fieldType The target field's display type
      * @return The converted value
-     * @throws AgentGovException INVALID_INPUT when the value cannot be converted
+     * @throws AgentGovException INVALID_INPUT when the value is a JSON object or list, or cannot
+     *         be converted to the field's type
      */
     public static Object convertFieldValue(Object rawValue, Schema.DisplayType fieldType) {
         if (rawValue == null) {
             return null;
         }
+        // Never a single field value. As text it would become its Apex rendering, such as
+        // {key=value}, and be stored or matched instead of refused.
+        if (rawValue instanceof Map<String, Object> || rawValue instanceof List<Object>) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(AgentGovConstants.ERR_VALUE_NOT_SCALAR, new List<String>{ String.valueOf(fieldType) })
+            );
+        }
         String stringValue = String.valueOf(rawValue);
+        if (TEXT_TYPES.contains(fieldType)) {
+            return stringValue;
+        }
         try {
             switch on fieldType {
                 when DATETIME {
@@ -393,6 +514,11 @@ public inherited sharing class AgentGovQueryBuilder {
                 }
                 when DATE {
                     return rawValue instanceof Date ? (Date) rawValue : Date.valueOf(stringValue);
+                }
+                when TIME {
+                    return rawValue instanceof Time
+                        ? (Time) rawValue
+                        : (Time) JSON.deserialize('"' + stringValue + '"', Time.class);
                 }
                 when BOOLEAN {
                     return rawValue instanceof Boolean ? (Boolean) rawValue : Boolean.valueOf(stringValue);

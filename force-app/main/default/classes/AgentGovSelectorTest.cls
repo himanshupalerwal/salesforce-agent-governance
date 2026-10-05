@@ -31,11 +31,24 @@ private class AgentGovSelectorTest {
 
     @IsTest
     static void metadataIsReadInSystemMode() {
-        Assert.isFalse(AgentGovSelector.getLimitConfigs().isEmpty(), 'Shipped limit configurations are visible');
-        Assert.isNotNull(AgentGovSelector.getLimitConfigByType(AgentGovConstants.LIMIT_API_CALLS));
-        Assert.isNull(AgentGovSelector.getLimitConfigByType('Bogus'));
-        Assert.isFalse(AgentGovSelector.getPolicies().isEmpty(), 'Shipped policies are visible');
-        Assert.isFalse(AgentGovSelector.getPoliciesForAgentType(AgentGovConstants.AGENT_TYPE_MCP_EXTERNAL).isEmpty());
+        // The user holds no access to the custom metadata types. A user-mode read would hand
+        // the policy engine nothing to enforce, so the shipped records must still come back.
+        User restricted = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+
+        System.runAs(restricted) {
+            AgentGovSelector.clearCache();
+            Assert.isFalse(AgentGovSelector.getLimitConfigs().isEmpty(), 'Shipped limit configurations are visible');
+            Assert.isNotNull(
+                AgentGovSelector.getLimitConfigByType(AgentGovConstants.LIMIT_API_CALLS),
+                'The limit type field is readable'
+            );
+            Assert.isNull(AgentGovSelector.getLimitConfigByType('Bogus'), 'An unknown limit type has no configuration');
+            Assert.isFalse(AgentGovSelector.getPolicies().isEmpty(), 'Shipped policies are visible');
+            Assert.isFalse(
+                AgentGovSelector.getPoliciesForAgentType(AgentGovConstants.AGENT_TYPE_MCP_EXTERNAL).isEmpty(),
+                'The agent type field is readable, so the shipped MCP External policies apply'
+            );
+        }
     }
 
     @IsTest

@@ -43,6 +43,10 @@ const LIMITS = [
 ];
 
 export default class AgentGovAgentPanel extends NavigationMixin(LightningElement) {
+    /**
+     * Id of the agent registration the panel shows. Lightning sets it on the record page.
+     * @type {string}
+     */
     @api recordId;
 
     summary;
@@ -257,15 +261,27 @@ export default class AgentGovAgentPanel extends NavigationMixin(LightningElement
     }
 
     get session() {
+        const count = Number(this.summary.sessionActions) || 0;
         return {
             id: this.summary.liveSessionId,
             url: recordUrl(this.summary.liveSessionId, SESSION_OBJECT),
-            actions: formatNumber(this.summary.sessionActions)
+            actions: `${formatNumber(count)} ${count === 1 ? 'action' : 'actions'}`
         };
     }
 
+    get noSessionText() {
+        return this.summary.status === 'Inactive'
+            ? 'No live session. The agent is deactivated.'
+            : "No live session. The agent's next governed action opens one.";
+    }
+
     get keyPrefix() {
-        return this.summary.apiKeyPrefix ? `${this.summary.apiKeyPrefix}…` : 'No key issued';
+        if (this.summary.apiKeyPrefix) {
+            return `${this.summary.apiKeyPrefix}…`;
+        }
+        // A key too short to keep a prefix safely, or one still stored in plaintext, has none
+        // but works all the same.
+        return this.summary.hasApiKey ? 'Issued, with no prefix stored. Rotate it to get one.' : 'No key issued';
     }
 
     get keyLastRotated() {

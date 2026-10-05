@@ -96,7 +96,10 @@ describe('c-agent-gov-admin-actions', () => {
         expect(LightningConfirm.open).toHaveBeenCalledWith(
             expect.objectContaining({ label: 'Reset circuit breaker?', theme: 'warning' })
         );
-        expect(LightningConfirm.open.mock.calls[0][0].message).toContain('Order Sync Agent');
+        // The confirmation says what a reset changes and what it leaves in force.
+        expect(LightningConfirm.open.mock.calls[0][0].message).toBe(
+            "The circuit breaker of Order Sync Agent closes and its failure count is cleared, so the breaker stops refusing its requests. A deactivated agent stays deactivated, and today's budget limits still apply. Reset a breaker once the cause of the failures is fixed."
+        );
         expect(resetBreakers).toHaveBeenCalledWith({ registrationIds: ['a1'] });
         expect(result).toEqual({ changed: true, message: 'Order Sync Agent: Circuit breaker closed.' });
         expect(element.toasts).toEqual([
@@ -111,6 +114,27 @@ describe('c-agent-gov-admin-actions', () => {
         expect(result).toEqual({ changed: false, cancelled: true, message: '' });
         expect(deactivateAgents).not.toHaveBeenCalled();
         expect(element.toasts).toEqual([]);
+        expect(LightningConfirm.open.mock.calls[0][0].message).toBe(
+            'Lead Enrichment Agent will be refused wherever it asks to act or to report usage, and its live session ends, until it is activated again.'
+        );
+    });
+
+    it('words the confirmations for several agents', async () => {
+        const element = host();
+        LightningConfirm.open.mockResolvedValue(false);
+        await runAgentAction(element, 'reset', [TRIPPED, INACTIVE]);
+        await runAgentAction(element, 'deactivate', [TRIPPED, HEALTHY]);
+        const [reset, deactivate] = LightningConfirm.open.mock.calls.map((call) => call[0]);
+        expect(reset.label).toBe('Reset circuit breakers?');
+        expect(reset.message).toBe(
+            "The circuit breakers of 2 agents close and their failure counts are cleared, so the breakers stop refusing their requests. Deactivated agents stay deactivated, and today's budget limits still apply. Reset breakers once the cause of the failures is fixed."
+        );
+        expect(deactivate.label).toBe('Deactivate agents?');
+        expect(deactivate.message).toBe(
+            '2 agents will be refused wherever they ask to act or to report usage, and their live sessions end, until they are activated again.'
+        );
+        expect(resetBreakers).not.toHaveBeenCalled();
+        expect(deactivateAgents).not.toHaveBeenCalled();
     });
 
     it('runs a bulk action on the eligible agents and lists the failures', async () => {
@@ -223,6 +247,7 @@ describe('c-agent-gov-admin-actions', () => {
         expect(AgentGovKeyModal.open).toHaveBeenCalledWith(
             expect.objectContaining({ apiKey: secret, agentName: 'Lead Enrichment Agent', size: 'small' })
         );
+        expect(AgentGovKeyModal.open.mock.calls[0][0]).not.toHaveProperty('apiKeyPrefix');
         expect(result.changed).toBe(true);
         expect(JSON.stringify(element.toasts)).not.toContain(secret);
         expect(result.message).not.toContain(secret);

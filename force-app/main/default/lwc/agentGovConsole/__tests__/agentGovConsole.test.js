@@ -92,7 +92,17 @@ describe('c-agent-gov-console', () => {
         document.body.appendChild(element);
         expect(element.shadowRoot.querySelector('.live-status').textContent).toBe('Connecting…');
         await flushPromises();
-        expect(element.shadowRoot.querySelector('.live-status').textContent).toBe('Live');
+        const live = element.shadowRoot.querySelector('.live-status');
+        expect(live.textContent).toBe('Live');
+        // Subscribed is all "Live" can promise: nothing is published while events are off.
+        expect(live.title).toBe(
+            'Listening for AgentGov events. None are published while real-time events are off in AgentGov Settings.'
+        );
+    });
+
+    it('lets the overview offer its drill-downs, which the console answers', async () => {
+        const element = await mount();
+        expect(element.shadowRoot.querySelector('c-agent-gov-overview').canDrillDown).toBe(true);
     });
 
     it('opens on the overview with every tab, Setup included for operators', async () => {

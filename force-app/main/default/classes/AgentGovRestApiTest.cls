@@ -1,6 +1,7 @@
 /**
  * @description Tests for the AgentGov REST endpoints: registration with generated or
- *              supplied keys, authorization, reporting, key rotation, and guarded reads.
+ *              supplied keys, authorization, reporting, key rotation, guarded reads, and the
+ *              refusal of malformed input.
  */
 @IsTest
 private class AgentGovRestApiTest {
@@ -304,9 +305,10 @@ private class AgentGovRestApiTest {
             FROM AgentGov_Budget__c
             WHERE Agent_Registration__c = :primaryAgent().Id
         ];
-        // Pre-authorization caps what a report can add; it is never refunded. The agent
-        // reserved 10 DML operations and used 7, so the 10 already charged at /authorize
-        // stand. The 2 SOQL queries were never pre-authorized, so they are charged now.
+        // Only usage beyond the pre-authorization is charged, and unused pre-authorization is
+        // never refunded. The agent reserved 10 DML operations and used 7, so the 10 already
+        // charged at /authorize stand. The 2 SOQL queries were never pre-authorized, so they
+        // are charged now.
         Assert.areEqual(
             10,
             budget.DML_Operations_Consumed__c,
@@ -405,9 +407,9 @@ private class AgentGovRestApiTest {
         budget.SOQL_Queries_Consumed__c = 100;
         update budget;
 
-        // Under-reporting actual usage against an inflated pre-authorization used to credit
-        // the difference back, which let any agent clear its own ledger. The figures are
-        // caller-supplied and unverifiable, so the difference is now simply not applied.
+        // Both figures are caller-supplied and unverifiable, so under-reporting actual usage
+        // against an inflated pre-authorization credits nothing back. A credit would let any
+        // agent clear its own ledger.
         Map<String, Object> result = post(
             '/report',
             new Map<String, Object>{
@@ -458,7 +460,7 @@ private class AgentGovRestApiTest {
     }
 
     @IsTest
-    static void reportRejectsAnInflatedPreAuthorization() {
+    static void reportRejectsANegativePreAuthorization() {
         AgentGov_Registration__c reg = primaryAgent();
         AgentGov_Budget__c budget = [SELECT Id FROM AgentGov_Budget__c WHERE Agent_Registration__c = :reg.Id];
         budget.API_Calls_Consumed__c = 500;
@@ -490,8 +492,8 @@ private class AgentGovRestApiTest {
     static void aHalfOpenAgentCanProbeAndCloseItsBreakerOverRest() {
         AgentGov_Registration__c reg = primaryAgent();
         // A breaker that has served its cooldown moves to HALF_OPEN and carries Throttled
-        // status. /authorize used to refuse Throttled outright, and no REST path could record
-        // an outcome, so a tripped agent was locked out with no way back.
+        // status. /authorize admits Throttled and /report records the probe's outcome, so a
+        // tripped agent recovers over REST alone.
         AgentGov_Registration__c tripped = [
             SELECT Id, Circuit_Breaker_State__c, Status__c, Cooldown_Until__c
             FROM AgentGov_Registration__c
@@ -532,9 +534,9 @@ private class AgentGovRestApiTest {
     @IsTest
     static void aBlockedAgentPastItsCooldownCanProbeOverRest() {
         AgentGov_Registration__c reg = primaryAgent();
-        // This is the state trip() actually leaves an agent in: breaker OPEN and status
-        // Blocked. Authentication used to refuse Blocked before any breaker code ran, so the
-        // transition to HALF_OPEN never happened and the agent was locked out for good.
+        // This is the state trip() leaves an agent in: breaker OPEN and status Blocked. The
+        // status check admits a Blocked agent whose cooldown has passed, so the call reaches
+        // the breaker and becomes its probe.
         AgentGov_Registration__c tripped = [
             SELECT Id, Circuit_Breaker_State__c, Status__c, Cooldown_Until__c
             FROM AgentGov_Registration__c
@@ -558,7 +560,7 @@ private class AgentGovRestApiTest {
         Assert.areEqual(
             AgentGovConstants.CB_HALF_OPEN,
             [SELECT Circuit_Breaker_State__c FROM AgentGov_Registration__c WHERE Id = :reg.Id].Circuit_Breaker_State__c,
-            'The breaker reopened itself without a scheduled job'
+            'The breaker moved to HALF_OPEN without a scheduled job'
         );
     }
 
@@ -581,7 +583,11 @@ private class AgentGovRestApiTest {
             KEY
         );
 
-        Assert.areEqual(403, RestContext.response.statusCode, 'Reopening only happens once the cooldown has elapsed');
+        Assert.areEqual(
+            403,
+            RestContext.response.statusCode,
+            'The breaker moves to HALF_OPEN only once the cooldown has elapsed'
+        );
     }
 
     @IsTest
@@ -633,8 +639,8 @@ private class AgentGovRestApiTest {
 
     @IsTest
     static void authorizeRequiresAnObjectNameSoPoliciesCannotBeSkipped() {
-        // A policy names the object it governs. Omitting objectName used to make every
-        // object-scoped policy inapplicable, so a denied operation came back authorized.
+        // A policy names the object it governs, so a request without objectName would match no
+        // object-scoped policy and an operation a deny policy forbids would come back authorized.
         Map<String, Object> result = post(
             '/authorize',
             new Map<String, Object>{
@@ -654,7 +660,9 @@ private class AgentGovRestApiTest {
         reg.Status__c = AgentGovConstants.STATUS_INACTIVE;
         update reg;
 
+        Test.startTest();
         Map<String, Object> result = post('/rotate-key', null, KEY);
+        Test.stopTest();
 
         // Deactivating an agent must contain a leaked key. If rotation still worked, the
         // holder could mint a fresh credential and lock the real owner out.
@@ -664,6 +672,133 @@ private class AgentGovRestApiTest {
             AgentGovRestAuth.hashKey(KEY),
             [SELECT API_Key_Hash__c FROM AgentGov_Registration__c WHERE Id = :reg.Id].API_Key_Hash__c,
             'The existing key is untouched'
+        );
+        assertKeyRotationRefusalAudited(reg.Id, result);
+    }
+
+    @IsTest
+    static void rotateKeyIsRefusedForABlockedAgentEvenWhenItsBreakerMayProbe() {
+        AgentGov_Registration__c reg = primaryAgent();
+        update new AgentGov_Registration__c(
+            Id = reg.Id,
+            Status__c = AgentGovConstants.STATUS_BLOCKED,
+            Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN,
+            Cooldown_Until__c = DateTime.now().addMinutes(-5)
+        );
+
+        Test.startTest();
+        Map<String, Object> result = post('/rotate-key', null, KEY);
+        Test.stopTest();
+
+        // Rotation is not a governed call, so the stricter check admits only Active and
+        // Throttled agents and never consults the breaker.
+        Assert.areEqual(403, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual('AGENT_NOT_ACTIVE', result.get('errorCode'));
+        AgentGov_Registration__c after = [
+            SELECT API_Key_Hash__c, Circuit_Breaker_State__c
+            FROM AgentGov_Registration__c
+            WHERE Id = :reg.Id
+        ];
+        Assert.areEqual(AgentGovRestAuth.hashKey(KEY), after.API_Key_Hash__c, 'The existing key is untouched');
+        Assert.areEqual(AgentGovConstants.CB_OPEN, after.Circuit_Breaker_State__c, 'No probe was claimed');
+        assertKeyRotationRefusalAudited(reg.Id, result);
+    }
+
+    private static void assertKeyRotationRefusalAudited(Id registrationId, Map<String, Object> result) {
+        AgentGov_Action_Log__c denied = [
+            SELECT Action_Type__c, Status__c, Details__c, Error_Message__c, Correlation_Id__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :registrationId
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, denied.Action_Type__c);
+        Assert.areEqual(AgentGovConstants.ACTION_DENIED, denied.Status__c);
+        Assert.areEqual(
+            String.format(
+                AgentGovConstants.ERR_KEY_ROTATION_REFUSED,
+                new List<String>{ AgentGovConstants.ERR_AGENT_NOT_ACTIVE }
+            ),
+            denied.Details__c
+        );
+        Assert.isNotNull(denied.Error_Message__c, 'The reason is recorded');
+        Assert.areEqual(result.get('correlationId'), denied.Correlation_Id__c, 'The row traces back to the response');
+    }
+
+    @IsTest
+    static void authorizeRefusesARecordIdThatIsNotASalesforceId() {
+        Test.startTest();
+        for (String recordId : new List<String>{ 'not-a-record-id', '001000000000001AAAX', 'x'.repeat(300) }) {
+            Map<String, Object> body = authorizeBody(AgentGovConstants.ACTION_QUERY);
+            body.put('recordId', recordId);
+            Map<String, Object> result = post('/authorize', body, KEY);
+            Assert.areEqual(400, RestContext.response.statusCode, JSON.serialize(result));
+            Assert.areEqual('INVALID_INPUT', result.get('errorCode'));
+            Assert.areEqual(AgentGovConstants.ERR_INVALID_RECORD_ID + recordId.left(255), result.get('message'));
+        }
+        Map<String, Object> fifteen = authorizeBody(AgentGovConstants.ACTION_QUERY);
+        fifteen.put('recordId', '001000000000001');
+        Map<String, Object> accepted = post('/authorize', fifteen, KEY);
+        Test.stopTest();
+
+        Assert.areEqual(200, RestContext.response.statusCode, 'A 15-character Id is accepted: ' + accepted);
+        Assert.areEqual(
+            1,
+            [SELECT SOQL_Queries_Consumed__c FROM AgentGov_Budget__c WHERE Agent_Registration__c = :primaryAgent().Id]
+            .SOQL_Queries_Consumed__c,
+            'Only the accepted request was charged'
+        );
+        AgentGov_Action_Log__c audited = [
+            SELECT Status__c, Record_Id__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :primaryAgent().Id
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_SUCCESS, audited.Status__c, 'The refused requests left no row');
+        Assert.areEqual('001000000000001', audited.Record_Id__c);
+    }
+
+    @IsTest
+    static void aBodyValueOfTheWrongJsonTypeIsBadInputNotAnInternalError() {
+        Map<String, Map<String, Object>> cases = new Map<String, Map<String, Object>>{
+            'agentName' => new Map<String, Object>{ 'agentName' => 42, 'agentType' => 'Agentforce' },
+            'apiKey' => new Map<String, Object>{
+                'agentName' => 'Typed Agent',
+                'agentType' => 'Agentforce',
+                'apiKey' => 123456789
+            }
+        };
+        for (String field : cases.keySet()) {
+            Map<String, Object> result = post('/register', cases.get(field), null);
+            Assert.areEqual(400, RestContext.response.statusCode, JSON.serialize(result));
+            Assert.areEqual(
+                String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ field }),
+                result.get('message')
+            );
+        }
+
+        Map<String, Object> objectNotText = authorizeBody(AgentGovConstants.ACTION_QUERY);
+        objectNotText.put('objectName', 42);
+        Map<String, Object> operationNotText = authorizeBody(AgentGovConstants.ACTION_QUERY);
+        operationNotText.put('operation', true);
+        Map<String, Object> recordNotText = authorizeBody(AgentGovConstants.ACTION_QUERY);
+        recordNotText.put('recordId', new Map<String, Object>{ 'id' => '001000000000001AAA' });
+        Map<String, Map<String, Object>> authorizeCases = new Map<String, Map<String, Object>>{
+            'objectName' => objectNotText,
+            'operation' => operationNotText,
+            'recordId' => recordNotText
+        };
+        for (String field : authorizeCases.keySet()) {
+            Map<String, Object> result = post('/authorize', authorizeCases.get(field), KEY);
+            Assert.areEqual(400, RestContext.response.statusCode, JSON.serialize(result));
+            Assert.areEqual(
+                String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ field }),
+                result.get('message')
+            );
+        }
+
+        Assert.areEqual(0, [SELECT COUNT() FROM AgentGov_Registration__c WHERE Agent_Name__c = 'Typed Agent']);
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM],
+            'No request failed as an internal error'
         );
     }
 
@@ -687,8 +822,8 @@ private class AgentGovRestApiTest {
             WHERE Action_Type__c = :AgentGovConstants.ACTION_REPORT
             LIMIT 1
         ];
-        // Serializing the caller's whole map let any agent write arbitrary text into the
-        // audit object, and a zero-usage report costs no budget, so it was uncapped.
+        // Serializing the caller's whole map would let any agent write arbitrary text into the
+        // audit log, and a zero-usage report costs no budget, so nothing would cap it.
         Assert.isFalse(entry.Details__c.contains(padding), 'Unrecognised keys are not recorded');
         Assert.isTrue(entry.Details__c.contains('apiCalls'), 'The recognised counters are recorded');
     }
@@ -775,7 +910,7 @@ private class AgentGovRestApiTest {
 
             AgentGovRestApi.doPost();
 
-            Assert.areEqual(400, RestContext.response.statusCode, 'Rejected: ' + rawBody);
+            Assert.areEqual(400, RestContext.response.statusCode, 'Must be rejected: ' + rawBody);
         }
     }
 
@@ -945,15 +1080,24 @@ private class AgentGovRestApiTest {
             [SELECT COUNT() FROM AgentGov_Budget__c WHERE SOQL_Queries_Consumed__c > 0],
             'The charge for an authorization the caller never received is undone'
         );
-        Boolean recorded = false;
-        for (AgentGov_Action_Log__c failure : [
-            SELECT Error_Message__c
+        List<AgentGov_Action_Log__c> failures = [
+            SELECT Error_Message__c, Correlation_Id__c
             FROM AgentGov_Action_Log__c
             WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM AND Status__c = :AgentGovConstants.ACTION_FAILURE
-        ]) {
-            recorded = recorded || String.valueOf(failure.Error_Message__c).contains(failureText);
-        }
-        Assert.isTrue(recorded, 'The failure itself survives the rollback');
+        ];
+        Assert.areEqual(1, failures.size(), 'One failure leaves exactly one System row: ' + JSON.serialize(failures));
+        Assert.isTrue(
+            String.valueOf(failures[0].Error_Message__c).contains(failureText),
+            'The failure itself survives the rollback'
+        );
+        Map<String, Object> response = (Map<String, Object>) JSON.deserializeUntyped(
+            RestContext.response.responseBody.toString()
+        );
+        Assert.areEqual(
+            response.get('correlationId'),
+            failures[0].Correlation_Id__c,
+            'The row is under the request id'
+        );
     }
 
     private class SimulatedFailureException extends Exception {

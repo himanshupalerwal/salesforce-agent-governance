@@ -6,6 +6,6 @@
     <length>32768</length>
     <visibleLines>3</visibleLines>
     <externalId>false</externalId>
-    <description>Error message if the action failed</description>
+    <description>Why the action was refused or failed: the reason on a Denied row, the error on a Failure row, the first record error of a partly successful proxy write, or the underlying error on a System row.</description>
     <trackTrending>false</trackTrending>
 </CustomField>

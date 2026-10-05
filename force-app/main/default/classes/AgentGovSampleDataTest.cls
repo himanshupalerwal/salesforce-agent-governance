@@ -174,7 +174,11 @@ private class AgentGovSampleDataTest {
         AgentGovSampleData.deleteAll();
         Test.stopTest();
 
-        Assert.areEqual(0, [SELECT COUNT() FROM AgentGov_Registration__c], 'Running the cleanup twice is not an error');
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Registration__c],
+            'Running the cleanup on an empty org is not an error'
+        );
     }
 
     @IsTest
@@ -191,8 +195,8 @@ private class AgentGovSampleDataTest {
         Integer removed = AgentGovSampleData.deleteSampleData();
         Test.stopTest();
 
-        // The install guide points people at this. Wiping an org's real agents because
-        // somebody cleared a demo would be unforgivable.
+        // The install guide points people at this, so it must never remove an agent that is
+        // not part of the sample data.
         Assert.isTrue(removed > 0, 'The demonstration records are removed');
         Assert.areEqual(
             1,
@@ -223,11 +227,77 @@ private class AgentGovSampleDataTest {
         String second = AgentGovSampleData.createAll();
         Test.stopTest();
 
-        // The sample keys are fixed and the hash is unique, so a second run used to fail with
-        // a raw DUPLICATE_VALUE from the database.
+        // The sample keys are fixed and the hash is unique, so without this check a second run
+        // would fail with a raw DUPLICATE_VALUE from the database.
         Assert.isTrue(
             second.containsIgnoreCase('already loaded'),
             'The second run explains itself instead of throwing: ' + second
         );
+    }
+
+    @IsTest
+    static void deleteSampleDataLeavesNoLogRowWithoutItsAgent() {
+        AgentGovSampleData.createAll();
+        AgentGov_Registration__c busiest = [
+            SELECT Id
+            FROM AgentGov_Registration__c
+            WHERE API_Key_Hash__c = :AgentGovRestAuth.hashKey(AgentGovSampleData.SAMPLE_API_KEYS[0])
+        ];
+        // More action log rows than one run removes, as a heavily used sample agent collects.
+        List<AgentGov_Action_Log__c> history = new List<AgentGov_Action_Log__c>();
+        for (Integer i = 0; i < 1500; i++) {
+            history.add(
+                new AgentGov_Action_Log__c(
+                    Agent_Registration__c = busiest.Id,
+                    Action_Type__c = AgentGovConstants.ACTION_QUERY,
+                    Status__c = AgentGovConstants.ACTION_SUCCESS,
+                    Timestamp__c = DateTime.now()
+                )
+            );
+        }
+        insert history;
+
+        Test.startTest();
+        Integer firstRun = AgentGovSampleData.deleteSampleData();
+        Integer agentsAfterFirstRun = [SELECT COUNT() FROM AgentGov_Registration__c];
+        Integer secondRun = AgentGovSampleData.deleteSampleData();
+        Integer thirdRun = AgentGovSampleData.deleteSampleData();
+        Test.stopTest();
+
+        // Deleting an agent clears the lookups of its remaining log rows, after which no run
+        // could find them, so the agents stay until their rows are gone.
+        Assert.isTrue(firstRun > 0, 'The first run removes a capped batch');
+        Assert.areEqual(
+            AgentGovSampleData.SAMPLE_API_KEYS.size(),
+            agentsAfterFirstRun,
+            'The agents stay while rows of theirs remain'
+        );
+        Assert.isTrue(secondRun > 0, 'The second run removes the rest and the agents');
+        Assert.areEqual(0, thirdRun, 'A third run finds nothing');
+        Assert.areEqual(0, [SELECT COUNT() FROM AgentGov_Action_Log__c], 'No log row is left behind');
+        Assert.areEqual(0, [SELECT COUNT() FROM AgentGov_Registration__c], 'The sample agents are gone');
+    }
+
+    @IsTest
+    static void sampleAgentsWereLastActiveWhenTheirSessionsLastSawActivity() {
+        Test.startTest();
+        AgentGovSampleData.createAll();
+        Test.stopTest();
+
+        for (AgentGov_Session__c session : [
+            SELECT Last_Activity__c, Agent_Registration__r.Agent_Name__c, Agent_Registration__r.Last_Active__c
+            FROM AgentGov_Session__c
+        ]) {
+            Long apartMs = Math.abs(
+                session.Agent_Registration__r.Last_Active__c.getTime() - session.Last_Activity__c.getTime()
+            );
+            Assert.isTrue(
+                apartMs < 60000,
+                session.Agent_Registration__r.Agent_Name__c +
+                    ' was last active ' +
+                    apartMs +
+                    ' ms away from its session\'s last activity'
+            );
+        }
     }
 }

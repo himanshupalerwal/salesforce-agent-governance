@@ -46,7 +46,9 @@ export default class AgentGovDashboard extends NavigationMixin(LightningElement)
     sessions = [];
     actionsToday = 0;
     trippedBreakers = 0;
-    liveUpdates = false;
+    // Unknown until the event connection reports, so the page never claims updates are off
+    // while it is still connecting.
+    liveUpdates;
     lastUpdated;
     announcement = '';
     refreshing = false;
@@ -288,6 +290,9 @@ export default class AgentGovDashboard extends NavigationMixin(LightningElement)
     }
 
     get liveUpdatesLabel() {
+        if (this.liveUpdates === undefined) {
+            return 'Connecting…';
+        }
         return this.liveUpdates ? 'Live updates on' : 'Live updates off';
     }
 

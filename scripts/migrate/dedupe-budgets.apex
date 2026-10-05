@@ -1,4 +1,4 @@
-// AgentGov v1.2 pre-deployment step: merge duplicate daily budget rows.
+// AgentGov pre-deployment step for orgs upgrading from v1.1: merge duplicate daily budget rows.
 //
 // v1.2 adds a unique key (Budget_Key__c) that guarantees one Governor Budget row per
 // agent per day. Orgs running an earlier release under concurrent load may already hold
@@ -8,20 +8,23 @@
 // merges each duplicate group into its oldest row, summing the consumed counters and
 // re-evaluating the status from the merged totals, then deletes the extras.
 //
-// Run it BEFORE deploying v1.2. It is safe to run more than once.
+// Run it BEFORE deploying v1.2 or any later release. It is safe to run more than once.
 //
-// The work is bounded so it cannot exceed a governor limit in a large org: it finds duplicate
-// groups with an aggregate query and merges at most GROUP_LIMIT of them per run. The detail
-// query that follows is filtered by both agent and date, and capped, because those two filters
-// are combined as a cross-product and would otherwise pull in unrelated rows. Re-run the script
-// until it reports that no duplicates remain.
+// The work is bounded so it cannot exceed a governor limit in a large org. The aggregate query
+// that finds duplicate groups is charged one query row per group it returns, and returns at most
+// GROUP_LIMIT of them. The detail query is filtered by both agent and date, which combine as a
+// cross-product and can match rows that are not duplicates, so it is capped at DETAIL_ROW_LIMIT
+// rows and keeps only the rows of duplicate groups, at most MERGE_ROW_LIMIT per run. Re-run the
+// script until it reports that no duplicates remain.
 //
 // Run with: sf apex run --file scripts/migrate/dedupe-budgets.apex --target-org <alias>
 
 Integer GROUP_LIMIT = 500;
+Integer DETAIL_ROW_LIMIT = 40000;
+Integer MERGE_ROW_LIMIT = 5000;
 
-// Only groups that actually contain duplicates are loaded. Aggregating first keeps the
-// row count proportional to the problem rather than to the size of the whole ledger.
+// Only groups that actually contain duplicates are returned, so the query rows this costs track
+// the number of duplicates rather than the size of the ledger.
 List<AggregateResult> duplicateGroups = [
     SELECT Agent_Registration__c agentId, Budget_Date__c budgetDate
     FROM AgentGov_Budget__c
@@ -31,15 +34,19 @@ List<AggregateResult> duplicateGroups = [
 ];
 
 if (duplicateGroups.isEmpty()) {
-    System.debug(LoggingLevel.INFO, 'AgentGov: no duplicate budget rows found. Safe to deploy v1.2.');
+    System.debug(LoggingLevel.INFO, 'AgentGov: no duplicate budget rows found. Safe to deploy.');
     return;
 }
 
 Set<Id> agentIds = new Set<Id>();
 Set<Date> budgetDates = new Set<Date>();
+Set<String> duplicateKeys = new Set<String>();
 for (AggregateResult duplicateGroup : duplicateGroups) {
-    agentIds.add((Id) duplicateGroup.get('agentId'));
-    budgetDates.add((Date) duplicateGroup.get('budgetDate'));
+    Id agentId = (Id) duplicateGroup.get('agentId');
+    Date budgetDate = (Date) duplicateGroup.get('budgetDate');
+    agentIds.add(agentId);
+    budgetDates.add(budgetDate);
+    duplicateKeys.add(String.valueOf(agentId) + '_' + String.valueOf(budgetDate));
 }
 
 // Thresholds come from configuration when it exists, per limit type, so the recomputed status
@@ -70,7 +77,11 @@ for (AgentGov_Limit_Config__mdt limitConfig : [
     );
 }
 
+// Rows arrive oldest first, so a group that a limit cuts short still ends up merged into its
+// oldest row: the rows this run does not reach are merged on the next one.
 Map<String, List<AgentGov_Budget__c>> groups = new Map<String, List<AgentGov_Budget__c>>();
+Integer rowsRead = 0;
+Integer rowsHeld = 0;
 for (AgentGov_Budget__c budget : [
     SELECT
         Id,
@@ -86,13 +97,21 @@ for (AgentGov_Budget__c budget : [
     FROM AgentGov_Budget__c
     WHERE Agent_Registration__c IN :agentIds AND Budget_Date__c IN :budgetDates
     ORDER BY CreatedDate ASC
-    LIMIT 40000
+    LIMIT :DETAIL_ROW_LIMIT
 ]) {
+    rowsRead++;
     String key = String.valueOf(budget.Agent_Registration__c) + '_' + String.valueOf(budget.Budget_Date__c);
+    if (!duplicateKeys.contains(key)) {
+        continue;
+    }
+    if (rowsHeld == MERGE_ROW_LIMIT) {
+        break;
+    }
     if (!groups.containsKey(key)) {
         groups.put(key, new List<AgentGov_Budget__c>());
     }
     groups.get(key).add(budget);
+    rowsHeld++;
 }
 
 List<AgentGov_Budget__c> survivors = new List<AgentGov_Budget__c>();
@@ -167,9 +186,10 @@ for (List<AgentGov_Budget__c> duplicates : groups.values()) {
 delete extras;
 update survivors;
 
-String remaining = duplicateGroups.size() == GROUP_LIMIT
-    ? ' The group limit was reached, so run this script again until it reports no duplicates.'
-    : ' No duplicates remain.';
+Boolean finished = duplicateGroups.size() < GROUP_LIMIT && rowsRead < DETAIL_ROW_LIMIT && rowsHeld < MERGE_ROW_LIMIT;
+String remaining = finished
+    ? ' No duplicates remain.'
+    : ' This run reached one of its limits, so run this script again until it reports no duplicates.';
 System.debug(
     LoggingLevel.INFO,
     'AgentGov: merged ' +

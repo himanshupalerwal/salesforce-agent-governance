@@ -9,5 +9,5 @@
     <unique>false</unique>
     <externalId>false</externalId>
     <defaultValue>10000</defaultValue>
-    <description>Maximum number of API calls allowed per day</description>
+    <description>Daily allocation of API calls. Requests are refused once API call usage reaches the Block threshold in AgentGov Limit Config, 95% of this number by default. Copied onto each day's budget row when that row is created, so a change applies from the next budget day.</description>
 </CustomField>

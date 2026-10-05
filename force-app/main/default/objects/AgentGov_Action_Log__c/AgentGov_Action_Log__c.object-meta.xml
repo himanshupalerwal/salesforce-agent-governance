@@ -43,7 +43,7 @@
     <allowInChatterGroups>false</allowInChatterGroups>
     <compactLayoutAssignment>SYSTEM</compactLayoutAssignment>
     <deploymentStatus>Deployed</deploymentStatus>
-    <description>Records every action an AI agent takes for audit trail and observability.</description>
+    <description>Audit trail of governed agent actions and refusals, administrators' console changes (Admin), delivered alerts (Alert), and the framework's own events (System).</description>
     <enableActivities>false</enableActivities>
     <enableBulkApi>true</enableBulkApi>
     <enableFeeds>false</enableFeeds>

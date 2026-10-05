@@ -9,6 +9,10 @@
  *              an action type that is not in the picklist) is re-inserted as a System entry
  *              carrying the original values, so no action is lost to bad input.
  *
+ *              Alerts are published as AgentGov_Alert__e for the alert trigger to record and
+ *              email. An alert the publish does not accept, as when the running user may not
+ *              publish, is recorded and emailed directly instead.
+ *
  *              Security posture: inherited sharing. All writes go through AgentGovDml.
  *              Platform-event triggers run in system mode by platform rule.
  */
@@ -30,6 +34,10 @@ public inherited sharing class AgentGovTriggerHandler {
 
     /** @description Length of the Error_Message__c fields on the action log and its event. */
     private static final Integer MAX_ERROR_CHARACTERS = 32768;
+
+    /** @description The messages handed to the last alert send, so tests can check recipients and bodies. */
+    @TestVisible
+    private static List<Messaging.SingleEmailMessage> sentAlertMessages = new List<Messaging.SingleEmailMessage>();
 
     /**
      * @description Records one agent action.
@@ -91,6 +99,14 @@ public inherited sharing class AgentGovTriggerHandler {
      *              carries the request's correlation id, the time the request had taken so
      *              far, and the session the agent's activity was recorded against, if any. A
      *              denial or failure also carries its reason as the row's error message.
+     * @param registrationId The acting agent, or null
+     * @param agentName The agent's name as the row should show it
+     * @param actionType One of the AgentGovConstants.ACTION_* values
+     * @param objectName Object acted upon
+     * @param recordId Record acted upon
+     * @param status Success, Failure, Denied, or Throttled
+     * @param details Free-form details; for a denial or failure, its reason
+     * @return The event, not yet published
      */
     public static AgentGov_Action_Event__e buildEvent(
         Id registrationId,
@@ -160,43 +176,45 @@ public inherited sharing class AgentGovTriggerHandler {
     }
 
     /**
-     * @description Publishes alert events. Rejected alerts are recorded as System log entries.
+     * @description Publishes alert events for AgentGovAlertTrigger to deliver. Nothing is
+     *              published or delivered while Enable_Real_Time_Events__c is off. Alerts the
+     *              publish does not accept, as when the running user may not publish, are
+     *              delivered here directly through handleAlerts, and the refusal is recorded as
+     *              one System entry.
      * @param alerts Alerts to publish
      */
     public static void publishAlerts(List<AgentGov_Alert__e> alerts) {
         if (!AgentGovSelector.isRealTimeEventsEnabled() || alerts == null || alerts.isEmpty()) {
             return;
         }
-        // Same reasoning as logActions: the agent user cannot publish, so a refusal is
-        // recorded rather than allowed to abort the governed transaction.
-        List<Database.SaveResult> results;
+        // The user an agent runs as cannot publish, as logActions explains, and the platform
+        // reports that refusal as failed save results rather than an exception. The alert
+        // trigger never sees a refused alert, so it is delivered here instead; otherwise a
+        // budget or breaker alert raised on a REST call would reach nobody.
+        List<AgentGov_Alert__e> refused = new List<AgentGov_Alert__e>();
+        Set<String> reasons = new Set<String>();
         try {
-            results = AgentGovDml.publishEvents(alerts);
+            List<Database.SaveResult> results = AgentGovDml.publishEvents(alerts);
+            for (Integer i = 0; i < results.size(); i++) {
+                if (!results[i].isSuccess()) {
+                    refused.add(alerts[i]);
+                    reasons.add(AgentGovDml.describeErrors(results[i].getErrors()));
+                }
+            }
         } catch (Exception publishRefused) {
-            // The user an agent runs as cannot publish, so the alert trigger will never fire
-            // and would never send the notification. Deliver it directly instead, otherwise a
-            // budget or breaker alert raised on a REST call reaches nobody.
-            recordFrameworkEvent(
-                null,
-                AgentGovConstants.ACTION_FAILURE,
-                'Alerts could not be published by the calling user; delivering ' +
-                    alerts.size() +
-                    ' alert(s) directly.',
-                null
-            );
-            handleAlerts(alerts);
+            refused = alerts;
+            reasons.add(publishRefused.getTypeName() + ': ' + publishRefused.getMessage());
+        }
+        if (refused.isEmpty()) {
             return;
         }
-        for (Integer i = 0; i < results.size(); i++) {
-            if (!results[i].isSuccess()) {
-                recordFrameworkEvent(
-                    toRegistrationId(alerts[i].Agent_Id__c),
-                    AgentGovConstants.ACTION_FAILURE,
-                    'Alert could not be published: ' + alerts[i].Alert_Type__c + ' / ' + alerts[i].Limit_Type__c,
-                    AgentGovDml.describeErrors(results[i].getErrors())
-                );
-            }
-        }
+        recordFrameworkEvent(
+            null,
+            AgentGovConstants.ACTION_FAILURE,
+            'Alerts could not be published; delivering ' + refused.size() + ' alert(s) directly.',
+            String.join(new List<String>(reasons), '; ')
+        );
+        handleAlerts(refused);
     }
 
     /**
@@ -211,7 +229,8 @@ public inherited sharing class AgentGovTriggerHandler {
      * @description Records each delivered alert in the action log, then emails the batch: to
      *              the administrator address in settings, and, when Notify_Agent_Owners__c is
      *              checked, to each affected agent's owner listing only that owner's agents.
-     *              All messages go out in one send. Called by AgentGovAlertTrigger.
+     *              All messages go out in one send. Called by AgentGovAlertTrigger, and by
+     *              publishAlerts for alerts the publish did not accept.
      * @param alerts Delivered alerts
      */
     public static void handleAlerts(List<AgentGov_Alert__e> alerts) {
@@ -356,6 +375,7 @@ public inherited sharing class AgentGovTriggerHandler {
     }
 
     private static void sendAlertEmails(List<Messaging.SingleEmailMessage> messages) {
+        sentAlertMessages = messages;
         try {
             for (Messaging.SendEmailResult result : Messaging.sendEmail(messages, false)) {
                 if (!result.isSuccess()) {
@@ -531,8 +551,9 @@ public inherited sharing class AgentGovTriggerHandler {
             return;
         }
         // A replacement row uses only values the framework controls. If it still fails the
-        // problem is systemic, and the exception makes it visible in the platform-event
-        // subscription status and Apex job logs rather than dropping the audit entry.
+        // problem is systemic, and the exception makes it visible rather than dropping the audit
+        // entry: in the event trigger it shows in the subscription status, and on the
+        // direct-insert path it fails the caller's request.
         AgentGovDml.assertAllSucceeded(AgentGovDml.insertRecords(replacements, false), 'Action log');
     }
 

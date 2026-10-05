@@ -1,9 +1,10 @@
 <template>
     <lightning-modal-header label="Credit budget"></lightning-modal-header>
     <lightning-modal-body>
-        <p class="slds-m-bottom_small">
+        <p class="slds-m-bottom_small credit-intro">
             Give usage back to today's budget for <strong>{agentName}</strong>, for example after an incident is
-            resolved. The budget status is worked out again from the corrected usage.
+            resolved. Today is the current day in the org's time zone. Usage never goes below zero, and the budget
+            status is worked out again from the corrected usage.
         </p>
         <template lwc:if={errorMessage}>
             <div class="slds-notify slds-notify_alert slds-alert_error slds-m-bottom_small" role="alert">

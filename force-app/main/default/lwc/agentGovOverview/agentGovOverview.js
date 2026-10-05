@@ -1,15 +1,16 @@
 /**
  * Overview tab of the AgentGov console, also placeable on its own: key figures, the agents that
  * need attention, live sessions, today's budget usage, recent alerts, and fourteen days of
- * org-wide usage. Selecting a key figure fires a drilldown event naming the console tab and agent
- * filter to open.
+ * org-wide usage. In the console, selecting a key figure fires a drilldown event naming the
+ * console tab and agent filter to open. Placed on its own, the overview leaves out the controls
+ * that open another tab, because nothing on such a page answers them.
  *
  * Reads go through the cacheable, USER_MODE methods of AgentGovDashboardController, so people see
  * only the agents they may see. Actions go through c/agentGovAdminActions, which asks for
  * confirmation and reports the outcome; their controls are shown only to people with the custom
  * permission, and the server checks it again.
  */
-import { LightningElement, wire } from 'lwc';
+import { LightningElement, api, wire } from 'lwc';
 import { NavigationMixin } from 'lightning/navigation';
 import { refreshApex } from '@salesforce/apex';
 import getAgentSummaries from '@salesforce/apex/AgentGovDashboardController.getAgentSummaries';
@@ -55,6 +56,14 @@ function agentNameOf(record) {
 }
 
 export default class AgentGovOverview extends NavigationMixin(LightningElement) {
+    /**
+     * Whether the page hosting the overview opens the tabs that its key figures and list links
+     * name in their drilldown events. The AgentGov console sets it; elsewhere those controls are
+     * left out.
+     * @type {boolean}
+     */
+    @api canDrillDown = false;
+
     alertLimit = ALERT_ROWS;
     historyDays = HISTORY_DAYS;
 
@@ -314,12 +323,16 @@ export default class AgentGovOverview extends NavigationMixin(LightningElement) 
                 actionLabel: 'View recent activity',
                 tab: 'activity'
             }
-        ].map((kpi) => ({
-            ...kpi,
-            displayValue: formatNumber(kpi.value),
-            tileClass: `ag-kpi kpi-tile${kpi.actionLabel ? ' ag-kpi_action' : ''}${kpi.alert ? ' ag-kpi_alert' : ''}`,
-            valueClass: `ag-kpi__value kpi-value${kpi.alert ? ' kpi-value_alert' : ''}`
-        }));
+        ].map((kpi) => {
+            const actionLabel = this.canDrillDown ? kpi.actionLabel : undefined;
+            return {
+                ...kpi,
+                actionLabel,
+                displayValue: formatNumber(kpi.value),
+                tileClass: `ag-kpi kpi-tile${actionLabel ? ' ag-kpi_action' : ''}${kpi.alert ? ' ag-kpi_alert' : ''}`,
+                valueClass: `ag-kpi__value kpi-value${kpi.alert ? ' kpi-value_alert' : ''}`
+            };
+        });
     }
 
     get attentionRows() {
@@ -371,7 +384,7 @@ export default class AgentGovOverview extends NavigationMixin(LightningElement) 
                 icon: 'utility:people',
                 variant: undefined,
                 title: 'No agents yet',
-                text: 'Agents appear here once they register through the REST API, an invocable action, or Apex.'
+                text: 'Agents appear here once they are registered over the REST API, from Apex, or with New on the Agent Registrations tab.'
             };
         }
         return {
@@ -386,12 +399,21 @@ export default class AgentGovOverview extends NavigationMixin(LightningElement) 
         return this.attentionCount > 0 ? 'ag-count ag-count_alert' : 'ag-count';
     }
 
+    get showAttentionLink() {
+        return this.canDrillDown && this.hasAttention;
+    }
+
     get moreAttention() {
         return this.attentionCount > ATTENTION_ROWS;
     }
 
     get moreAttentionLabel() {
         return `Show all ${formatNumber(this.attentionCount)} agents that need attention`;
+    }
+
+    get moreAttentionText() {
+        const more = this.attentionCount - ATTENTION_ROWS;
+        return `And ${formatNumber(more)} more ${more === 1 ? 'agent needs' : 'agents need'} attention.`;
     }
 
     get sessionRows() {
@@ -468,6 +490,10 @@ export default class AgentGovOverview extends NavigationMixin(LightningElement) 
 
     get usageTruncated() {
         return this.summaries.filter((agent) => !!agent.budgetStatus).length > USAGE_ROWS;
+    }
+
+    get showUsageLink() {
+        return this.canDrillDown && this.usageTruncated;
     }
 
     get alertRows() {

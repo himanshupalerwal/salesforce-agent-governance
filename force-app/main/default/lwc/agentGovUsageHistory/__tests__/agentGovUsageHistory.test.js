@@ -66,6 +66,10 @@ describe('c-agent-gov-usage-history', () => {
         expect(element.shadowRoot.querySelector('caption').textContent).toContain('all agents you can see');
         // The org-wide history has no status of its own, so the column is left out.
         expect(element.shadowRoot.querySelector('.status-label')).toBeNull();
+        // A day is listed when it has a budget row, whether or not anything was used.
+        expect(element.shadowRoot.querySelector('.history-note').textContent).toBe(
+            'Days with no budget record are not listed.'
+        );
         expect(element.days).toBe(14);
         expect(element.recordId).toBeUndefined();
     });

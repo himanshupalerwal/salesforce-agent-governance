@@ -190,8 +190,10 @@ export default class AgentGovAgentList extends LightningElement {
     refreshQueued = false;
 
     /**
-     * Which agents to show: all, attention, tripped, active, or inactive. Setting it clears the
-     * search and the selection, so a drill-down always shows the whole matching set.
+     * Which agents to show: all, attention, tripped, active, or inactive. Setting a different
+     * filter clears the search and the selection, and so does each new focusRequest, so a
+     * drill-down from the console always shows the whole matching set, also when it names the
+     * filter already selected.
      * @type {string}
      */
     @api
@@ -208,9 +210,10 @@ export default class AgentGovAgentList extends LightningElement {
     }
 
     /**
-     * Moves focus to the list's heading after the next render whenever the value changes. The
-     * console increments it when a key figure opens this tab, so keyboard focus follows the
-     * person to the list instead of staying on the hidden overview.
+     * Moves focus to the list's heading after the next render whenever the value changes, and
+     * clears the search and the selection. The console increments it when a key figure opens
+     * this tab, so keyboard focus follows the person to the list instead of staying on the hidden
+     * overview, and the list shows every agent the key figure counted.
      * @type {number}
      */
     @api
@@ -220,6 +223,8 @@ export default class AgentGovAgentList extends LightningElement {
     set focusRequest(value) {
         if (value && value !== this.focusToken) {
             this.focusPending = true;
+            this.searchTerm = '';
+            this.selectedIds = [];
         }
         this.focusToken = value;
     }

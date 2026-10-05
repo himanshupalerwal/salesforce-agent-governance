@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Circuit_Breaker_Failure_Threshold__c</fullName>
     <defaultValue>5</defaultValue>
-    <description>Number of failures before circuit breaker trips</description>
+    <description>Consecutive failures that trip an agent's circuit breaker from Closed to Open and block the agent. A success clears the count. Outcomes come from Log Agent Action (Success or Failure), the Governed Proxy, and /report with success; those reported while the breaker is Open are ignored. The framework records none for a deactivated agent or while governance is off.</description>
     <externalId>false</externalId>
     <label>Circuit Breaker Failure Threshold</label>
     <precision>3</precision>

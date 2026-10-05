@@ -17,7 +17,7 @@
  */
 @SuppressWarnings('PMD.ApexSharingViolations')
 public without sharing class AgentGovCleanup implements Database.Batchable<SObject>, Database.Stateful, Schedulable {
-    /** @description Records deleted per batch execution. Matches the platform maximum for a delete. */
+    /** @description Records deleted per batch execution: the largest scope a QueryLocator batch accepts. */
     @TestVisible
     private static final Integer BATCH_SIZE = 2000;
 
@@ -69,7 +69,11 @@ public without sharing class AgentGovCleanup implements Database.Batchable<SObje
         Database.executeBatch(new AgentGovCleanup(Phase.ACTION_LOGS, this.retentionDays), BATCH_SIZE);
     }
 
-    /** @description Selects the rows of the current phase to purge. */
+    /**
+     * @description Selects the rows of the current phase to purge.
+     * @param ctx Batch context, unused
+     * @return The rows older than the phase's retention period
+     */
     public Database.QueryLocator start(Database.BatchableContext ctx) {
         AgentGov_Settings__c settings = AgentGovSelector.getSettings();
         if (this.retentionDays == null) {
@@ -123,7 +127,11 @@ public without sharing class AgentGovCleanup implements Database.Batchable<SObje
         }
     }
 
-    /** @description Deletes one batch of rows. */
+    /**
+     * @description Deletes one batch of rows, counting those deleted and those that could not be.
+     * @param ctx Batch context, unused
+     * @param scope The rows to delete
+     */
     public void execute(Database.BatchableContext ctx, List<SObject> scope) {
         for (Database.DeleteResult result : AgentGovDml.deleteRecords(scope, false)) {
             if (result.isSuccess()) {
@@ -134,7 +142,10 @@ public without sharing class AgentGovCleanup implements Database.Batchable<SObje
         }
     }
 
-    /** @description Records a summary of this phase's purge and starts the next phase. */
+    /**
+     * @description Records a summary of this phase's purge and starts the next phase.
+     * @param ctx Batch context, unused
+     */
     public void finish(Database.BatchableContext ctx) {
         AgentGovTriggerHandler.recordFrameworkEvent(
             null,

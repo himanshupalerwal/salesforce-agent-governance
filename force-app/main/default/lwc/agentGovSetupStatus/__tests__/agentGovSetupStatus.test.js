@@ -29,6 +29,7 @@ const JOBS = [
 ];
 const NEEDS_WORK = {
     governanceEnabled: false,
+    realTimeEventsEnabled: false,
     adminEmailConfigured: false,
     notifyAgentOwners: false,
     sessionIdleMinutes: 30,
@@ -37,12 +38,15 @@ const NEEDS_WORK = {
 };
 const READY = {
     governanceEnabled: true,
+    realTimeEventsEnabled: true,
     adminEmailConfigured: true,
     notifyAgentOwners: true,
     sessionIdleMinutes: 15,
     jobs: JOBS.map((job) => ({ ...job, scheduled: true, nextFireTime: '2026-09-29T07:00:00.000Z' })),
     policyProblems: []
 };
+const SCHEDULED_MESSAGE =
+    'The three background jobs are scheduled to run as you, in your time zone, replacing those already scheduled.';
 
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -78,10 +82,11 @@ describe('c-agent-gov-setup-status', () => {
             ['Needs action:', 'Governance is off. Agents are not governed until it is turned on in AgentGov Settings.'],
             [
                 'Needs action:',
-                'No administrator email is set, so alerts are recorded in the action log but not emailed.'
+                'Real-time events are off in AgentGov Settings, so no alerts are raised or emailed and the console does not update by itself.'
             ],
+            ['Needs action:', 'No administrator email is set.'],
             ['Information:', 'Agent owners are not emailed about alerts.'],
-            ['Information:', 'A session ends after 30 minutes without activity.'],
+            ['Information:', 'A session ends after 30 minutes without activity, or after 24 hours.'],
             ['Needs action:', '1 of 3 background jobs are scheduled.'],
             ['Needs action:', '1 policy problem needs fixing.']
         ]);
@@ -91,6 +96,14 @@ describe('c-agent-gov-setup-status', () => {
             'Not scheduled',
             'Not scheduled'
         ]);
+        expect(jobs.map((row) => row.querySelector('td.slds-cell-wrap').textContent)).toEqual([
+            "Creates today's budget row for every active agent ahead of first use. Budgets start afresh each day in the org's time zone whether or not this runs.",
+            'Every hour: moves cooled-down breakers to half-open and closes sessions that are idle or have run for 24 hours.',
+            'Sundays at 02:00: purges audit rows, sessions, conflicts, and budgets past retention.'
+        ]);
+        expect(element.shadowRoot.querySelector('.schedule-help').textContent.trim()).toBe(
+            'Schedule jobs replaces the jobs in this table with new ones that run as you, in your time zone.'
+        );
         expect(jobs[0].querySelector('.job-next').textContent).not.toBe('—');
         expect(jobs[1].querySelector('.job-next').textContent).toBe('—');
         expect(element.shadowRoot.querySelector('.policy-problem').textContent).toBe(
@@ -105,17 +118,61 @@ describe('c-agent-gov-setup-status', () => {
         expect(checklist(element).map((item) => item[0])).toEqual([
             'Done:',
             'Done:',
+            'Done:',
             'Information:',
             'Information:',
             'Done:',
             'Needs action:'
         ]);
-        expect(checklist(element)[5][1]).toBe('2 policy problems need fixing.');
+        expect(
+            checklist(element)
+                .slice(1, 5)
+                .map((item) => item[1])
+        ).toEqual([
+            'Real-time events are on, so alerts are raised and recorded.',
+            'Alerts are emailed to an administrator.',
+            "Agent owners are emailed about their own agents' alerts.",
+            'A session ends after 15 minutes without activity, or after 24 hours.'
+        ]);
+        expect(checklist(element)[6][1]).toBe('2 policy problems need fixing.');
 
         getSetupStatus.emit(READY);
         await flushPromises();
-        expect(checklist(element)[5]).toEqual(['Done:', 'No policy problems found.']);
-        expect(element.shadowRoot.querySelector('.no-problems')).not.toBeNull();
+        expect(checklist(element)[6]).toEqual(['Done:', 'No policy problems found.']);
+        expect(element.shadowRoot.querySelector('.no-problems').textContent).toBe(
+            'No problems found in the policy records.'
+        );
+    });
+
+    it('says whom alerts reach, and that none are sent while real-time events are off', async () => {
+        const element = mount();
+        const alerting = () =>
+            checklist(element)
+                .filter((item, index) => index === 2 || index === 3)
+                .map((item) => item.join(' '));
+
+        getSetupStatus.emit({ ...READY, adminEmailConfigured: false });
+        await flushPromises();
+        expect(alerting()).toEqual([
+            'Needs action: No administrator email is set. Alerts are recorded in the action log and emailed only to the owners of the agents concerned.',
+            "Information: Agent owners are emailed about their own agents' alerts."
+        ]);
+
+        getSetupStatus.emit({ ...READY, adminEmailConfigured: false, notifyAgentOwners: false });
+        await flushPromises();
+        expect(alerting()).toEqual([
+            'Needs action: No administrator email is set, so alerts are recorded in the action log but not emailed.',
+            'Information: Agent owners are not emailed about alerts.'
+        ]);
+
+        getSetupStatus.emit({ ...READY, realTimeEventsEnabled: false, sessionIdleMinutes: 1 });
+        await flushPromises();
+        expect(checklist(element)[1][0]).toBe('Needs action:');
+        expect(alerting()).toEqual([
+            'Information: An administrator email is set. Alerts are emailed to it once real-time events are on.',
+            "Information: Agent owners are emailed about their own agents' alerts once real-time events are on."
+        ]);
+        expect(checklist(element)[4][1]).toBe('A session ends after 1 minute without activity, or after 24 hours.');
     });
 
     it('schedules the jobs, reports the outcome, and refreshes the checklist', async () => {
@@ -124,7 +181,7 @@ describe('c-agent-gov-setup-status', () => {
         await flushPromises();
         const toasts = jest.fn();
         element.addEventListener(ShowToastEventName, toasts);
-        scheduleJobs.mockResolvedValue({ success: true, message: 'The three background jobs are scheduled.' });
+        scheduleJobs.mockResolvedValue({ success: true, message: SCHEDULED_MESSAGE });
         const button = element.shadowRoot.querySelector('.schedule-button');
         const buttonFocus = jest.spyOn(button, 'focus');
 
@@ -134,13 +191,11 @@ describe('c-agent-gov-setup-status', () => {
         expect(scheduleJobs).toHaveBeenCalledTimes(1);
         expect(toasts.mock.calls[0][0].detail).toEqual({
             title: 'Jobs scheduled',
-            message: 'The three background jobs are scheduled.',
+            message: SCHEDULED_MESSAGE,
             variant: 'success'
         });
         expect(refreshApex).toHaveBeenCalledTimes(1);
-        expect(element.shadowRoot.querySelector('.announcement').textContent).toBe(
-            'The three background jobs are scheduled.'
-        );
+        expect(element.shadowRoot.querySelector('.announcement').textContent).toBe(SCHEDULED_MESSAGE);
         expect(buttonFocus).toHaveBeenCalled();
     });
 

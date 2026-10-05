@@ -5,5 +5,5 @@
     <type>DateTime</type>
     <required>false</required>
     <externalId>false</externalId>
-    <description>Timestamp of the last recorded failure</description>
+    <description>When the latest failure in the agent's current run of consecutive failures was recorded, a failed probe included. Failures reported while the breaker is Open are ignored. Cleared by a success and when the breaker closes or is reset.</description>
 </CustomField>

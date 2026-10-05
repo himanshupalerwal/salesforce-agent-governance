@@ -115,8 +115,9 @@ public with sharing class AgentGovSampleData {
         agents[3].Failure_Count__c = 3;
         agents[3].Last_Failure__c = DateTime.now().addHours(-1);
         agents[3].Cooldown_Until__c = DateTime.now().addMinutes(15);
-        // Last active as their sessions below: minutes ago for the three live ones.
-        List<Integer> minutesSinceActive = new List<Integer>{ 2, 6, 10, 60, 30 };
+        // Last active when their sessions below last saw activity: minutes ago for the three live
+        // ones, half an hour ago for the two that ended.
+        List<Integer> minutesSinceActive = new List<Integer>{ 2, 6, 10, 30, 30 };
         for (Integer i = 0; i < agents.size(); i++) {
             AgentGovRestAuth.applyKey(agents[i], SAMPLE_API_KEYS[i]);
             agents[i].Last_Active__c = DateTime.now().addMinutes(-minutesSinceActive[i]);
@@ -207,7 +208,11 @@ public with sharing class AgentGovSampleData {
      *
      *              This is what the install guide points people at. deleteAll() removes every
      *              AgentGov row in the org, which is not what someone clearing a demo wants.
-     * @return The number of rows removed
+     *
+     *              A run removes at most DELETE_BATCH_SIZE rows of each kind, and removes the
+     *              agents themselves only once none of their rows remain, so run it again until
+     *              it returns 0.
+     * @return The number of rows removed by this run
      */
     public static Integer deleteSampleData() {
         Set<String> hashes = new Set<String>();
@@ -224,25 +229,42 @@ public with sharing class AgentGovSampleData {
         }
         Set<Id> agentIds = new Map<Id, AgentGov_Registration__c>(sampleAgents).keySet();
 
-        Integer removed = 0;
-        removed += purge(
-            [SELECT Id FROM AgentGov_Action_Log__c WHERE Agent_Registration__c IN :agentIds LIMIT :DELETE_BATCH_SIZE]
-        );
-        removed += purge(
-            [
-                SELECT Id
-                FROM AgentGov_Conflict_Log__c
-                WHERE Agent_1__c IN :agentIds OR Agent_2__c IN :agentIds
-                LIMIT :DELETE_BATCH_SIZE
-            ]
-        );
-        removed += purge(
-            [SELECT Id FROM AgentGov_Session__c WHERE Agent_Registration__c IN :agentIds LIMIT :DELETE_BATCH_SIZE]
-        );
-        removed += purge(
-            [SELECT Id FROM AgentGov_Budget__c WHERE Agent_Registration__c IN :agentIds LIMIT :DELETE_BATCH_SIZE]
-        );
-        removed += purge(sampleAgents);
+        List<AgentGov_Action_Log__c> logs = [
+            SELECT Id
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c IN :agentIds
+            LIMIT :DELETE_BATCH_SIZE
+        ];
+        List<AgentGov_Conflict_Log__c> conflicts = [
+            SELECT Id
+            FROM AgentGov_Conflict_Log__c
+            WHERE Agent_1__c IN :agentIds OR Agent_2__c IN :agentIds
+            LIMIT :DELETE_BATCH_SIZE
+        ];
+        List<AgentGov_Session__c> sessions = [
+            SELECT Id
+            FROM AgentGov_Session__c
+            WHERE Agent_Registration__c IN :agentIds
+            LIMIT :DELETE_BATCH_SIZE
+        ];
+        List<AgentGov_Budget__c> budgets = [
+            SELECT Id
+            FROM AgentGov_Budget__c
+            WHERE Agent_Registration__c IN :agentIds
+            LIMIT :DELETE_BATCH_SIZE
+        ];
+        Integer removed = purge(logs) + purge(conflicts) + purge(sessions) + purge(budgets);
+        // Deleting an agent clears the log lookups that point at it, so rows a capped run left
+        // behind would lose their agent and no later run could find them. The agents go only
+        // with a run that found less than a full batch of every kind of row.
+        Boolean rowsMayRemain =
+            logs.size() == DELETE_BATCH_SIZE ||
+            conflicts.size() == DELETE_BATCH_SIZE ||
+            sessions.size() == DELETE_BATCH_SIZE ||
+            budgets.size() == DELETE_BATCH_SIZE;
+        if (!rowsMayRemain) {
+            removed += purge(sampleAgents);
+        }
         return removed;
     }
 

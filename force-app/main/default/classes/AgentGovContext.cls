@@ -11,10 +11,14 @@
  *              executeGoverned charges the measured usage even when the action throws, then
  *              rethrows the action's exception unchanged. A failed action still spent the
  *              org's resources, and if the caller lets the exception propagate the platform
- *              rolls the charge back with everything else.
+ *              rolls the charge back with everything else. The unit's Apex row is then a
+ *              Failure carrying the action's error, which also notes it when the charge took
+ *              the agent over budget.
  *
- *              Security posture: inherited sharing. Budget writes go through
- *              AgentGovBudgetManager, which runs in system mode.
+ *              Security posture: inherited sharing. Registrations are read through
+ *              AgentGovSelector, and the charge and the Apex rows are written by
+ *              AgentGovBudgetManager and AgentGovTriggerHandler through AgentGovDml, all in
+ *              system mode.
  */
 public inherited sharing class AgentGovContext {
     private static List<AgentGovContext> contextStack = new List<AgentGovContext>();
@@ -35,7 +39,7 @@ public inherited sharing class AgentGovContext {
      * @description Starts measuring resource consumption for an agent.
      * @param registrationId The agent registration Id
      * @return The new context
-     * @throws AgentGovException INVALID_INPUT for a null Id
+     * @throws AgentGovException INVALID_INPUT for a null Id, AGENT_NOT_ACTIVE for a deactivated agent
      */
     public static AgentGovContext startTracking(Id registrationId) {
         return startTracking(registrationId, null);
@@ -52,7 +56,7 @@ public inherited sharing class AgentGovContext {
         if (registrationId == null) {
             throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NULL_AGENT_ID);
         }
-        // Deactivation refuses an agent on every entry point, Apex included. The check is
+        // Deactivation refuses an agent on every governed entry point, Apex included. The check is
         // governance overhead: its query is taken before this context's baseline and removed
         // from every enclosing context, so no agent is charged for it.
         Integer queriesBefore = Limits.getQueries();
@@ -82,7 +86,7 @@ public inherited sharing class AgentGovContext {
     /**
      * @description Stops the innermost context and charges its measured consumption.
      * @return The budget after the charge
-     * @throws AgentGovException INVALID_INPUT when no context is active, BUDGET_EXCEEDED when the charge exhausts the budget
+     * @throws AgentGovException INVALID_INPUT when no context is active, BUDGET_EXCEEDED when the charge leaves the budget Blocked or Exhausted
      */
     public static AgentGovBudgetManager.BudgetResult stopTracking() {
         return stop(null);
@@ -139,8 +143,16 @@ public inherited sharing class AgentGovContext {
             }
             return AgentGovBudgetManager.consumeBudget(context.registrationId, consumption);
         } catch (AgentGovException denied) {
-            status = AgentGovConstants.ACTION_DENIED;
-            error = denied.getMessage();
+            // A unit whose action failed keeps that failure as its outcome, so the action's own
+            // error stays on the row and what the charge raised is added after it.
+            if (failure == null) {
+                status = AgentGovConstants.ACTION_DENIED;
+                error = denied.getMessage();
+            } else if (isBudgetDenial(denied)) {
+                error = failure + '\nIts usage was charged and took the agent over budget: ' + denied.getMessage();
+            } else {
+                error = failure + '\nIts usage could not be charged: ' + denied.getMessage();
+            }
             throw denied;
         } finally {
             // Written inside the bookkeeping window, so the enclosing agent is not charged for
@@ -162,12 +174,18 @@ public inherited sharing class AgentGovContext {
         return contextStack.isEmpty() ? null : contextStack[contextStack.size() - 1];
     }
 
-    /** @description The agent this context measures. */
+    /**
+     * @description Returns the agent this context measures.
+     * @return The agent registration Id
+     */
     public Id getRegistrationId() {
         return this.registrationId;
     }
 
-    /** @description The session this context was started with, if any. */
+    /**
+     * @description Returns the session this context was started with.
+     * @return The session Id, or null when none was given
+     */
     public Id getSessionId() {
         return this.sessionId;
     }
@@ -177,14 +195,15 @@ public inherited sharing class AgentGovContext {
      * @param registrationId The agent registration Id
      * @param action The work to run
      * @return The budget after the charge
-     * @throws Exception whatever the action throws, after the measured usage has been charged
+     * @throws AgentGovException INVALID_INPUT for a null Id or AGENT_NOT_ACTIVE for a deactivated agent, before the action runs; BUDGET_EXCEEDED when the action succeeds and its usage leaves the budget Blocked or Exhausted
+     * @throws Exception whatever the action throws, after its measured usage has been charged
      */
     public static AgentGovBudgetManager.BudgetResult executeGoverned(Id registrationId, AgentGovAction action) {
         startTracking(registrationId);
         try {
             action.execute();
         } catch (Exception actionFailure) {
-            chargeAfterFailure(actionFailure.getTypeName() + ': ' + actionFailure.getMessage());
+            chargeAfterFailure(registrationId, actionFailure.getTypeName() + ': ' + actionFailure.getMessage());
             throw actionFailure;
         }
         return stopTracking();
@@ -219,30 +238,38 @@ public inherited sharing class AgentGovContext {
         contextStack.clear();
     }
 
-    // Charges the failed action's measured usage. A budget exception raised here is
-    // deliberately not propagated: the action's own exception is the one the caller must
-    // see, and the budget row has already been written by the time it is raised.
+    // Charges the failed action's measured usage. Nothing raised here is propagated: the
+    // action's own exception is the one the caller must see. Crossing the budget is not a
+    // bookkeeping failure, because the usage was charged and the unit's Apex row records it
+    // next to the action's error; anything else is recorded as a System row.
     @SuppressWarnings('PMD.EmptyCatchBlock')
-    private static void chargeAfterFailure(String failure) {
+    private static void chargeAfterFailure(Id registrationId, String failure) {
         // Catches everything, not just AgentGovException. The caller is on its way to
         // rethrowing the action's own exception, and anything escaping here would replace it
         // with a bookkeeping error, hiding the real failure from the agent.
         try {
             stop(failure);
         } catch (Exception bookkeepingFailure) {
+            if (isBudgetDenial(bookkeepingFailure)) {
+                return;
+            }
             try {
                 AgentGovTriggerHandler.recordFrameworkEvent(
-                    null,
+                    AgentGovSelector.getRegistrationById(registrationId) != null ? registrationId : null,
                     AgentGovConstants.ACTION_FAILURE,
-                    'Usage could not be charged after a governed action failed: ' + bookkeepingFailure.getMessage(),
+                    'A failed governed action could not be fully recorded: ' + bookkeepingFailure.getMessage(),
                     null
                 );
             } catch (Exception unloggable) {
-                // Deliberately empty. The note about a failed charge could not itself be
-                // written, and nothing useful remains to be done: the caller is about to
-                // rethrow the agent's own exception, which must not be replaced by this one.
-                // A System.debug is not used here because production paths carry none.
+                // Deliberately empty. The note could not itself be written, and nothing useful
+                // remains to be done: the caller is about to rethrow the agent's own exception,
+                // which must not be replaced by this one.
             }
         }
+    }
+
+    private static Boolean isBudgetDenial(Exception failure) {
+        return failure instanceof AgentGovException &&
+            ((AgentGovException) failure).getErrorCode() == AgentGovException.ErrorCode.BUDGET_EXCEEDED;
     }
 }

@@ -114,9 +114,9 @@ const ALERTS = [
         Timestamp__c: '2026-09-28T10:06:00.000Z',
         Agent_Registration__c: 'a1',
         Agent_Registration__r: { Agent_Name__c: 'Order Sync Agent' },
-        Details__c: 'Block alert for agent Order Sync Agent: Circuit_Breaker at 100% (3 of 3)'
+        Details__c: 'Breaker open: 3 failures reached the threshold of 3.'
     },
-    { Id: 'l2', CreatedDate: '2026-09-28T09:00:00.000Z', Details__c: 'Warning alert without an agent' }
+    { Id: 'l2', CreatedDate: '2026-09-28T09:00:00.000Z', Details__c: 'An alert that names no agent' }
 ];
 
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -144,8 +144,10 @@ describe('c-agent-gov-overview', () => {
         resetNavigation();
     });
 
-    function mount() {
+    // The console hosts the overview with drill-downs; on its own page it has none.
+    function mount({ canDrillDown = true } = {}) {
         const element = createElement('c-agent-gov-overview', { is: AgentGovOverview });
+        element.canDrillDown = canDrillDown;
         document.body.appendChild(element);
         return element;
     }
@@ -323,6 +325,60 @@ describe('c-agent-gov-overview', () => {
         expect(drilldown.mock.calls[0][0].detail).toEqual({ tab: 'agents', filter: 'attention' });
     });
 
+    it('leaves out the controls that open another tab when it is placed on its own page', async () => {
+        const tripped = Array.from({ length: 6 }, (_, index) => ({
+            id: `t${index}`,
+            name: `Tripped Agent ${index}`,
+            status: 'Blocked',
+            breakerState: 'OPEN',
+            cooldownUntil: COOLDOWN,
+            budgetStatus: 'Normal',
+            peakUsagePercent: index
+        }));
+        const busy = Array.from({ length: 4 }, (_, index) => ({
+            id: `b${index}`,
+            name: `Busy Agent ${index}`,
+            status: 'Active',
+            breakerState: 'CLOSED',
+            budgetStatus: 'Normal',
+            peakUsagePercent: 50 + index
+        }));
+        const element = mount({ canDrillDown: false });
+        emitAll({ summaries: [...tripped, ...busy] });
+        await flushPromises();
+        const root = element.shadowRoot;
+
+        expect(root.querySelectorAll('.kpi-action').length).toBe(0);
+        expect(root.querySelectorAll('.ag-kpi_action').length).toBe(0);
+        expect(root.querySelector('.open-attention')).toBeNull();
+        expect(root.querySelector('.more-attention')).toBeNull();
+        expect(root.querySelector('.more-attention-text').textContent).toBe('And 1 more agent needs attention.');
+        // Ten agents have a budget today and eight bars are shown, without a link to the rest.
+        expect(root.querySelectorAll('li.usage-row').length).toBe(8);
+        expect(root.querySelector('.more-usage')).toBeNull();
+        // Links to an agent's own record page work anywhere.
+        expect(root.querySelector('tr.attention-row .agent-link')).not.toBeNull();
+    });
+
+    it('links to the full agent list when the console hosts it and more agents have a budget than it shows', async () => {
+        const busy = Array.from({ length: 9 }, (_, index) => ({
+            id: `b${index}`,
+            name: `Busy Agent ${index}`,
+            status: 'Active',
+            breakerState: 'CLOSED',
+            budgetStatus: 'Normal',
+            peakUsagePercent: 50 + index
+        }));
+        const element = mount();
+        emitAll({ summaries: busy });
+        await flushPromises();
+        const drilldown = jest.fn();
+        element.addEventListener('drilldown', drilldown);
+
+        element.shadowRoot.querySelector('.more-usage').click();
+        expect(drilldown.mock.calls[0][0].detail).toEqual({ tab: 'agents', filter: 'all' });
+    });
+
     it('lists live sessions with the agents running them, and ends one on request', async () => {
         const element = mount();
         emitAll();
@@ -349,7 +405,9 @@ describe('c-agent-gov-overview', () => {
 
         expect(element.shadowRoot.querySelector('section.sessions-card')).not.toBeNull();
         expect(element.shadowRoot.querySelector('.sessions-empty')).not.toBeNull();
-        expect(element.shadowRoot.querySelector('.alerts-empty')).not.toBeNull();
+        expect(text(element.shadowRoot.querySelector('.alerts-empty .ag-empty__text'))).toBe(
+            'Alerts are raised when a budget crosses a threshold or a circuit breaker trips, while real-time events are on in AgentGov Settings.'
+        );
         expect(text(element.shadowRoot.querySelector('.attention-empty .ag-empty__title'))).toBe('No agents yet');
         expect(element.shadowRoot.querySelector('.usage-empty')).not.toBeNull();
     });
@@ -373,7 +431,7 @@ describe('c-agent-gov-overview', () => {
 
         const alerts = Array.from(element.shadowRoot.querySelectorAll('li.alert-row'));
         expect(alerts.length).toBe(2);
-        // An alert stored in the earlier wording is shown as a label and a plain sentence.
+        // An alert is shown as its label in a pill and a plain sentence.
         expect(alerts[0].querySelector('.ag-pill').textContent).toBe('Breaker open');
         expect(alerts[0].querySelector('.alert-text').textContent).toBe('3 failures reached the threshold of 3.');
         expect(alerts[0].querySelector('.agent-link').textContent).toBe('Order Sync Agent');

@@ -10,5 +10,5 @@
     <relationshipName>Agent_Registrations</relationshipName>
     <deleteConstraint>SetNull</deleteConstraint>
     <trackHistory>true</trackHistory>
-    <description>The Salesforce user the agent runs as (an Agentforce Agent User or an integration user). When set, REST calls made by this user authenticate without an API key.</description>
+    <description>The Salesforce user the agent runs as (an Agentforce Agent User or an integration user). REST and Governed Proxy calls made by this user need no API key while this is the only registration bound to the user. A user bound to several registrations must send the agent's key in the X-AgentGov-Key header, or the call is refused with 403 ACCESS_DENIED.</description>
 </CustomField>

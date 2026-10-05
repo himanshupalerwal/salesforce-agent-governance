@@ -1,10 +1,16 @@
 /**
  * @description Custom exception for the AgentGov framework.
- *              Carries a typed error code that maps to an HTTP status so REST callers,
- *              invocable actions, and Apex callers all receive the same classification.
+ *              Carries a typed error code. REST callers receive the code and the HTTP status it
+ *              maps to, and Apex callers can read the code; the invocable actions return only
+ *              the message to Flow.
  *              This class touches no data and needs no sharing declaration.
  */
 public class AgentGovException extends Exception {
+    /**
+     * @description Classification of a refusal or failure. FRAMEWORK_DISABLED, AGENT_BLOCKED
+     *              and BUDGET_THROTTLED are never thrown: they are kept so code that switches
+     *              on the enum keeps compiling.
+     */
     public enum ErrorCode {
         FRAMEWORK_DISABLED,
         AGENT_NOT_FOUND,

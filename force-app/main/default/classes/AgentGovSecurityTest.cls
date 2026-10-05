@@ -2,6 +2,8 @@
  * @description Proves the access-mode split with a user who holds no access to AgentGov
  *              objects and no access to customer data: framework bookkeeping still succeeds
  *              in system mode, while operations on the agent's behalf are refused in user mode.
+ *              It also proves that the dashboard controller, reading in user mode, shows
+ *              AgentGov data to a holder of AgentGov User and refuses a user without it.
  */
 @IsTest
 private class AgentGovSecurityTest {

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Agent_Type__c</fullName>
-    <description>Which agent type this applies to (or "All" for all types)</description>
+    <description>Agent type this policy applies to: the value stored on registrations (Agentforce, MCP_External, Custom_Apex, Flow_Based) or the label shown on records (Agentforce, MCP External, Custom Apex, Flow Based), in any letter case, or All for every type. Text that names no type matches no agent, and the console's Setup tab lists a blank or unknown type as a policy problem.</description>
     <externalId>false</externalId>
     <fieldManageability>DeveloperControlled</fieldManageability>
     <label>Agent Type</label>

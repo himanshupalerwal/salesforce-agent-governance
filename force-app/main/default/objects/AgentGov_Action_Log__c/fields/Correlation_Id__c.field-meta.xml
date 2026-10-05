@@ -8,6 +8,6 @@
     <unique>false</unique>
     <externalId>true</externalId>
     <caseSensitive>false</caseSensitive>
-    <description>Correlation id of the request that produced this row: the caller's X-Correlation-Id header, or one generated for the request. Returned in every REST response, so a request can be traced to its audit rows. Marked as an external id so it is indexed.</description>
+    <description>Correlation id of the request that produced this row: the caller's X-Correlation-Id header, the Correlation ID input of a Flow action, or one generated for the request or console action. Returned in every REST response, so a request can be traced to its audit rows. Blank on Alert rows and on rows written outside a request, such as by a scheduled job. Marked as an external id so it is indexed.</description>
     <trackTrending>false</trackTrending>
 </CustomField>
