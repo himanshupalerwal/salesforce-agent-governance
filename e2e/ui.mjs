@@ -29,8 +29,9 @@ const CONSOLE_ROLES = {
 };
 
 /**
- * Returns the CLI alias and user Id of the org's user for a console role, creating the user on
- * first use. A Platform licence is enough, since AgentGov is built from custom objects.
+ * Returns the CLI alias, user Id, and a newly generated password of the org's user for a console
+ * role, creating the user on first use and resetting its password on every call. A Platform
+ * licence is enough, since AgentGov is built from custom objects.
  */
 async function ensureConsoleUser(admin, role) {
     const alias = `${admin.targetOrg}-${role}`;
@@ -92,36 +93,62 @@ async function openApp(targetOrg, browser, path, { viewport = { width: 1440, hei
     const page = await context.newPage();
     await page.goto(result.url, { waitUntil: 'domcontentloaded', timeout: 120000 });
     await completeFirstLogin(page, password);
-    await page.waitForURL(/\/lightning\//, { timeout: 120000 });
+    try {
+        await page.waitForURL(/\/lightning\//, { timeout: 120000 });
+    } catch (error) {
+        // Says where the login stopped, by path and title only, so a failure can be diagnosed
+        // without the session or the host appearing in the results.
+        const stoppedAt = `${new URL(page.url()).pathname} ("${await page.title().catch(() => '')}")`;
+        mkdirSync(screenshotDir, { recursive: true });
+        await page.screenshot({ path: join(screenshotDir, `login-stopped-${targetOrg}.png`) }).catch(() => {});
+        throw new Error(`the login as ${targetOrg} did not reach Lightning; it stopped at ${stoppedAt}`, {
+            cause: error
+        });
+    }
     return { context, page };
 }
 
 /**
- * A user's first browser login asks for a new password and a security question, however the
- * password was set. The suite's own console users answer it once, with the password that
- * ensureConsoleUser has just set and values that live only in memory; nothing is printed or
- * saved.
+ * Takes a browser login through the pages Salesforce can show before the app, in whatever order
+ * they come, until a Lightning page loads or the time runs out. A user's first login asks for a
+ * new password and a security question, however the password was set; the suite's own console
+ * users answer it once, with the password ensureConsoleUser has just set and values that live
+ * only in memory, so nothing is printed or saved. Any user may also be shown a one-time notice
+ * of scheduled maintenance, which is dismissed.
  */
 async function completeFirstLogin(page, current) {
     const newPassword = page.locator('#newpassword');
-    await Promise.race([
-        page.waitForURL(/\/lightning\//, { timeout: 120000 }).catch(() => {}),
-        newPassword.waitFor({ timeout: 120000 }).catch(() => {})
-    ]);
-    if (!(await newPassword.isVisible().catch(() => false))) {
-        return;
+    const maintenanceNotice = page.getByText('Got it', { exact: true }).first();
+    const deadline = Date.now() + 120000;
+    let passwordChanged = false;
+    while (Date.now() < deadline) {
+        if (/^\/lightning\//.test(new URL(page.url()).pathname)) {
+            return;
+        }
+        // Answered once only: a page still showing the form is waited out, not filled in again.
+        if (!passwordChanged && (await newPassword.isVisible().catch(() => false))) {
+            if (!current) {
+                throw new Error('the first login asks for a new password, and none was set for this user');
+            }
+            const fresh = `Ag1${randomBytes(18).toString('hex')}`;
+            // The page enables its button from key events, so the values are typed rather than set.
+            await page.locator('#currentpassword').pressSequentially(current);
+            await newPassword.pressSequentially(fresh);
+            await page.locator('#confirmpassword').pressSequentially(fresh);
+            await page.locator('#question').selectOption({ index: 1 });
+            await page.locator('#answer').pressSequentially(randomBytes(8).toString('hex'));
+            await page.locator('#password-button').click({ timeout: 15000 });
+            passwordChanged = true;
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            continue;
+        }
+        if (await maintenanceNotice.isVisible().catch(() => false)) {
+            await maintenanceNotice.click();
+            await page.waitForLoadState('domcontentloaded').catch(() => {});
+            continue;
+        }
+        await page.waitForTimeout(1000);
     }
-    if (!current) {
-        throw new Error('the first login asks for a new password, and none was set for this user');
-    }
-    const fresh = `Ag1${randomBytes(18).toString('hex')}`;
-    // The page enables its button from key events, so the values are typed rather than set.
-    await page.locator('#currentpassword').pressSequentially(current);
-    await newPassword.pressSequentially(fresh);
-    await page.locator('#confirmpassword').pressSequentially(fresh);
-    await page.locator('#question').selectOption({ index: 1 });
-    await page.locator('#answer').pressSequentially(randomBytes(8).toString('hex'));
-    await page.locator('#password-button').click({ timeout: 15000 });
 }
 
 /**
@@ -149,6 +176,22 @@ async function agentRowMenu(page, agentName, { choose } = {}) {
         await page.keyboard.press('Escape');
     }
     return labels;
+}
+
+/**
+ * Types an amount into the credit dialog the way a person does, once the dialog has finished
+ * opening, and checks the field holds it. Filling the field the instant it appeared could be
+ * lost, leaving the dialog to refuse an empty amount.
+ */
+async function enterAmount(page, dialog, amount) {
+    const input = dialog.locator('input[name="amount"]');
+    await input.waitFor({ timeout: 15000 });
+    await page.waitForTimeout(1000);
+    await input.click();
+    await input.pressSequentially(amount);
+    await input.press('Tab');
+    const held = (await input.inputValue()).replace(/\D/g, '');
+    ensure(held === amount, `the amount field holds "${held}", not ${amount}`);
 }
 
 // Disruptive actions ask for confirmation in a dialog that opens a moment after the click.
@@ -212,7 +255,8 @@ export async function runUiSuite(context) {
 
     const browser = await chromium.launch();
     const path = await consolePath(admin);
-    const shot = async (page, name) => page.screenshot({ path: join(screenshotDir, `${name}.png`), fullPage: true });
+    const shot = async (page, name, options = {}) =>
+        page.screenshot({ path: join(screenshotDir, `${name}.png`), fullPage: true, ...options });
     try {
         const { page } = await openApp(targetOrg, browser, path);
 
@@ -249,6 +293,15 @@ export async function runUiSuite(context) {
             await attentionRow(page, 'Order Sync Agent')
                 .getByRole('button', { name: 'Reset breaker', exact: true })
                 .click({ timeout: 15000 });
+            // The confirmation says what a reset changes and what it leaves in force.
+            const confirmation = page.getByText(/its failure count is cleared/).first();
+            await confirmation.waitFor({ timeout: 15000 });
+            ensure(
+                /A deactivated agent stays deactivated, and today's budget limits still apply\./.test(
+                    await confirmation.innerText()
+                ),
+                'the confirmation does not say that deactivation and budget limits still apply'
+            );
             await confirmDialog(page);
             ensure(
                 await waitFor(async () => (await breakerOf(orderSync)) === 'CLOSED', soon),
@@ -298,7 +351,7 @@ export async function runUiSuite(context) {
 
         await suite.check(
             'U7',
-            'A responder resets a breaker from the console, is audited by name, and is never offered key rotation',
+            "A responder resets a breaker from the console, is recorded as the audit row's creator, and is never offered key rotation",
             async () => {
                 const responder = await ensureConsoleUser(admin, 'responder');
                 await tripBreaker(admin, orderSync);
@@ -319,7 +372,10 @@ export async function runUiSuite(context) {
                     `the breaker is still ${await breakerOf(orderSync)}`
                 );
                 const [audit] = await adminRows(orderSync);
-                ensure(audit?.CreatedById === responder.id, 'the latest Admin audit row does not name the responder');
+                ensure(
+                    audit?.CreatedById === responder.id,
+                    'the latest Admin audit row was not created by the responder'
+                );
                 await shot(responderPage, 'console-responder');
             }
         );
@@ -395,6 +451,11 @@ export async function runUiSuite(context) {
                 const agent = agents['Renewal Forecast Flow'];
                 const auditBefore = (await adminRows(agent)).length;
                 await agentRowMenu(consolePage, 'Renewal Forecast Flow', { choose: 'Deactivate' });
+                // The confirmation says where the agent is refused rather than claiming every entry point.
+                await consolePage
+                    .getByText(/will be refused wherever it asks to act or to report usage/)
+                    .first()
+                    .waitFor({ timeout: 15000 });
                 await confirmDialog(consolePage);
                 ensure(
                     await waitFor(async () => (await statusOf(agent)) === 'Inactive', soon),
@@ -433,7 +494,8 @@ export async function runUiSuite(context) {
                 const newKey = await keyField.inputValue();
                 ensure(newKey && newKey !== oldKey, 'no new key was shown');
                 agent.key = newKey;
-                await shot(consolePage, 'console-new-key');
+                // The key works until the agent's key is rotated again, so the saved image covers it.
+                await shot(consolePage, 'console-new-key', { mask: [keyField] });
                 await consolePage.getByRole('button', { name: 'Done', exact: true }).click();
                 await keyField.waitFor({ state: 'detached', timeout: 15000 });
                 const refused = await authorizeWith(oldKey);
@@ -502,7 +564,7 @@ export async function runUiSuite(context) {
                 const auditBefore = (await adminRows(agent)).length;
                 await agentRowMenu(consolePage, 'Case Triage Agent', { choose: 'Credit budget' });
                 const dialog = consolePage.getByRole('dialog').last();
-                await dialog.locator('input[name="amount"]').fill('10');
+                await enterAmount(consolePage, dialog, '10');
                 await dialog.getByRole('button', { name: 'Credit budget', exact: true }).click();
                 const after = await waitFor(async () => {
                     const used = await apiCallsUsed();
@@ -510,6 +572,144 @@ export async function runUiSuite(context) {
                 }, soon);
                 ensure(after === before - 10, `usage went from ${before} to ${after}, expected ${before - 10}`);
                 ensure((await adminRows(agent)).length === auditBefore + 1, 'the credit was not audited');
+            }
+        );
+
+        await suite.check(
+            'U14',
+            'Crediting more than an agent has used credits only what it used, and the audit row says so',
+            async () => {
+                const agent = agents['Case Triage Agent'];
+                // One more governed API call, so there is usage to credit whatever U13 left.
+                const charged = await admin.apexRest('POST', '/agentgov/authorize', {
+                    headers: { 'X-AgentGov-Key': agent.key },
+                    body: { objectName: 'Case', operation: 'API_Call' }
+                });
+                ensure(charged.status === 200, `the agent's API call got ${charged.status}`);
+                const apiCallsUsed = async () =>
+                    (
+                        await admin.query(
+                            `SELECT API_Calls_Consumed__c FROM AgentGov_Budget__c WHERE Agent_Registration__c = '${agent.id}' ORDER BY Budget_Date__c DESC LIMIT 1`
+                        )
+                    )[0]?.API_Calls_Consumed__c ?? 0;
+                const before = await apiCallsUsed();
+                ensure(before >= 1, `the agent has used ${before} API calls`);
+                const auditBefore = (await adminRows(agent)).length;
+                await agentRowMenu(consolePage, 'Case Triage Agent', { choose: 'Credit budget' });
+                const dialog = consolePage.getByRole('dialog').last();
+                await enterAmount(consolePage, dialog, '1000000');
+                await dialog.getByRole('button', { name: 'Credit budget', exact: true }).click();
+                if (!(await waitFor(async () => (await apiCallsUsed()) === 0, soon))) {
+                    // Says what the dialog shows, such as an error the server returned.
+                    const shown = (await dialog.isVisible().catch(() => false))
+                        ? (await dialog.innerText()).replace(/\s+/g, ' ').trim()
+                        : 'the dialog had closed';
+                    ensure(false, `usage went from ${before} to ${await apiCallsUsed()}, not zero; ${shown}`);
+                }
+                const audits = await adminRows(agent);
+                ensure(audits.length === auditBefore + 1, 'the credit was not audited');
+                const expected = new RegExp(
+                    `^Credited ${before} API calls? to today's budget, bringing its API call usage to zero ` +
+                        '\\(a credit of 1000000 was requested\\)\\.'
+                );
+                ensure(expected.test(audits[0].Details__c), `the audit row reads "${audits[0].Details__c}"`);
+            }
+        );
+
+        // --- What the console says about the org's setup and an agent's key ---------------------
+
+        await suite.check(
+            'U15',
+            'The Setup tab shows the session idle window in force, and warns that no alerts are raised while real-time events are off',
+            async () => {
+                // An idle window outside 1 to 1440 minutes, which the framework replaces with the
+                // 30-minute default, and real-time events off.
+                await admin.apex(`
+                    AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
+                    settings.Session_Idle_Minutes__c = 0;
+                    settings.Enable_Real_Time_Events__c = false;
+                    update settings;
+                `);
+                try {
+                    const { page: setupPage } = await openApp(targetOrg, browser, path);
+                    await setupPage
+                        .getByRole('tab', { name: 'Setup', exact: true })
+                        .first()
+                        .click({ timeout: RENDER_TIMEOUT_MS });
+                    const setup = setupPage.locator('c-agent-gov-setup-status');
+                    await setup.locator('li.check').first().waitFor({ timeout: RENDER_TIMEOUT_MS });
+                    const lines = (await setup.locator('.check-label').allInnerTexts()).map((line) => line.trim());
+                    const listed = lines.join(' | ');
+                    ensure(
+                        lines.includes('A session ends after 30 minutes without activity, or after 24 hours.'),
+                        `the checklist does not show the idle window in force: ${listed}`
+                    );
+                    ensure(
+                        lines.some((line) => line.startsWith('Real-time events are off in AgentGov Settings')),
+                        `the checklist does not say that real-time events are off: ${listed}`
+                    );
+                    ensure(
+                        !lines.some((line) => /alerts are (recorded|emailed)/i.test(line)),
+                        `the checklist says alerts are recorded or emailed while none are raised: ${listed}`
+                    );
+                    ensure(
+                        /replaces the jobs in this table/.test(await setup.locator('.schedule-help').innerText()),
+                        'the Setup tab does not say that Schedule jobs replaces the jobs'
+                    );
+                    await shot(setupPage, 'console-setup-events-off');
+                } finally {
+                    // Back to the values this suite runs with.
+                    await admin.apex(`
+                        AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
+                        settings.Session_Idle_Minutes__c = 30;
+                        settings.Enable_Real_Time_Events__c = true;
+                        update settings;
+                    `);
+                }
+            }
+        );
+
+        await suite.check(
+            'U16',
+            "An agent's page shows a key with no stored prefix as issued, and says a deactivated agent has no session because it is deactivated",
+            async () => {
+                // A plaintext key from before keys were hashed, which an upgraded org holds until
+                // the agent next connects: it works, and no prefix is stored for it.
+                const name = `E2E Legacy Key ${randomBytes(3).toString('hex')}`;
+                await admin.apex(`
+                    insert new AgentGov_Registration__c(
+                        Agent_Name__c = ${quote(name)},
+                        Agent_Type__c = 'Custom_Apex',
+                        Status__c = 'Inactive',
+                        API_Key__c = ${quote(`legacy-${randomBytes(8).toString('hex')}`)}
+                    );
+                `);
+                const [legacy] = await admin.query(
+                    `SELECT Id FROM AgentGov_Registration__c WHERE Agent_Name__c = ${quote(name)}`
+                );
+                ensure(legacy, `${name} was not created`);
+                try {
+                    const { page: agentPage } = await openApp(
+                        targetOrg,
+                        browser,
+                        `/lightning/r/AgentGov_Registration__c/${legacy.Id}/view`
+                    );
+                    const panel = agentPage.locator('c-agent-gov-agent-panel');
+                    const key = panel.locator('.key-prefix');
+                    await key.waitFor({ timeout: RENDER_TIMEOUT_MS });
+                    const keyText = (await key.innerText()).trim();
+                    ensure(
+                        keyText === 'Issued, with no prefix stored. Rotate it to get one.',
+                        `the API key reads "${keyText}"`
+                    );
+                    const sessionText = (await panel.locator('.no-session').innerText()).trim();
+                    ensure(
+                        sessionText === 'No live session. The agent is deactivated.',
+                        `the live session reads "${sessionText}"`
+                    );
+                } finally {
+                    await admin.apex(`delete [SELECT Id FROM AgentGov_Registration__c WHERE Id = '${legacy.Id}'];`);
+                }
             }
         );
     } finally {
