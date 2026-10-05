@@ -1,9 +1,10 @@
 /**
  * @description Schedules and unschedules AgentGov's three background jobs with the documented
  *              schedules: the daily budget reset at midnight, the health check every hour, and
- *              the cleanup on Sunday at 02:00. Running scheduleAll again replaces the jobs
- *              instead of adding duplicates, so it is safe in setup scripts and before and after
- *              every deploy.
+ *              the cleanup on Sunday at 02:00. Jobs are found by those three names, so running
+ *              scheduleAll again replaces them instead of adding duplicates, and a copy scheduled
+ *              under another name is left alone. Schedule the jobs after a deploy, not before: a
+ *              scheduled job blocks the deploy of every class it uses.
  *
  *              Security posture: inherited sharing. The job lookup goes through AgentGovSelector.
  *              Scheduling requires a user who is allowed to schedule Apex.
@@ -22,7 +23,7 @@ public inherited sharing class AgentGovJobScheduler {
     }
 
     /**
-     * @description Schedules the three jobs, replacing any AgentGov jobs already scheduled.
+     * @description Schedules the three jobs, replacing any already scheduled under their names.
      * @return The Ids of the scheduled jobs
      */
     public static List<Id> scheduleAll() {
@@ -43,8 +44,10 @@ public inherited sharing class AgentGovJobScheduler {
     }
 
     /**
-     * @description Removes every scheduled AgentGov job. Run before deploying a new version,
-     *              because the platform refuses to replace a class that a scheduled job uses.
+     * @description Removes the jobs scheduled under the three AgentGov names. Before a deploy, run
+     *              scripts/setup/unschedule-jobs.apex instead: the platform refuses to replace a
+     *              class that any scheduled job uses, and the script also finds copies scheduled
+     *              under other names by the class they run.
      * @return The number of jobs removed
      */
     public static Integer unscheduleAll() {

@@ -2,6 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Is_Active__c</fullName>
     <defaultValue>true</defaultValue>
+    <description>Unchecked, this record is ignored and its limit type uses the built-in defaults: thresholds of 80, 90 and 95 percent and a default daily budget of 10,000 API calls, 5,000 SOQL queries or 3,000 DML operations. It does not turn the limit off.</description>
     <externalId>false</externalId>
     <fieldManageability>DeveloperControlled</fieldManageability>
     <label>Is Active</label>

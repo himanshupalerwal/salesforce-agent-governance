@@ -206,6 +206,9 @@ private class AgentGovCircuitBreakerTest {
             AgentGovConstants.STATUS_THROTTLED,
             null
         );
+        reg.Failure_Count__c = 3;
+        update reg;
+        AgentGovSelector.clearCache();
 
         Test.startTest();
         AgentGovCircuitBreaker.recordFailure(reg.Id);
@@ -215,6 +218,37 @@ private class AgentGovCircuitBreakerTest {
         Assert.areEqual(AgentGovConstants.CB_OPEN, updated.Circuit_Breaker_State__c);
         Long minutes = (updated.Cooldown_Until__c.getTime() - DateTime.now().getTime()) / 60000;
         Assert.isTrue(minutes >= 55 && minutes <= 60, 'Cooldown is doubled from the 30 minute default, got ' + minutes);
+        Assert.areEqual(4, updated.Failure_Count__c, 'The failed probe extends the run of consecutive failures');
+        Assert.isNotNull(updated.Last_Failure__c, 'The failed probe is the latest failure');
+    }
+
+    @IsTest
+    static void outcomesRecordedWhileOpenChangeNothing() {
+        AgentGov_Registration__c reg = agentInState(
+            AgentGovConstants.CB_OPEN,
+            AgentGovConstants.STATUS_BLOCKED,
+            DateTime.now().addMinutes(20)
+        );
+        reg.Failure_Count__c = 3;
+        update reg;
+        AgentGovSelector.clearCache();
+        AgentGov_Registration__c before = reload(reg.Id);
+
+        Test.startTest();
+        AgentGovCircuitBreaker.recordFailure(reg.Id);
+        AgentGovCircuitBreaker.recordSuccess(reg.Id);
+        Integer writes = Limits.getDmlStatements();
+        Test.stopTest();
+
+        AgentGov_Registration__c after = reload(reg.Id);
+        Assert.areEqual(
+            AgentGovConstants.CB_OPEN,
+            after.Circuit_Breaker_State__c,
+            'Only the probe or a reset ends OPEN'
+        );
+        Assert.areEqual(before.Cooldown_Until__c, after.Cooldown_Until__c, 'A failure does not restart the cooldown');
+        Assert.areEqual(3, after.Failure_Count__c, 'Neither outcome changes the count');
+        Assert.areEqual(0, writes, 'Nothing is written and no second alert is published');
     }
 
     @IsTest
@@ -306,5 +340,67 @@ private class AgentGovCircuitBreakerTest {
 
         Assert.areEqual(AgentGovConstants.CB_HALF_OPEN, reload(open.Id).Circuit_Breaker_State__c);
         Assert.areEqual(AgentGovConstants.CB_CLOSED, reload(closed.Id).Circuit_Breaker_State__c);
+    }
+
+    @IsTest
+    static void theHealthCheckLeavesABreakerThatReopenedSinceItsReadAlone() {
+        AgentGov_Registration__c reg = agentInState(
+            AgentGovConstants.CB_OPEN,
+            AgentGovConstants.STATUS_BLOCKED,
+            DateTime.now().addMinutes(-5)
+        );
+        List<AgentGov_Registration__c> readByTheJob = AgentGovSelector.getOpenAgentsPastCooldown();
+        Assert.areEqual(1, readByTheJob.size(), 'The job sees the breaker as due');
+        // Between the job's unlocked read and its lock, a probe ran, failed, and re-opened the
+        // breaker with a new cooldown.
+        update new AgentGov_Registration__c(Id = reg.Id, Cooldown_Until__c = DateTime.now().addMinutes(60));
+        DateTime newCooldown = reload(reg.Id).Cooldown_Until__c;
+
+        Test.startTest();
+        AgentGovCircuitBreaker.transitionToHalfOpen(readByTheJob);
+        Test.stopTest();
+
+        AgentGov_Registration__c after = reload(reg.Id);
+        Assert.areEqual(AgentGovConstants.CB_OPEN, after.Circuit_Breaker_State__c, 'The new cooldown is served');
+        Assert.areEqual(newCooldown, after.Cooldown_Until__c, 'The new cooldown is kept');
+        Assert.areEqual(AgentGovConstants.STATUS_BLOCKED, after.Status__c, 'The agent stays Blocked');
+    }
+
+    @IsTest
+    static void aSuccessOnAHealthyBreakerTakesNoLockAndWritesNothing() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('CB Agent', 'Agentforce', true);
+        // The transaction already holds the agent, as every caller does by the time it records
+        // an outcome.
+        AgentGovSelector.getRegistrationById(reg.Id);
+
+        Test.startTest();
+        Integer queriesBefore = Limits.getQueries();
+        AgentGovCircuitBreaker.recordSuccess(reg.Id);
+        Integer queries = Limits.getQueries() - queriesBefore;
+        Integer writes = Limits.getDmlStatements();
+        Test.stopTest();
+
+        // No query means no FOR UPDATE: a healthy agent's success never locks the registration,
+        // so it cannot take that lock after the session lock its charge took.
+        Assert.areEqual(0, queries, 'No locking read');
+        Assert.areEqual(0, writes, 'Nothing to write');
+        AgentGov_Registration__c after = reload(reg.Id);
+        Assert.areEqual(AgentGovConstants.CB_CLOSED, after.Circuit_Breaker_State__c);
+        Assert.areEqual(0, after.Failure_Count__c);
+    }
+
+    @IsTest
+    static void aSuccessAfterAFailureStillTakesTheLockAndClearsIt() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('CB Agent', 'Agentforce', true);
+
+        Test.startTest();
+        AgentGovCircuitBreaker.recordFailure(reg.Id);
+        Integer queriesBefore = Limits.getQueries();
+        AgentGovCircuitBreaker.recordSuccess(reg.Id);
+        Integer queries = Limits.getQueries() - queriesBefore;
+        Test.stopTest();
+
+        Assert.areEqual(1, queries, 'The success that has a failure to clear reads the row under a lock');
+        Assert.areEqual(0, reload(reg.Id).Failure_Count__c, 'The failure is cleared');
     }
 }

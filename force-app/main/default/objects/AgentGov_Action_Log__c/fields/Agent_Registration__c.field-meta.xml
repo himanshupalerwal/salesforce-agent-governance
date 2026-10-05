@@ -4,7 +4,7 @@
     <label>Agent Registration</label>
     <type>Lookup</type>
     <externalId>false</externalId>
-    <description>The agent that performed this action</description>
+    <description>The agent the row is about: the agent that acted or was refused, or, on Admin, Alert and System rows, the agent that was changed, alerted about, or concerned. Blank when no single agent is involved. The person behind an Admin row is its Created By.</description>
     <referenceTo>AgentGov_Registration__c</referenceTo>
     <relationshipLabel>Agent Action Logs</relationshipLabel>
     <relationshipName>Agent_Action_Logs</relationshipName>

@@ -78,6 +78,11 @@
                 </ul>
 
                 <h3 class="section-title">Background jobs</h3>
+                <template lwc:if={canSchedule}>
+                    <p class="ag-meta slds-m-bottom_x-small schedule-help">
+                        Schedule jobs replaces the jobs in this table with new ones that run as you, in your time zone.
+                    </p>
+                </template>
                 <div class="slds-scrollable_x slds-m-bottom_large">
                     <table class="slds-table slds-table_cell-buffer slds-table_bordered jobs-table">
                         <caption class="slds-assistive-text">
@@ -117,7 +122,7 @@
                     </ul>
                 </template>
                 <template lwc:else>
-                    <p class="ag-meta no-problems">Every active policy is valid.</p>
+                    <p class="ag-meta no-problems">No problems found in the policy records.</p>
                 </template>
             </template>
         </div>

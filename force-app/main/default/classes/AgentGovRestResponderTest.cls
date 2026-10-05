@@ -1,6 +1,7 @@
 /**
- * @description Tests for the REST response envelope, including the internal-error path that
- *              logs the exception and hides it from the caller.
+ * @description Tests for the REST response envelope, including the internal-error paths that
+ *              log the failure once and hide it from the caller, and for reading text
+ *              properties from a request body.
  */
 @IsTest
 private class AgentGovRestResponderTest {
@@ -88,15 +89,65 @@ private class AgentGovRestResponderTest {
             RestContext.response.responseBody.toString().contains('secret detail'),
             'Exception text never reaches the caller'
         );
-        AgentGov_Action_Log__c entry = [
-            SELECT Action_Type__c, Status__c, Details__c, Error_Message__c
+        List<AgentGov_Action_Log__c> entries = [
+            SELECT Agent_Registration__c, Action_Type__c, Status__c, Details__c, Error_Message__c, Correlation_Id__c
             FROM AgentGov_Action_Log__c
-            WHERE Agent_Registration__c = :reg.Id
         ];
+        Assert.areEqual(1, entries.size(), 'One unexpected exception leaves one row: ' + JSON.serialize(entries));
+        AgentGov_Action_Log__c entry = entries[0];
+        Assert.areEqual(reg.Id, entry.Agent_Registration__c);
         Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, entry.Action_Type__c);
         Assert.areEqual(AgentGovConstants.ACTION_FAILURE, entry.Status__c);
-        Assert.isTrue(entry.Details__c.contains('cid-500'), 'The correlation id links the log row to the response');
+        Assert.areEqual('cid-500', entry.Correlation_Id__c, 'The correlation id links the log row to the response');
+        Assert.isTrue(entry.Details__c.contains('cid-500'), 'The details name the correlation id too');
         Assert.isTrue(entry.Error_Message__c.contains('secret detail'), 'The diagnostic is kept for administrators');
+    }
+
+    @IsTest
+    static void anInternalErrorRaisedByTheFrameworkIsLoggedOnceNotEchoed() {
+        RestContext.response = new RestResponse();
+
+        AgentGovRestResponder.error(
+            RestContext.response,
+            new AgentGovException(AgentGovException.ErrorCode.INTERNAL_ERROR, 'ledger detail'),
+            'cid-ledger'
+        );
+
+        Assert.areEqual(500, RestContext.response.statusCode);
+        Assert.areEqual('INTERNAL_ERROR', body().get('errorCode'));
+        Assert.areEqual(AgentGovConstants.ERR_INTERNAL, body().get('message'));
+        Assert.isFalse(RestContext.response.responseBody.toString().contains('ledger detail'));
+        AgentGov_Action_Log__c entry = [
+            SELECT Action_Type__c, Status__c, Error_Message__c, Correlation_Id__c
+            FROM AgentGov_Action_Log__c
+        ];
+        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, entry.Action_Type__c);
+        Assert.areEqual('cid-ledger', entry.Correlation_Id__c);
+        Assert.areEqual('ledger detail', entry.Error_Message__c);
+    }
+
+    @IsTest
+    static void readStringReturnsTextAndRefusesOtherJsonTypes() {
+        Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(
+            '{"text": "Account", "blank": null, "number": 7, "flag": true, "list": ["a"], "object": {"a": 1}}'
+        );
+
+        Assert.areEqual('Account', AgentGovRestResponder.readString(body, 'text'));
+        Assert.isNull(AgentGovRestResponder.readString(body, 'blank'));
+        Assert.isNull(AgentGovRestResponder.readString(body, 'absent'));
+        Assert.isNull(AgentGovRestResponder.readString(null, 'text'));
+        for (String name : new List<String>{ 'number', 'flag', 'list', 'object' }) {
+            try {
+                AgentGovRestResponder.readString(body, name);
+                Assert.fail('Must be refused: ' + name);
+            } catch (AgentGovException e) {
+                Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+                Assert.areEqual(
+                    String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ name }),
+                    e.getMessage()
+                );
+            }
+        }
     }
 
     @IsTest

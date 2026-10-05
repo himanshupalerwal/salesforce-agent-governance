@@ -3,7 +3,8 @@
  *
  *              States: CLOSED (normal) -> OPEN (blocked after repeated failures) ->
  *              HALF_OPEN (one probe request allowed after the cooldown) -> CLOSED on a
- *              successful probe, or back to OPEN with a doubled cooldown on a failed one.
+ *              successful probe, or back to OPEN for twice the configured cooldown (at most
+ *              one day) on a failed one.
  *
  *              Only one probe is admitted while a breaker is HALF_OPEN. The probe is claimed
  *              under a row lock by stamping Half_Open_Probe_At__c, so concurrent requests
@@ -11,12 +12,21 @@
  *              outcome within one cooldown period is treated as abandoned and a new probe
  *              may be admitted.
  *
+ *              Outcomes reported while a breaker is OPEN are ignored: it admits no work then,
+ *              so such an outcome belongs to work admitted before it tripped or done without
+ *              asking. It leaves OPEN only once its cooldown has passed, when a request claims
+ *              the probe or the scheduled health check moves it to HALF_OPEN, or when someone
+ *              resets it, which closes it from any state.
+ *
  *              Security posture: inherited sharing. Reads go through AgentGovSelector and
  *              writes through AgentGovDml, both of which run in system mode.
  */
 public inherited sharing class AgentGovCircuitBreaker {
     /**
-     * @description Checks whether an agent may make a request.
+     * @description Decides whether an agent may make a request. A CLOSED breaker admits it. An
+     *              OPEN breaker whose cooldown has passed moves to HALF_OPEN and admits it as the
+     *              single probe, and a HALF_OPEN breaker admits it only when no probe is
+     *              outstanding, claiming the probe; both are written under a row lock.
      * @param registrationId The agent registration Id
      * @return True when the request is allowed
      * @throws AgentGovException AGENT_NOT_FOUND when the registration does not exist
@@ -87,7 +97,8 @@ public inherited sharing class AgentGovCircuitBreaker {
     }
 
     /**
-     * @description Records a successful action. A HALF_OPEN breaker closes.
+     * @description Records a successful action. A HALF_OPEN breaker closes, and a CLOSED one
+     *              clears its count of consecutive failures. Ignored while the breaker is OPEN.
      * @param registrationId The agent registration Id
      */
     public static void recordSuccess(Id registrationId) {
@@ -95,8 +106,10 @@ public inherited sharing class AgentGovCircuitBreaker {
     }
 
     /**
-     * @description Records a failed action. Failures accumulate until the breaker trips;
-     *              a failed HALF_OPEN probe re-trips it with a longer cooldown.
+     * @description Records a failed action. Consecutive failures trip a CLOSED breaker at the
+     *              threshold, and a failed HALF_OPEN probe re-trips it with a longer cooldown.
+     *              Ignored while the breaker is OPEN, so failures reported then never extend
+     *              its cooldown.
      * @param registrationId The agent registration Id
      */
     public static void recordFailure(Id registrationId) {
@@ -104,7 +117,10 @@ public inherited sharing class AgentGovCircuitBreaker {
     }
 
     /**
-     * @description Records outcomes for several agents in one update.
+     * @description Records outcomes for several agents in one update. Outcomes for an agent
+     *              whose breaker is OPEN are ignored. A success for an agent whose breaker this
+     *              transaction last read as CLOSED with no failures changes nothing, and is
+     *              settled without a row lock.
      * @param outcomes Map of registration Id to true for success or false for failure
      */
     public static void recordOutcomes(Map<Id, Boolean> outcomes) {
@@ -114,7 +130,9 @@ public inherited sharing class AgentGovCircuitBreaker {
         // Read under a row lock. This is a read-modify-write on the failure tally and the
         // breaker state: without the lock a success recorded by one transaction can overwrite
         // a trip written by a concurrent failure, silently reverting it and losing the count.
-        Map<Id, AgentGov_Registration__c> registrations = AgentGovSelector.getRegistrationsForUpdate(outcomes.keySet());
+        Map<Id, AgentGov_Registration__c> registrations = AgentGovSelector.getRegistrationsForUpdate(
+            outcomesThatMayChange(outcomes)
+        );
         Integer threshold = failureThreshold();
         DateTime now = DateTime.now();
         List<AgentGov_Registration__c> changed = new List<AgentGov_Registration__c>();
@@ -123,6 +141,12 @@ public inherited sharing class AgentGovCircuitBreaker {
         for (AgentGov_Registration__c registration : registrations.values()) {
             Boolean succeeded = outcomes.get(registration.Id) == true;
             String state = stateOf(registration);
+            if (state == AgentGovConstants.CB_OPEN) {
+                // An OPEN breaker admits no work, so these are ignored. Counting them would let a
+                // caller that keeps logging failures restart the cooldown, and raise an alert,
+                // with each one, so the agent would never reach its probe.
+                continue;
+            }
             if (succeeded) {
                 if (state == AgentGovConstants.CB_HALF_OPEN) {
                     close(registration);
@@ -137,21 +161,45 @@ public inherited sharing class AgentGovCircuitBreaker {
                 }
                 continue;
             }
-            if (state == AgentGovConstants.CB_HALF_OPEN) {
-                trip(registration, true, alerts);
-                changed.add(registration);
-                continue;
-            }
+            // A failed probe extends the run of consecutive failures that tripped the breaker,
+            // since no success can have been recorded while it was OPEN.
             registration.Failure_Count__c =
                 (registration.Failure_Count__c != null ? registration.Failure_Count__c : 0) + 1;
             registration.Last_Failure__c = now;
-            if (registration.Failure_Count__c >= threshold) {
+            if (state == AgentGovConstants.CB_HALF_OPEN) {
+                trip(registration, true, alerts);
+            } else if (registration.Failure_Count__c >= threshold) {
                 trip(registration, false, alerts);
             }
             changed.add(registration);
         }
         persist(changed);
         AgentGovTriggerHandler.publishAlerts(alerts);
+    }
+
+    // A success on a breaker this transaction last read as CLOSED with no failures changes
+    // nothing, so it takes no lock: the proxy and /report lock the session row while charging,
+    // and locking the registration after that reverses the order deactivation uses. The
+    // trade-off is that a failure another transaction records after that read is not cleared
+    // by this success; the two were concurrent, so either order is a fair account of them.
+    private static Set<Id> outcomesThatMayChange(Map<Id, Boolean> outcomes) {
+        Set<Id> mayChange = new Set<Id>(outcomes.keySet());
+        Set<Id> successes = new Set<Id>();
+        for (Id registrationId : outcomes.keySet()) {
+            if (outcomes.get(registrationId) == true) {
+                successes.add(registrationId);
+            }
+        }
+        if (successes.isEmpty()) {
+            return mayChange;
+        }
+        for (AgentGov_Registration__c known : AgentGovSelector.getRegistrationsByIds(successes).values()) {
+            Boolean noFailures = known.Failure_Count__c == null || known.Failure_Count__c == 0;
+            if (stateOf(known) == AgentGovConstants.CB_CLOSED && noFailures) {
+                mayChange.remove(known.Id);
+            }
+        }
+        return mayChange;
     }
 
     /**
@@ -192,7 +240,9 @@ public inherited sharing class AgentGovCircuitBreaker {
 
     /**
      * @description Moves OPEN breakers whose cooldown has elapsed to HALF_OPEN. Used by the
-     *              scheduled health check so agents recover even when nobody calls them.
+     *              scheduled health check so agents recover even when nobody calls them. Each
+     *              row is re-read under a lock and moved only if it is still OPEN with its
+     *              cooldown served; any other row passed in is left as it is.
      * @param registrations Registrations to transition
      */
     public static void transitionToHalfOpen(List<AgentGov_Registration__c> registrations) {
@@ -204,12 +254,15 @@ public inherited sharing class AgentGovCircuitBreaker {
             ids.add(registration.Id);
         }
 
-        // Re-read under a row lock and re-check the state. The caller's rows were read without
-        // a lock, so a request may have claimed the probe in between; writing the stale row
-        // back would clear Half_Open_Probe_At__c and admit a second concurrent probe.
+        // Re-read under a row lock and re-check the state and the cooldown, as allowRequests
+        // does. The caller's rows were read without a lock: in between, a request may have
+        // claimed the probe, which writing the stale row back would clear and so admit a
+        // second probe, or a failed probe may have re-opened the breaker with a new cooldown.
+        DateTime now = DateTime.now();
         List<AgentGov_Registration__c> changed = new List<AgentGov_Registration__c>();
         for (AgentGov_Registration__c registration : AgentGovSelector.getRegistrationsForUpdate(ids).values()) {
-            if (stateOf(registration) == AgentGovConstants.CB_OPEN) {
+            Boolean cooldownServed = registration.Cooldown_Until__c != null && now >= registration.Cooldown_Until__c;
+            if (stateOf(registration) == AgentGovConstants.CB_OPEN && cooldownServed) {
                 moveToHalfOpen(registration);
                 changed.add(registration);
             }
@@ -218,21 +271,18 @@ public inherited sharing class AgentGovCircuitBreaker {
     }
 
     /**
-     * @description Reports whether this agent is entitled to attempt a probe, WITHOUT writing
+     * @description Reports whether this agent is entitled to attempt a probe, without writing
      *              anything.
      *
-     *              Tripping sets Status__c to Blocked, and a Blocked agent is refused at
-     *              authentication before any breaker code runs, which left an agent that only
-     *              speaks REST locked out until the scheduled health check happened to run.
-     *              The status check consults this so such a caller is allowed through to the
-     *              breaker itself.
+     *              Tripping sets Status__c to Blocked, and the status check that REST and the
+     *              proxy apply before any breaker code runs refuses a Blocked agent, so an agent
+     *              that only speaks REST would stay locked out until the scheduled health check
+     *              ran. The status check consults this so such a caller reaches the breaker.
      *
-     *              This deliberately performs no DML. An earlier version transitioned the
-     *              breaker here, from an unlocked read, and cleared Half_Open_Probe_At__c as
-     *              it did so: two requests arriving as the cooldown expired could each wipe
-     *              the other's probe claim and both be admitted. The OPEN to HALF_OPEN
-     *              transition and the probe claim belong together, under the row lock that
-     *              allowRequests already takes.
+     *              Nothing is written here. A transition made from this unlocked read could
+     *              clear another request's probe claim and admit two probes, so the OPEN to
+     *              HALF_OPEN transition and the probe claim happen together, under the row lock
+     *              that allowRequests takes.
      * @param registration The agent to test
      * @return True when the breaker is HALF_OPEN, or OPEN with its cooldown served
      */

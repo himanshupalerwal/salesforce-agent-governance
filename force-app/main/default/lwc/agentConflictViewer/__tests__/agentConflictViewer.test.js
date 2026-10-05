@@ -66,13 +66,23 @@ describe('c-agent-conflict-viewer', () => {
         expect(datatable.data[0].typeLabel).toBe('Concurrent write');
         expect(datatable.data[0].outcome).toBe('Agent A went ahead');
         expect(datatable.showRowNumberColumn).toBeFalsy();
+        // The record is shown as the caller sent it.
+        expect(datatable.columns.find((column) => column.label === 'Record').fieldName).toBe('Record_Id__c');
+        expect(element.shadowRoot.querySelector('.conflict-rule').textContent.replace(/\s+/g, ' ').trim()).toBe(
+            'When two agents claim one record in the same transaction, the one with the higher priority (the lower number) goes ahead and the other is refused. With equal priority, the agent that claimed the record first keeps it.'
+        );
     });
 
     it('shows the empty state and errors', async () => {
         const element = mount();
         getRecentConflictLogs.emit([]);
         await flushPromises();
-        expect(element.shadowRoot.querySelector('.empty-state')).not.toBeNull();
+        const empty = element.shadowRoot.querySelector('.empty-state');
+        expect(empty.querySelector('.ag-empty__title').textContent).toBe('No conflicts recorded');
+        // Detection sees only agents that meet in one transaction, and only while it is on.
+        expect(empty.querySelector('.ag-empty__text').textContent.replace(/\s+/g, ' ').trim()).toBe(
+            'A conflict is recorded when two agents claim the same record in one Register Agent Action batch or one Apex transaction, while conflict detection is on in AgentGov Settings.'
+        );
 
         getRecentConflictLogs.error([{ message: 'first' }, { message: 'second' }]);
         await flushPromises();

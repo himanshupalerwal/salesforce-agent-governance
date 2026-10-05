@@ -65,8 +65,9 @@ public class AgentGovConstants {
     public static final String ACTION_API_CALL = 'API_Call';
     public static final String ACTION_FLOW_TRIGGER = 'Flow_Trigger';
     public static final String ACTION_REPORT = 'Report';
-    // Used for audit rows the framework writes about itself: purge summaries,
-    // delivery failures, and unhandled REST errors.
+    // Used for rows the framework writes about itself (purge summaries, delivery failures,
+    // unhandled REST errors, log rows the database rejected), for an agent's request whose
+    // action type is not one of the recognised operations, and for a refused /rotate-key.
     public static final String ACTION_SYSTEM = 'System';
     // One row per delivered alert, so alert history can be read back and audited.
     public static final String ACTION_ALERT = 'Alert';
@@ -141,8 +142,8 @@ public class AgentGovConstants {
     public static final Integer DEFAULT_DML_BUDGET = 3000;
 
     // Circuit breaker behavior
-    // A re-tripped breaker doubles its cooldown, capped at one day so a flapping
-    // agent is never locked out for an unbounded period.
+    // A breaker re-tripped by a failed probe cools down for twice the configured base.
+    // Every cooldown, the base included, is capped at one day.
     public static final Integer CB_RETRY_COOLDOWN_MULTIPLIER = 2;
     public static final Integer CB_MAX_COOLDOWN_MINUTES = 1440;
     // A session never runs longer than this, however steady the agent's activity.
@@ -258,7 +259,6 @@ public class AgentGovConstants {
     public static final String ERR_RAW_SOQL_UNSUPPORTED = 'Raw SOQL is no longer accepted by /query. Send objectName, fields, and optional where, orderBy, and limit instead. See docs/rest-api-reference.md.';
     public static final String ERR_FIELDS_NOT_ACCESSIBLE = 'The agent user is not permitted to {0} these fields on {1}: {2}';
     public static final String ERR_OBJECT_NOT_ACCESSIBLE = 'The agent user is not permitted to {0} {1}.';
-    public static final String ERR_ACCESS_REFUSED = 'The agent user is not permitted to {0} {1}, or a field the request refers to.';
     public static final String ERR_INTERNAL = 'Internal error. Quote the correlationId when reporting this problem.';
     public static final String ERR_ENDPOINT_NOT_FOUND = 'Endpoint not found: ';
     public static final String ERR_AMBIGUOUS_AGENT_USER = 'This user is bound to more than one agent registration, so the calling agent cannot be identified from the login alone. Send the agent API key in the X-AgentGov-Key header.';
@@ -269,6 +269,16 @@ public class AgentGovConstants {
     public static final String ERR_NOTHING_SELECTED = 'Select at least one record.';
     public static final String ERR_NO_RECORD_ACCESS = 'Not found, or you do not have access to it.';
     public static final String ERR_INVALID_CREDIT = 'Credit must be a whole number of at least 1.';
+    public static final String ERR_NOT_A_STRING = '{0} must be a JSON string.';
+    public static final String ERR_DUPLICATE_RECORD_ID = 'Record Id {0} appears more than once in this request.';
+    public static final String ERR_TOO_MANY_RECORDS = 'A request may carry at most {0} records; {1} were submitted.';
+    public static final String ERR_FIELD_NOT_FILTERABLE = 'Field {1} on {0} cannot be used in a where condition.';
+    public static final String ERR_FIELD_NOT_SORTABLE = 'Field {1} on {0} cannot be used to order results.';
+    public static final String ERR_LIKE_NOT_TEXT = 'LIKE works only on single-value text fields, and {1} on {0} is not one.';
+    public static final String ERR_VALUE_NOT_SCALAR = 'A JSON object or list is not a valid value for a {0} field.';
+    public static final String ERR_FIELD_NOT_SETTABLE = 'Field {1} on {0} cannot be set to the value supplied.';
+    public static final String ERR_QUERY_NOT_RUN = 'The query on {0} could not be run as written. A field, operator or value in it is not supported there, or the object requires a filter the query does not have.';
+    public static final String ERR_KEY_ROTATION_REFUSED = 'Key rotation refused: {0}';
 
     // Valid Agent Types Set (for validation)
     public static final Set<String> VALID_AGENT_TYPES = new Set<String>{

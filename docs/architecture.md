@@ -305,8 +305,8 @@ erDiagram
 
     AgentGov_Registration__c ||--o{ AgentGov_Session__c : "has sessions"
     AgentGov_Registration__c ||--o{ AgentGov_Budget__c : "has budgets"
-    AgentGov_Registration__c ||--o{ AgentGov_Action_Log__c : "has action logs"
-    AgentGov_Registration__c ||--o{ AgentGov_Conflict_Log__c : "involved in conflicts"
+    AgentGov_Registration__c |o--o{ AgentGov_Action_Log__c : "has action logs"
+    AgentGov_Registration__c |o--o{ AgentGov_Conflict_Log__c : "involved in conflicts"
     AgentGov_Session__c |o--o{ AgentGov_Action_Log__c : "links actions"
 ```
 
@@ -314,13 +314,16 @@ erDiagram
 
 - **Registration to Session**: one-to-many; at most one active session at a time, guaranteed
   by `Active_Session_Key__c`.
-- **Registration to Budget**: one-to-many; exactly one row per agent per day, guaranteed by
-  `Budget_Key__c`.
-- **Registration to Action Log**: one-to-many. Rows the database rejects are kept as
-  `System` entries with the original values.
+- **Registration to Budget**: one-to-many; at most one row per agent per day, guaranteed by
+  `Budget_Key__c`. A day's row is created by the agent's first use that day, or ahead of time
+  by the daily reset job for active agents.
+- **Registration to Action Log**: one-to-many through the optional `Agent_Registration__c`
+  lookup, which is blank on rows that concern no single agent, such as a purge summary. Rows
+  the database rejects are kept as `System` entries with the original values.
 - **Session to Action Log**: one-to-many through the optional `Agent_Session__c` lookup. A row
   links to the session its request's activity was recorded against.
-- **Registration to Conflict Log**: many-to-many via `Agent_1__c` and `Agent_2__c`.
+- **Registration to Conflict Log**: many-to-many via the optional `Agent_1__c` and `Agent_2__c`
+  lookups; a conflict that names an unknown agent leaves that side empty.
 - **Registration to User**: `Agent_User__c` identifies the user the agent runs as.
 
 Field history is tracked on registration status, breaker state, key rotation, and agent
@@ -337,33 +340,40 @@ sequenceDiagram
     participant AUTH as RestAuth
     participant CB as CircuitBreaker
     participant PE as PolicyEngine
-    participant BM as BudgetManager
     participant CR as ConflictResolver
+    participant BM as BudgetManager
     participant TH as TriggerHandler
 
-    Agent->>REST: POST /authorize + X-AgentGov-Key (object, operation, recordId, amount)
+    Agent->>REST: POST /authorize + X-AgentGov-Key {operation, objectName, recordId, amount}
     REST->>AUTH: resolveRegistration(request, body)
     AUTH-->>REST: registration (by key hash or bound user)
     alt No registration matches
         REST-->>Agent: 404 AGENT_NOT_FOUND
+    else No key, and the user is bound to several registrations
+        REST-->>Agent: 403 ACCESS_DENIED
     end
-    REST->>AUTH: requireActive(registration)
+    REST->>AUTH: requireActive(registration, allowThrottled, allowBlockedProbe)
+    Note over REST,AUTH: Blocked is admitted once the breaker's cooldown has passed, or while governance is off
     alt Inactive, or Blocked before the breaker's cooldown has passed
         REST->>TH: log Denied
         REST-->>Agent: 403 AGENT_NOT_ACTIVE
     end
+    REST->>REST: validate operation, objectName (describe), amount and recordId
+    alt Missing or invalid
+        REST-->>Agent: 400 INVALID_INPUT
+    end
     REST->>CB: allowRequest(agentId)
     Note over CB: past the cooldown, the breaker moves to HALF_OPEN if still OPEN and admits this call as its single probe
-    alt HALF_OPEN and the probe already taken
+    alt Probe already taken, or OPEN after a manual status change
         REST->>TH: log Denied
         REST-->>Agent: 503 CIRCUIT_BREAKER_OPEN
     end
-    REST->>PE: evaluatePolicy(agentId, object, operation)
+    REST->>PE: evaluatePolicy(agentId, objectName, operation)
     alt Denied
         REST->>TH: log Denied
         REST-->>Agent: 403 POLICY_VIOLATION
     end
-    REST->>CR: checkForConflict(agentId, recordId, object)
+    REST->>CR: checkForConflict(agentId, recordId, objectName)
     alt Higher-priority holder
         REST->>TH: log Denied
         REST-->>Agent: 409 RECORD_LOCKED
@@ -380,7 +390,8 @@ sequenceDiagram
 
 With `Is_Enabled__c` unchecked, the status check refuses only an Inactive agent and the breaker,
 policy, conflict and budget steps are skipped: the call is audited as a Success, nothing is
-charged, and the response carries `"governanceEnabled": false`.
+charged, and the response carries `"governanceEnabled": false`. A call refused before its
+agent is known, or for invalid input, leaves no audit row.
 
 ## Request Lifecycle: the proxy
 
@@ -389,26 +400,41 @@ sequenceDiagram
     participant Agent as MCP Agent
     participant PROXY as AgentGovProxyApi
     participant QB as QueryBuilder
+    participant CB as CircuitBreaker
     participant PE as PolicyEngine
     participant BM as BudgetManager
     participant SF as Database (USER_MODE)
+    participant TH as TriggerHandler
 
     Agent->>PROXY: POST /query {objectName, fields, where, orderBy, limit}
-    PROXY->>PROXY: authenticate, circuit breaker
+    PROXY->>PROXY: authenticate, check status
+    PROXY->>QB: describe + compile (field names, operators, value types, bound values)
+    Note over PROXY,QB: a malformed request gets 400 INVALID_INPUT here, so it never reaches the breaker or uses up a half-open breaker's probe
+    PROXY->>CB: allowRequest(agentId)
     PROXY->>PE: evaluatePolicy(agentId, object, Query)
     PE-->>PROXY: allowed, restrictedFields, maxRecords
-    PROXY->>QB: parse + describe + build (bound values, LIMIT = min(requested, cap, 2000))
+    PROXY->>PROXY: LIMIT = min(requested, policy cap, 2000)
     PROXY->>PE: assertFieldsAllowed(referenced fields)
+    PROXY->>PROXY: check the user can read the object and every referenced field
+    Note over PROXY: refused with 403 ACCESS_DENIED before anything is charged
     PROXY->>BM: consumeBudget(agentId, SOQL_Queries, 1)
-    PROXY->>SF: Database.queryWithBinds(soql, binds, USER_MODE)
-    SF-->>PROXY: records (or ACCESS_DENIED)
+    PROXY->>QB: execute(compiled query)
+    QB->>SF: Database.queryWithBinds(soql, binds, USER_MODE)
+    SF-->>QB: records
+    QB-->>PROXY: records
+    PROXY->>CB: recordOutcomes(agentId: success)
+    PROXY->>TH: log Success
     PROXY-->>Agent: 200 {totalSize, records, budgetStatus, remainingBudget}
 ```
 
-Writes follow the same shape: policy record cap and field restrictions, conflict detection
-for records with Ids, `Security.stripInaccessible` to deny inaccessible fields before
-anything is written, budget charged by record count, then `Database.insert/update/upsert/delete`
-in user mode with per-record results.
+Writes follow the same order. The whole request is validated first: the records are built
+(field names, value types, the same Id twice), `/delete` parses its Ids and `/upsert` checks
+its external Id field, so a malformed write is refused before the breaker is consulted. Then
+come the breaker; the policy's allow or deny, record cap and field restrictions; conflict
+detection for records with Ids; and `Security.stripInaccessible`, which denies inaccessible
+fields before anything is written or charged. The budget is charged one DML operation per
+record submitted, `Database.insert/update/upsert/delete` runs in user mode with per-record
+results, and the breaker outcome and then the audit row are written last.
 
 A POST to the REST or proxy endpoints that fails with HTTP 500 is rolled back to a savepoint
 taken when the request began, undoing its writes and budget charges, before the `System` row
@@ -425,48 +451,63 @@ and `stopTracking` and charges it; nested contexts charge each agent for its own
 stateDiagram-v2
     [*] --> CLOSED
 
-    CLOSED --> CLOSED : recordSuccess()
-    CLOSED --> CLOSED : recordFailure() [count < threshold]
-    CLOSED --> OPEN : recordFailure() [count >= threshold]
-
-    OPEN --> OPEN : allowRequest() → false
+    CLOSED --> CLOSED : recordSuccess() clears the count, recordFailure() adds one
+    CLOSED --> OPEN : recordFailure() [count reaches threshold]
     OPEN --> HALF_OPEN : allowRequest() or health check [cooldown elapsed]
-
     HALF_OPEN --> HALF_OPEN : allowRequest() → one probe admitted, others denied
     HALF_OPEN --> CLOSED : recordSuccess() → failures reset
     HALF_OPEN --> OPEN : recordFailure() → cooldown twice the base (capped at 24h)
+    OPEN --> CLOSED : resetBreaker()
+    HALF_OPEN --> CLOSED : resetBreaker()
+
+    note right of OPEN
+        allowRequest() → false until the cooldown has passed.
+        Outcomes recorded while OPEN are ignored.
+    end note
 ```
 
-| From      | To        | Trigger                                                  | Side effects                                                                           |
-| --------- | --------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| CLOSED    | OPEN      | `recordFailure()` at the threshold                       | Status Blocked, `Cooldown_Until__c` set, alert published                               |
-| OPEN      | HALF_OPEN | `allowRequest()` or `AgentGovHealthCheck` after cooldown | Status Throttled; the admitting request becomes the probe                              |
-| HALF_OPEN | CLOSED    | `recordSuccess()`                                        | Failures reset, probe cleared, status Active                                           |
-| HALF_OPEN | OPEN      | `recordFailure()`                                        | Status Blocked, cooldown twice the configured base, capped at one day, alert published |
+| From      | To        | Trigger                                                  | Side effects                                                                                                                                  |
+| --------- | --------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| CLOSED    | OPEN      | `recordFailure()` at the threshold                       | Status Blocked, `Cooldown_Until__c` set one base cooldown ahead, alert published                                                              |
+| OPEN      | HALF_OPEN | `allowRequest()` or `AgentGovHealthCheck` after cooldown | Status Throttled; the admitting request becomes the probe, or after the health check the next request does                                    |
+| HALF_OPEN | CLOSED    | `recordSuccess()`                                        | Failures reset, `Last_Failure__c` and probe cleared, status back to Active                                                                    |
+| HALF_OPEN | OPEN      | `recordFailure()`                                        | One more failure counted, status Blocked, cooldown twice the configured base, capped at one day, alert published                              |
+| Any       | CLOSED    | `resetBreaker()`, or **Reset breaker** on the console    | Failures, `Last_Failure__c`, cooldown and probe cleared, a Blocked or Throttled agent back to Active; the console writes an `Admin` audit row |
 
 A failed probe sets the cooldown to twice `Circuit_Breaker_Cooldown_Minutes__c`, capped at
 1,440 minutes. The multiplier always applies to the configured base, so the cooldown does not
-grow on repeated failures.
+grow on repeated failures. An OPEN breaker ignores outcomes: a success or failure recorded
+while it is OPEN changes no count, does not restart the cooldown and raises no alert. It
+leaves OPEN only through its probe, once the cooldown has passed, or through a reset.
 
-Outcomes reach the breaker from three places. The proxy records one for each call it
+Outcomes reach the breaker from three entry points. The proxy records one for each call it
 completes: a success for a query, and for a write a success when any record is saved and a
 failure when none is. Agents that use `/authorize` report their own by including
 `"success": true` or `false` in the body of the subsequent `POST /agentgov/report` call, which
 maps onto `recordSuccess()` / `recordFailure()`; the response carries `circuitBreakerState` so
-the agent can see the result of its probe. Register Agent Action records a success for every
-agent it authorizes, before the Flow does its work. Log Agent Action records the status it
-logs, a Failure as a failure and a Success as a success, one outcome per agent per batch, so a
-Flow that logs the outcome of its work trips and recovers its breaker as REST and proxy agents
-do; Report Agent Usage records none. No outcome is recorded for a deactivated agent, or while
-the framework is disabled.
+the agent can see the result of its probe. Flow agents report theirs with Log Agent Action,
+which records the status it logs: a `Failure` as a failure and a `Success` as a success, one
+outcome per agent per batch, with a failure anywhere in the batch counting as a failure.
+`Denied` and `Throttled` count for nothing, so a Flow logs work that was refused as `Denied`,
+not `Failure`. Apex can also call `recordSuccess()` and `recordFailure()` directly.
+
+Register Agent Action records no outcome: it runs before the work, so there is nothing yet to
+report. A Flow agent therefore follows Register Agent Action, the work, then Log Agent Action,
+as a REST agent follows `/authorize`, the work, then `/report`. Consecutive failures logged
+after the work trip the breaker at the threshold, and the outcome logged for the probe that
+Register Agent Action admits after the cooldown is what closes the breaker or re-opens it.
+Report Agent Usage and `AgentGovContext` record no outcome. Nothing is recorded for a
+deactivated agent, or while the framework is disabled.
 
 `/authorize` and the proxy admit Throttled agents deliberately: Throttled is the status a
 HALF_OPEN breaker carries, and the breaker itself decides whether a given call is the single
 admitted probe. Tripping sets the agent Blocked, and while governance is on a Blocked agent is
-refused with `AGENT_NOT_ACTIVE` until the cooldown has passed. After that, the first call is admitted as the
-breaker's single probe, and calls made while the probe is outstanding receive
+refused with `AGENT_NOT_ACTIVE` until the cooldown has passed. After that, the first call is
+admitted as the breaker's single probe, and calls made while the probe is outstanding receive
 `CIRCUIT_BREAKER_OPEN`. A probe that reports no outcome within one base cooldown is treated as
-abandoned, and the next call becomes the probe.
+abandoned, and the next call becomes the probe. Register Agent Action does not check for
+Blocked: it asks the breaker, which refuses until the cooldown has passed and then admits the
+agent's first request in the batch as the probe.
 
 ---
 
@@ -501,14 +542,16 @@ link to the session through `Agent_Session__c`.
    default, which is user mode.
 2. **Nothing from the caller is executed.** Queries are compiled from structured input with
    bound values; object and field names are validated against describe metadata.
-3. **Deny loudly, never trim silently.** Restricted fields, inaccessible fields, and record
-   caps produce a 403 that names the problem.
+3. **Deny loudly, never trim silently.** Restricted fields, inaccessible fields, and a write
+   over the policy's record cap produce a 403 that names the problem. For a query, the record
+   cap lowers the `LIMIT` instead.
 4. **The ledger is written first.** Consumption that crosses a threshold is persisted before
    the denial is raised; audit rows the database rejects are kept as `System` entries.
 5. **Bulk by default.** Every invocable action and service method handles collections with a
    fixed number of queries and DML statements.
 6. **Fail-safe defaults.** Missing settings fall back to constants; a disabled framework
-   allows every action except a deactivated agent's, audits them, and says so in its
-   responses.
+   allows every action except a deactivated agent's, audits them, and says so in the
+   `/authorize` response (`"governanceEnabled": false`) and in Register Agent Action's Budget
+   Status (`Bypassed`).
 7. **Observability.** Platform events for live dashboards and integrations, action and
    conflict logs for history, correlation ids on every REST response.

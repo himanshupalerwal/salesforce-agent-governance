@@ -1,12 +1,15 @@
 /**
- * @description Builds the JSON envelope returned by every AgentGov REST endpoint.
+ * @description Builds the JSON envelope returned by every AgentGov REST endpoint, and reads the
+ *              request values both REST resources share: the correlation id and the text
+ *              properties of a JSON body.
  *
  *              Successful responses carry success=true, a correlationId, and the endpoint's
  *              payload. Error responses carry success=false, an errorCode, a message that is
  *              safe to show to the caller, the correlationId, and a timestamp. Unexpected
  *              exceptions are never echoed to the caller: the message and stack trace are
- *              written to the action log under the correlation id so an administrator can
- *              find them, and the caller receives a generic message plus that id.
+ *              written to the action log as one System row under the correlation id so an
+ *              administrator can find them, and the caller receives a generic message plus
+ *              that id.
  *
  *              Security posture: inherited sharing. The only write is the internal-error
  *              log entry, which goes through AgentGovDml.
@@ -37,6 +40,26 @@ public inherited sharing class AgentGovRestResponder {
             }
         }
         return UUID.randomUUID().toString();
+    }
+
+    /**
+     * @description Reads an optional text property from a parsed JSON request body. A value of
+     *              another JSON type is refused rather than cast, so a number or an object sent
+     *              where text belongs is answered with 400 instead of failing with a 500.
+     * @param body Parsed JSON body
+     * @param name Property name
+     * @return The text, or null when the property is absent or null
+     * @throws AgentGovException INVALID_INPUT naming the property when its value is not a JSON string
+     */
+    public static String readString(Map<String, Object> body, String name) {
+        Object value = body == null ? null : body.get(name);
+        if (value == null || value instanceof String) {
+            return (String) value;
+        }
+        throw new AgentGovException(
+            AgentGovException.ErrorCode.INVALID_INPUT,
+            String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ name })
+        );
     }
 
     /**
@@ -76,27 +99,17 @@ public inherited sharing class AgentGovRestResponder {
         // field API names collected by AgentGovDml.assertAllSucceeded. A REST agent holds no
         // access to AgentGov objects by design, so that detail is written to the action log
         // under the correlation id instead of being returned.
-        Boolean isInternal = error.getErrorCode() == AgentGovException.ErrorCode.INTERNAL_ERROR;
-        if (isInternal) {
-            AgentGovTriggerHandler.recordFrameworkEvent(
-                null,
-                AgentGovConstants.ACTION_FAILURE,
+        if (error.getErrorCode() == AgentGovException.ErrorCode.INTERNAL_ERROR) {
+            recordInternalError(
                 'Internal error returned to a REST caller. Correlation id: ' + correlationId,
-                error.getMessage()
+                error.getMessage(),
+                correlationId,
+                null
             );
+            writeError(response, error, AgentGovConstants.ERR_INTERNAL, correlationId);
+            return;
         }
-        write(
-            response,
-            error.getHttpStatusCode(),
-            new Map<String, Object>{
-                KEY_SUCCESS => false,
-                KEY_ERROR_CODE => String.valueOf(error.getErrorCode()),
-                KEY_MESSAGE => isInternal ? AgentGovConstants.ERR_INTERNAL : error.getMessage(),
-                KEY_CORRELATION_ID => correlationId,
-                KEY_TIMESTAMP => DateTime.now()
-            },
-            correlationId
-        );
+        writeError(response, error, error.getMessage(), correlationId);
     }
 
     /**
@@ -118,8 +131,8 @@ public inherited sharing class AgentGovRestResponder {
 
     /**
      * @description Records an unexpected exception and writes a generic 500 response.
-     *              The real message and stack trace are persisted to the action log, keyed by
-     *              the correlation id, and are never returned to the caller.
+     *              The real message and stack trace are persisted to the action log as one
+     *              System row under the correlation id, and are never returned to the caller.
      * @param response The REST response to populate
      * @param unexpected The exception that escaped the endpoint
      * @param correlationId Correlation id for this request
@@ -131,10 +144,16 @@ public inherited sharing class AgentGovRestResponder {
         String correlationId,
         Id registrationId
     ) {
-        recordInternalError(unexpected, correlationId, registrationId);
-        error(
+        recordInternalError(
+            'Unhandled REST exception. correlationId=' + correlationId,
+            unexpected.getTypeName() + ': ' + unexpected.getMessage() + '\n' + unexpected.getStackTraceString(),
+            correlationId,
+            registrationId
+        );
+        writeError(
             response,
             new AgentGovException(AgentGovException.ErrorCode.INTERNAL_ERROR, AgentGovConstants.ERR_INTERNAL),
+            AgentGovConstants.ERR_INTERNAL,
             correlationId
         );
     }
@@ -166,12 +185,41 @@ public inherited sharing class AgentGovRestResponder {
         response.responseBody = Blob.valueOf(JSON.serialize(body));
     }
 
-    private static void recordInternalError(Exception unexpected, String correlationId, Id registrationId) {
-        AgentGovTriggerHandler.recordFrameworkEvent(
+    private static void writeError(
+        RestResponse response,
+        AgentGovException error,
+        String message,
+        String correlationId
+    ) {
+        write(
+            response,
+            error.getHttpStatusCode(),
+            new Map<String, Object>{
+                KEY_SUCCESS => false,
+                KEY_ERROR_CODE => String.valueOf(error.getErrorCode()),
+                KEY_MESSAGE => message,
+                KEY_CORRELATION_ID => correlationId,
+                KEY_TIMESTAMP => DateTime.now()
+            },
+            correlationId
+        );
+    }
+
+    // The row carries the response's correlation id even when no request context was begun, so
+    // the id a caller quotes always finds it.
+    private static void recordInternalError(
+        String details,
+        String errorMessage,
+        String correlationId,
+        Id registrationId
+    ) {
+        AgentGov_Action_Log__c entry = AgentGovTriggerHandler.buildFrameworkEvent(
             registrationId,
             AgentGovConstants.ACTION_FAILURE,
-            'Unhandled REST exception. correlationId=' + correlationId,
-            unexpected.getTypeName() + ': ' + unexpected.getMessage() + '\n' + unexpected.getStackTraceString()
+            details,
+            errorMessage
         );
+        entry.Correlation_Id__c = correlationId;
+        AgentGovTriggerHandler.recordFrameworkEvents(new List<AgentGov_Action_Log__c>{ entry });
     }
 }

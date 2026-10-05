@@ -1,7 +1,8 @@
 /**
- * Prepares a scratch org for the end-to-end suite: deploys the working tree, grants the
- * administrator the AgentGov_Admin permission set, applies test settings, and provides a
- * restricted agent user that holds nothing beyond the shipped AgentGov_Agent permission set.
+ * Prepares a scratch org for the end-to-end suite: removes the scheduled AgentGov jobs and
+ * deploys the working tree (unless deploy is false), grants the administrator the AgentGov_Admin
+ * permission set, applies test settings, and provides a restricted agent user that holds nothing
+ * beyond the shipped AgentGov_Agent permission set. The jobs and settings are not put back.
  *
  * Refuses to touch anything but a scratch org, because it changes org-wide settings.
  */
@@ -75,8 +76,8 @@ settings.Enable_Conflict_Detection__c = true;
 settings.Circuit_Breaker_Failure_Threshold__c = 3;
 settings.Circuit_Breaker_Cooldown_Minutes__c = 1;
 settings.Max_Concurrent_Agents__c = 500;
-// A run triggers alerts on purpose. Alert email is off while it runs, so the suite mails no
-// one and cannot use up the org's daily email allowance, which the Apex tests also need.
+// A run triggers alerts on purpose. Alert email is turned off, and left off, so the suite mails
+// no one and cannot use up the org's daily email allowance, which the Apex tests also need.
 settings.Admin_Notification_Email__c = null;
 Map<String, Schema.SObjectField> fields = Schema.SObjectType.AgentGov_Settings__c.fields.getMap();
 if (fields.containsKey('notify_agent_owners__c')) {

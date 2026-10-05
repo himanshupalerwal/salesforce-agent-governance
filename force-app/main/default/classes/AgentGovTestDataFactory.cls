@@ -8,7 +8,16 @@ public class AgentGovTestDataFactory {
     /** @description Profile used for the restricted test user. Every org has it. */
     private static final String MINIMUM_ACCESS_PROFILE = 'Minimum Access - Salesforce';
 
-    /** @description Creates an agent registration with default values. */
+    /**
+     * @description Creates an Active agent registration with a closed breaker, the default
+     *              priority and daily budgets, and a test owner email. An agent registered
+     *              through AgentGovRegistryService starts Inactive instead; tests rely on this
+     *              one being Active.
+     * @param agentName Agent_Name__c of the registration
+     * @param agentType Agent_Type__c of the registration
+     * @param doInsert Whether to insert the registration before returning it
+     * @return The registration, inserted when doInsert is true
+     */
     public static AgentGov_Registration__c createRegistration(String agentName, String agentType, Boolean doInsert) {
         AgentGov_Registration__c reg = new AgentGov_Registration__c(
             Agent_Name__c = agentName,
@@ -28,7 +37,14 @@ public class AgentGovTestDataFactory {
         return reg;
     }
 
-    /** @description Creates an agent registration whose API key is stored hashed, as in production. */
+    /**
+     * @description Creates and inserts an Active agent registration whose API key is stored
+     *              hashed, as in production.
+     * @param agentName Agent_Name__c of the registration
+     * @param agentType Agent_Type__c of the registration
+     * @param apiKey Plaintext key; only its hash and prefix are stored
+     * @return The inserted registration
+     */
     public static AgentGov_Registration__c createRegistrationWithApiKey(
         String agentName,
         String agentType,
@@ -40,7 +56,14 @@ public class AgentGovTestDataFactory {
         return reg;
     }
 
-    /** @description Creates an agent registration that still carries a pre-v1.2 plaintext key. */
+    /**
+     * @description Creates and inserts an Active agent registration that still carries a
+     *              pre-v1.2 plaintext key.
+     * @param agentName Agent_Name__c of the registration
+     * @param agentType Agent_Type__c of the registration
+     * @param apiKey Plaintext key, stored as is in API_Key__c
+     * @return The inserted registration
+     */
     public static AgentGov_Registration__c createRegistrationWithLegacyKey(
         String agentName,
         String agentType,
@@ -52,7 +75,13 @@ public class AgentGovTestDataFactory {
         return reg;
     }
 
-    /** @description Creates several agent registrations with hashed keys test-key-0, test-key-1, and so on. */
+    /**
+     * @description Creates and inserts Active agent registrations named Test Agent 0, Test
+     *              Agent 1, and so on, with hashed keys test-key-0, test-key-1, and so on.
+     * @param count Number of registrations to create
+     * @param agentType Agent_Type__c of every registration
+     * @return The inserted registrations, Test Agent 0 first
+     */
     public static List<AgentGov_Registration__c> createRegistrations(Integer count, String agentType) {
         List<AgentGov_Registration__c> registrations = new List<AgentGov_Registration__c>();
         for (Integer i = 0; i < count; i++) {
@@ -64,7 +93,13 @@ public class AgentGovTestDataFactory {
         return registrations;
     }
 
-    /** @description Creates an active session for an agent. An agent can have only one. */
+    /**
+     * @description Creates an active session for an agent, started now with no usage. An
+     *              agent can have only one active session.
+     * @param registrationId The agent the session belongs to
+     * @param doInsert Whether to insert the session before returning it
+     * @return The session, inserted when doInsert is true
+     */
     public static AgentGov_Session__c createSession(Id registrationId, Boolean doInsert) {
         AgentGov_Session__c session = new AgentGov_Session__c(
             Agent_Registration__c = registrationId,
@@ -86,6 +121,9 @@ public class AgentGovTestDataFactory {
      * @description Creates today's budget for an agent with the default allocations, dated by
      *              the org's calendar as the framework dates it, so tests do not depend on the
      *              running user's time zone.
+     * @param registrationId The agent the budget belongs to
+     * @param doInsert Whether to insert the budget before returning it
+     * @return The budget, inserted when doInsert is true
      */
     public static AgentGov_Budget__c createBudget(Id registrationId, Boolean doInsert) {
         AgentGov_Budget__c budget = new AgentGov_Budget__c(
@@ -105,7 +143,14 @@ public class AgentGovTestDataFactory {
         return budget;
     }
 
-    /** @description Creates today's budget with custom allocations. */
+    /**
+     * @description Creates and inserts today's budget for an agent with custom allocations.
+     * @param registrationId The agent the budget belongs to
+     * @param apiCalls API calls allocated
+     * @param soqlQueries SOQL queries allocated
+     * @param dmlOps DML operations allocated
+     * @return The inserted budget
+     */
     public static AgentGov_Budget__c createBudgetWithAllocation(
         Id registrationId,
         Integer apiCalls,
@@ -120,7 +165,15 @@ public class AgentGovTestDataFactory {
         return budget;
     }
 
-    /** @description Creates an action log entry. */
+    /**
+     * @description Creates an action log entry on Account, timestamped now.
+     * @param registrationId The acting agent
+     * @param sessionId The agent's session, or null
+     * @param actionType One of the AgentGovConstants.ACTION_* action types
+     * @param status One of the AgentGovConstants.ACTION_* statuses
+     * @param doInsert Whether to insert the entry before returning it
+     * @return The entry, inserted when doInsert is true
+     */
     public static AgentGov_Action_Log__c createActionLog(
         Id registrationId,
         Id sessionId,
@@ -143,7 +196,14 @@ public class AgentGovTestDataFactory {
         return entry;
     }
 
-    /** @description Creates a conflict log entry. */
+    /**
+     * @description Creates a conflict log entry: a concurrent write on one Account that the
+     *              first agent won, timestamped now.
+     * @param agent1Id The agent that won
+     * @param agent2Id The agent that lost
+     * @param doInsert Whether to insert the entry before returning it
+     * @return The entry, inserted when doInsert is true
+     */
     public static AgentGov_Conflict_Log__c createConflictLog(Id agent1Id, Id agent2Id, Boolean doInsert) {
         AgentGov_Conflict_Log__c conflict = new AgentGov_Conflict_Log__c(
             Agent_1__c = agent1Id,
@@ -161,7 +221,12 @@ public class AgentGovTestDataFactory {
         return conflict;
     }
 
-    /** @description Creates org-level default settings. */
+    /**
+     * @description Creates and inserts the org-level settings with governance, conflict
+     *              detection and real-time events on, and every limit, threshold and retention
+     *              period at its default. No alert email recipient is configured.
+     * @return The inserted settings
+     */
     public static AgentGov_Settings__c createSettings() {
         AgentGov_Settings__c settings = new AgentGov_Settings__c(
             Is_Enabled__c = true,
@@ -176,14 +241,6 @@ public class AgentGovTestDataFactory {
             Budget_Retention_Days__c = AgentGovConstants.DEFAULT_BUDGET_RETENTION_DAYS
         );
         insert settings;
-        return settings;
-    }
-
-    /** @description Creates settings with the framework disabled. */
-    public static AgentGov_Settings__c createDisabledSettings() {
-        AgentGov_Settings__c settings = createSettings();
-        settings.Is_Enabled__c = false;
-        update settings;
         return settings;
     }
 

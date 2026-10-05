@@ -52,9 +52,7 @@ global with sharing class AgentGovRestApi {
                 when '/authorize' {
                     registration = AgentGovRestAuth.resolveRegistration(request, body);
                     admitOrAudit(registration, body.get('operation'), body.get('objectName'), body.get('recordId'));
-                    Map<String, Object> authorized = handleAuthorize(registration, body);
-                    failIfSimulated();
-                    AgentGovRestResponder.success(response, 200, authorized, correlationId);
+                    AgentGovRestResponder.success(response, 200, handleAuthorize(registration, body), correlationId);
                 }
                 when '/report' {
                     // Reporting changes the ledger, so it is held to the same status check as
@@ -64,14 +62,8 @@ global with sharing class AgentGovRestApi {
                     AgentGovRestResponder.success(response, 200, handleReport(registration, body), correlationId);
                 }
                 when '/rotate-key' {
-                    // Held to the same status check as the other POST paths. Without it,
-                    // deactivating an agent whose key has leaked does not contain the leak:
-                    // the holder could mint a fresh working credential and lock the real
-                    // owner out at the same time.
-                    registration = AgentGovRestAuth.requireActive(
-                        AgentGovRestAuth.resolveRegistration(request, body),
-                        true
-                    );
+                    registration = AgentGovRestAuth.resolveRegistration(request, body);
+                    admitKeyRotation(registration);
                     AgentGovRestResponder.success(response, 200, handleRotateKey(registration), correlationId);
                 }
                 when else {
@@ -135,13 +127,13 @@ global with sharing class AgentGovRestApi {
     // --- POST handlers ---
 
     private static Map<String, Object> handleRegister(Map<String, Object> body) {
-        String suppliedKey = (String) body.get(AgentGovConstants.REST_BODY_API_KEY);
+        String suppliedKey = AgentGovRestResponder.readString(body, AgentGovConstants.REST_BODY_API_KEY);
         AgentGov_Registration__c registration = AgentGovRegistryService.registerAgent(
-            (String) body.get('agentName'),
-            (String) body.get('agentType'),
-            (String) body.get('description'),
+            AgentGovRestResponder.readString(body, 'agentName'),
+            AgentGovRestResponder.readString(body, 'agentType'),
+            AgentGovRestResponder.readString(body, 'description'),
             suppliedKey,
-            (String) body.get('ownerEmail')
+            AgentGovRestResponder.readString(body, 'ownerEmail')
         );
         Map<String, Object> payload = new Map<String, Object>{
             'registrationId' => registration.Id,
@@ -170,9 +162,9 @@ global with sharing class AgentGovRestApi {
         AgentGov_Registration__c registration,
         Map<String, Object> body
     ) {
-        String objectName = (String) body.get('objectName');
-        String operation = (String) body.get('operation');
-        String recordId = (String) body.get('recordId');
+        String objectName = AgentGovRestResponder.readString(body, 'objectName');
+        String operation = AgentGovRestResponder.readString(body, 'operation');
+        String recordId = AgentGovRestResponder.readString(body, 'recordId');
         if (String.isBlank(operation) || !AgentGovConstants.VALID_OPERATIONS.contains(operation)) {
             throw new AgentGovException(
                 AgentGovException.ErrorCode.INVALID_INPUT,
@@ -189,14 +181,15 @@ global with sharing class AgentGovRestApi {
                 AgentGovConstants.ERR_INVALID_OBJECT_NAME
             );
         }
-        // Resolved through describe so the policy engine compares against the real API name.
-        // Matching the caller's raw string let a variant the describe accepts but the policy
-        // does not, such as one with surrounding whitespace, skip an object-scoped deny rule.
+        // Resolved through describe so the policy engine compares the object's real API name: a
+        // variant the describe accepts, such as one with surrounding whitespace, would otherwise
+        // miss an object-scoped deny rule.
         objectName = AgentGovQueryBuilder.describe(objectName.trim()).getName();
         Integer amount = readCount(body, 'amount', 1);
         if (amount < 1) {
             throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, 'amount must be at least 1.');
         }
+        requireRecordId(recordId);
 
         // Is_Enabled__c is the documented emergency bypass: with governance off the breaker,
         // policy, budget and conflict checks are all skipped so an administrator can unblock a
@@ -217,8 +210,7 @@ global with sharing class AgentGovRestApi {
         }
 
         if (!AgentGovCircuitBreaker.allowRequest(registration.Id)) {
-            // Audited like the policy, conflict and budget denials below. This was the one
-            // refusal that left no trace of the attempt.
+            // Audited like the policy, conflict and budget denials below.
             logAction(
                 registration,
                 operation,
@@ -275,6 +267,7 @@ global with sharing class AgentGovRestApi {
             logAction(registration, operation, objectName, recordId, AgentGovConstants.ACTION_DENIED, e.getMessage());
             throw e;
         }
+        failIfSimulated();
 
         Map<String, Object> payload = new Map<String, Object>{
             'authorized' => true,
@@ -353,9 +346,8 @@ global with sharing class AgentGovRestApi {
             throw denied;
         }
 
-        // An agent that authorizes over REST has no other way to tell the framework whether
-        // its work succeeded, which previously left a tripped breaker with no route back to
-        // CLOSED. Reporting the outcome here is what lets a HALF_OPEN probe resolve.
+        // An agent that authorizes over REST has no other way to tell the framework whether its
+        // work succeeded, so the outcome reported here is what resolves a HALF_OPEN probe.
         if (governed && body.get('success') instanceof Boolean) {
             AgentGovCircuitBreaker.recordOutcomes(
                 new Map<Id, Boolean>{ registration.Id => (Boolean) body.get('success') }
@@ -368,9 +360,9 @@ global with sharing class AgentGovRestApi {
             null,
             null,
             AgentGovConstants.ACTION_SUCCESS,
-            // Only the three recognised counters are recorded. Serializing the caller's whole
-            // map wrote arbitrary attacker-chosen text into the audit object, and a report of
-            // zero usage costs no budget, so it was an uncapped way to fill the ledger.
+            // Only the three recognised counters are recorded. The caller's whole map would put
+            // text of its choosing into the audit log, and a report of zero usage costs no
+            // budget, so it would be an uncapped way to fill the log.
             JSON.serialize(
                 new Map<String, Object>{
                     'apiCalls' => actual.get('apiCalls'),
@@ -494,18 +486,6 @@ global with sharing class AgentGovRestApi {
     }
 
     /**
-     * @description Prepares a resolved agent for a governed call.
-     *
-     *              A breaker that has served its cooldown is reopened first, because tripping
-     *              leaves the agent Blocked and a Blocked agent would otherwise be refused
-     *              here before any breaker code could run, with no way back. Throttled is then
-     *              admitted because that is the status a HALF_OPEN breaker carries; the
-     *              breaker still decides whether this particular call is the single probe.
-     * @param registration The resolved calling agent
-     * @return The same registration once it is cleared to proceed
-     * @throws AgentGovException AGENT_NOT_ACTIVE when the agent is genuinely not usable
-     */
-    /**
      * @description Admits a resolved agent to a governed call and audits a refusal. An agent
      *              whose breaker has tripped is Blocked, and its refused attempts are exactly
      *              the activity an administrator needs to see.
@@ -538,18 +518,70 @@ global with sharing class AgentGovRestApi {
         }
     }
 
+    /**
+     * @description Applies the status check for a governed call. Active and Throttled agents
+     *              are admitted. A Blocked agent is admitted when its breaker may probe, or while
+     *              governance is off. Nothing is written here.
+     * @param registration The resolved calling agent
+     * @return The same registration once it is cleared to proceed
+     * @throws AgentGovException AGENT_NOT_ACTIVE when the agent may not proceed
+     */
     private static AgentGov_Registration__c admitForGovernedCall(AgentGov_Registration__c registration) {
         // Throttled is the status a HALF_OPEN breaker carries, so it is admitted. A Blocked
         // agent whose cooldown has elapsed is admitted too, because otherwise the status check
-        // would refuse it before the breaker could ever readmit it. Nothing is written here:
-        // the OPEN to HALF_OPEN transition and the probe claim happen together under the row
-        // lock in allowRequests, which handleAuthorize calls next. During the emergency bypass
-        // the breaker is not consulted, so a Blocked agent is admitted as the Flow actions admit it.
+        // would refuse it before the breaker could ever readmit it. For /authorize the OPEN to
+        // HALF_OPEN transition and the probe claim happen together under the row lock in
+        // allowRequests, which handleAuthorize calls next; /report claims no probe and records
+        // only the outcome the agent reports, which the breaker ignores while OPEN. During the
+        // emergency bypass the breaker is not consulted, so a Blocked agent is admitted as the
+        // Flow actions admit it.
         return AgentGovRestAuth.requireActive(
             registration,
             true,
             !AgentGovSelector.isFrameworkEnabled() || AgentGovCircuitBreaker.mayProbe(registration)
         );
+    }
+
+    /**
+     * @description Applies the status check for /rotate-key and audits a refusal, as a refused
+     *              governed call is audited.
+     * @param registration The resolved calling agent
+     * @throws AgentGovException AGENT_NOT_ACTIVE unless the agent is Active or Throttled
+     */
+    private static void admitKeyRotation(AgentGov_Registration__c registration) {
+        // Held to a stricter status check than the other POST paths: only an Active or Throttled
+        // agent may rotate its key, so a Blocked one may not even when its breaker may probe or
+        // governance is off. Refusing a deactivated agent is what contains a leaked key: the
+        // holder can neither mint a fresh credential nor lock the real owner out.
+        try {
+            AgentGovRestAuth.requireActive(registration, true);
+        } catch (AgentGovException refused) {
+            logAction(
+                registration,
+                AgentGovConstants.ACTION_SYSTEM,
+                null,
+                null,
+                AgentGovConstants.ACTION_DENIED,
+                String.format(AgentGovConstants.ERR_KEY_ROTATION_REFUSED, new List<String>{ refused.getMessage() })
+            );
+            throw refused;
+        }
+    }
+
+    // The audit row stores the Id in an 18-character field, so a value that is not a Salesforce
+    // Id is refused as bad input before anything is governed, charged or logged.
+    private static void requireRecordId(String recordId) {
+        if (String.isBlank(recordId)) {
+            return;
+        }
+        try {
+            Id.valueOf(recordId);
+        } catch (Exception e) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                AgentGovConstants.ERR_INVALID_RECORD_ID + recordId.left(255)
+            );
+        }
     }
 
     private static Integer readCount(Map<String, Object> source, String key, Integer defaultValue) {

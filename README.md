@@ -23,7 +23,7 @@
 
 AI agents on Salesforce are powerful -- but unchecked, they become dangerous. A single runaway agent can exhaust your org's daily API limits, overwrite records that another agent is processing, or silently violate data access policies. As organizations deploy more agents (Agentforce, MCP-connected external models, custom Apex bots, Flow-based automations), the governance gap widens fast.
 
-**AgentGov closes that gap.** It provides a declarative, metadata-driven framework that sits between your agents and the Salesforce platform. Every proxy request, `/authorize` call, and Register Agent Action request passes circuit breaker validation, policy evaluation, conflict detection, and a budget check before the action runs; Apex units measured with `AgentGovContext` are charged for what they actually used once they finish. When something goes wrong, the framework blocks the offending agent, raises a real-time alert that can be emailed to an administrator, and logs everything for audit.
+**AgentGov closes that gap.** It provides a declarative, metadata-driven framework that sits between your agents and the Salesforce platform. Every proxy request, `/authorize` call, and Register Agent Action request is validated and passes the circuit breaker, policy evaluation, a budget check and, where two agents could claim the same record, conflict detection before the action runs; Apex units measured with `AgentGovContext` are charged for what they actually used once they finish. When something goes wrong, the framework blocks the offending agent, raises a real-time alert that can be emailed to an administrator, and logs everything for audit.
 
 No external infrastructure. No managed package dependencies. Pure Salesforce-native Apex, Custom Objects, Custom Metadata Types, Platform Events, and Lightning Web Components.
 
@@ -42,6 +42,7 @@ flowchart TB
 
     subgraph AgentGov["AgentGov Framework"]
         AUTH["REST Auth\nAPI key or bound user"]
+        API["REST API\n/register /authorize\n/report /rotate-key"]
         PROXY["Proxy API\n/query /create /update\n/delete /upsert (user mode)"]
         CTX["AgentGov Context\n(Limits measurement)"]
         INV["Flow Actions"]
@@ -49,7 +50,9 @@ flowchart TB
         PE["Policy Engine"]
         CR["Conflict Resolver"]
         BM["Budget Manager"]
-        AL["Audit Trail"]
+        ST["Session Tracker\n(opens and closes sessions)"]
+        AL["Audit Trail\n(every request, refused or not)"]
+        JOBS["Scheduled Jobs\n(daily reset, health check, cleanup)"]
     end
 
     subgraph Platform["Salesforce Platform"]
@@ -60,41 +63,57 @@ flowchart TB
         SF["Customer Data\n(Database in USER_MODE)"]
     end
 
+    subgraph People["Administrators"]
+        ADMIN["Administrator / Responder"]
+        CONSOLE["AgentGov Console\nand record pages"]
+    end
+
     A2 -->|"REST"| AUTH
+    AUTH --> API
     AUTH --> PROXY
     A1 -->|"Flow / Apex"| INV
     A3 -->|"Apex"| CTX
     A4 -->|"Flow"| INV
 
+    API --> CB
     PROXY --> CB
     INV --> CB
     CTX --> BM
     CB -->|"CLOSED?"| PE
     PE -->|"Allowed?"| CR
     CR -->|"No conflict?"| BM
-    BM -->|"Has budget?"| AL
+    BM -->|"Has budget?"| ST
+    ST --> AL
 
     PROXY -->|"Executes"| SF
     PE -.-> MD
     BM -.-> MD
     BM -.-> CS
+    ST -.-> CO
     AL -.-> CO
     AL -.-> EVT
+    JOBS -.->|"reset budgets, reopen breakers,\nclose idle sessions, purge"| CO
+
+    ADMIN --> CONSOLE
+    CONSOLE -.->|"reads, acts, audits"| CO
+    EVT -.->|"live updates"| CONSOLE
 ```
 
 ### Request Lifecycle
 
-Every proxy request, `/authorize` call, and Register Agent Action request follows this pipeline:
+Every proxy request, `/authorize` call, and Register Agent Action request is checked in this order:
 
-1. **Authentication** -- Who is calling? The agent's API key in the `X-AgentGov-Key` header (only its SHA-256 hash is stored), or, with no key, the Salesforce user bound to exactly one registration.
-2. **Registry Check** -- Is the agent registered and active?
-3. **Circuit Breaker** -- Is the agent's circuit breaker CLOSED (healthy)?
-4. **Policy Evaluation** -- May this agent type perform this operation on this object, with these fields, on this many records?
-5. **Conflict Detection** -- Is another agent in this same transaction already modifying this record?
-6. **Budget Check** -- Does the agent have remaining governor budget for today?
-7. **Action Logging** -- Record the outcome, including denials, in the action log.
+1. **Authentication** -- Who is calling? Over REST and the proxy, the agent's API key in the `X-AgentGov-Key` header (only its SHA-256 hash is stored), or, with no key, the Salesforce user bound to exactly one registration. Register Agent Action takes the agent's registration Id as an input.
+2. **Status Check** -- Is the agent registered and active? A deactivated agent is refused. A Blocked agent is let through only once its breaker's cooldown has passed, so the breaker can admit its probe, or while governance is switched off.
+3. **Validation** -- Is the request well formed? An unknown object or field, a value a field cannot hold, an unrecognised operation, a malformed record Id, the same record twice, or a filter or sort a field does not support is refused before anything else runs, so it is never charged and never uses up a half-open breaker's probe.
+4. **Circuit Breaker** -- Is the breaker CLOSED, or is this the single probe a HALF_OPEN breaker admits?
+5. **Policy Evaluation** -- May this agent type perform this operation on this object? Through the proxy, a policy's field restrictions and record cap apply too.
+6. **Conflict Detection** -- Has another agent already claimed this record in the same transaction? This applies to `/authorize` with a `recordId`, to proxy updates, upserts, and deletes of existing records, and between the agents in one Register Agent Action batch.
+7. **Field Access** (proxy) -- May the calling user read or write every object and field the request touches? Checked in user mode before anything is charged.
+8. **Budget Check** -- Does the agent have governor budget left for today? The request is charged here.
+9. **Execution and Logging** -- The proxy runs the work in user mode, and every request for a known agent is recorded in the action log, refusals included.
 
-If any step fails, the request is denied with a specific error code and a correlation id. The agent is never left guessing about _why_ it was blocked.
+A refusal over REST or the proxy carries a specific error code and a correlation id; Register Agent Action returns `authorized` false with a `denialReason`. The agent is never left guessing about _why_ it was blocked. Validation errors over REST and the proxy, and requests that name no known agent, leave no audit row; Register Agent Action records an unrecognised action type as a `System` row.
 
 Apex measured with `AgentGovContext` runs no breaker, policy, or conflict check: `startTracking` refuses only a deactivated agent, and the unit is charged for its measured usage once it finishes. A deactivated (Inactive) agent is refused by REST, the proxy, Register Agent Action, Report Agent Usage, and `AgentGovContext`, even while governance is switched off. Apex that calls the service classes directly must check `Status__c` itself.
 
@@ -113,7 +132,7 @@ AgentGov targets API 67.0 (Summer '26), where database operations run in user mo
 
 Console actions need `AgentGov_Operate_Agents`; key rotation needs only `AgentGov_Manage_Keys`. `AgentGov_Admin` grants both. On-call staff who should act on agents without handling credentials get `AgentGov_User` plus `AgentGov_Responder`: Responder grants no object, tab, or app access of its own, only `AgentGov_Operate_Agents` and the console's action controller.
 
-API keys are stored only as SHA-256 hashes. An unexpected REST or proxy error (HTTP 500) never includes exception text: everything the request wrote, budget charges included, is rolled back, and the response carries a correlation id that finds the logged detail in the action log. Every other error is worded by the framework: a proxy `ACCESS_DENIED` names the object, or the fields, the calling user may not reach.
+API keys are stored only as SHA-256 hashes. An unexpected REST or proxy error (HTTP 500) never includes exception text: everything a POST request wrote, budget charges included, is rolled back, and the response carries a correlation id that finds the logged detail in the action log. Every other error is worded by the framework: a proxy `ACCESS_DENIED` names the object, or the fields, the calling user may not reach. The one exception is a write's per-record result, where each record the database rejects carries the database's own message in `results[].errors`.
 
 ---
 
@@ -139,7 +158,7 @@ Detect and resolve conflicts when multiple agents attempt to modify the same rec
 
 ### 5. Real-Time Monitoring and Alerts
 
-Platform Events (`AgentGov_Alert__e` and `AgentGov_Action_Event__e`) provide real-time visibility into agent activity. The Lightning console subscribes to them and refreshes live. Each time a budget's overall status escalates, and each time a circuit breaker trips, an alert is recorded as an `Alert` row and emailed to the address in AgentGov Settings, and optionally to each agent's owner. Alerts need `Enable_Real_Time_Events__c`: with it unchecked no alert is recorded or emailed, while action logs are still written directly. Every row written for a governed request carries the request's correlation id, how long the request had taken, the session its usage was recorded against (if any), and the reason for any refusal.
+Platform Events (`AgentGov_Alert__e` and `AgentGov_Action_Event__e`) provide real-time visibility into agent activity. The Lightning console subscribes to them and refreshes live. Each time a budget's overall status escalates, and each time a circuit breaker trips, an alert is recorded as an `Alert` row and emailed to the address in AgentGov Settings, and optionally to each agent's owner. Alerts need `Enable_Real_Time_Events__c`: with it unchecked no alert is recorded or emailed, while action logs are still written directly. Every action row written for a governed request carries the request's correlation id, how long the request had taken, the session its usage was recorded against (if any), and the reason for any refusal. `Alert` rows carry neither the correlation id nor the duration.
 
 ### 6. Sessions
 
@@ -174,7 +193,7 @@ curl -X POST "$INSTANCE/services/apexrest/agentgov-proxy/query" \
        "orderBy":{"field":"Name","direction":"ASC"},"limit":50}'
 ```
 
-Proxy endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`. Each runs the full governance pipeline (circuit breaker → policy → conflict → field-level security → budget) before executing.
+Proxy endpoints: `/query`, `/create`, `/update`, `/delete`, `/upsert`. Each validates the whole request, then runs the governance pipeline (circuit breaker → policy → conflict for records that already exist → field-level security → budget) before executing.
 
 For Apex agents, use `AgentGovContext` to measure actual resource consumption via the `Limits` class:
 
@@ -192,7 +211,7 @@ Five bulk-safe invocable actions make AgentGov accessible from any Salesforce Fl
 - **Register Agent Action** -- Check circuit breaker, policy, record conflicts within the batch, and budget, then log the action in one call
 - **Check Agent Budget** -- Read-only budget status check
 - **Get Agent Status** -- Health and circuit breaker state
-- **Log Agent Action** -- Record an action for audit only
+- **Log Agent Action** -- Record an action and report its Success or Failure to the agent's circuit breaker
 - **Report Agent Usage** -- Charge the resources a Flow actually used
 
 ---
@@ -232,8 +251,19 @@ AgentGovBudgetManager.BudgetResult result = AgentGovContext.stopTracking();
 **Or use the convenience wrapper:**
 
 ```apex
-AgentGovContext.executeGoverned(agentId, new MyAgentAction());
+AgentGovBudgetManager.BudgetResult result = AgentGovContext.executeGoverned(agentId, new EnrichLeads());
 // Charges the measured usage; if the action throws, the exception propagates after the charge
+
+// The work goes in any class that implements AgentGovContext.AgentGovAction:
+public class EnrichLeads implements AgentGovContext.AgentGovAction {
+    public void execute() {
+        List<Lead> leads = [SELECT Id FROM Lead WHERE Status = 'Open' LIMIT 100];
+        for (Lead lead : leads) {
+            lead.Status = 'Working';
+        }
+        update leads;
+    }
+}
 ```
 
 Contexts nest: an inner context's usage is charged to its own agent and excluded from the outer one.
@@ -568,7 +598,7 @@ Output: Agent Name, Agent Status, Circuit Breaker State, Is Healthy, Failure Cou
 
 #### Log Agent Action
 
-Records an action for audit purposes without running governance checks. Use it when the checks have already been made separately, or for informational events. A row logged with status `Failure` is an audit record only; it does not count toward the circuit breaker.
+Records an action without running governance checks: after Register Agent Action, to say how the authorized work went, or for informational events. A `Success` or `Failure` status also counts toward the agent's circuit breaker, one outcome per agent per batch (a failure anywhere in the batch makes it a failure). Outcomes are ignored while the breaker is OPEN, for a deactivated agent, and during the emergency bypass. Log refusals and events that are not the agent's own failures as `Denied`, which counts for nothing.
 
 #### Report Agent Usage
 
@@ -614,20 +644,18 @@ All endpoints require a Salesforce OAuth bearer token from a user with access to
 
 **Error Codes:**
 
-| Code                    | HTTP Status | Description                                                                                                             |
-| ----------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `INVALID_INPUT`         | 400         | Missing or invalid request parameters, unknown object or field, or a registration value the database rejects            |
-| `AGENT_NOT_FOUND`       | 404         | No credential resolved to a registration                                                                                |
-| `AGENT_NOT_ACTIVE`      | 403         | Agent exists but is not in Active status                                                                                |
-| `ACCESS_DENIED`         | 403         | The calling user lacks access to the data, may not read the agent, or is bound to several registrations and sent no key |
-| `POLICY_VIOLATION`      | 403         | Denied by policy, a restricted field, or a record cap                                                                   |
-| `BUDGET_EXCEEDED`       | 429         | Daily governor budget blocked or exhausted                                                                              |
-| `MAX_CONCURRENT_AGENTS` | 429         | Org has reached the max concurrent agent limit                                                                          |
-| `RECORD_LOCKED`         | 409         | Record is locked by a higher-priority agent                                                                             |
-| `CIRCUIT_BREAKER_OPEN`  | 503         | Agent is temporarily disabled                                                                                           |
-| `INTERNAL_ERROR`        | 500         | Unexpected failure; everything the request wrote is rolled back, and the details are logged under the correlation id    |
+| Code                   | HTTP Status | Description                                                                                                                                                                                                                                         |
+| ---------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `INVALID_INPUT`        | 400         | The request is malformed: a missing or invalid parameter, an unknown object or field, a value a field cannot hold, the same record twice, or a registration value the database rejects. Nothing is charged and the circuit breaker is not consulted |
+| `ACCESS_DENIED`        | 403         | The calling user may not read or change the data a proxy request names; a GET names another agent without `AgentGov_Admin_Access`; or the user is bound to several registrations and sent no key                                                    |
+| `AGENT_NOT_ACTIVE`     | 403         | The agent is deactivated, or Blocked by its circuit breaker and still inside the cooldown                                                                                                                                                           |
+| `POLICY_VIOLATION`     | 403         | Denied by policy; through the proxy, also a restricted field or a write over the record cap                                                                                                                                                         |
+| `AGENT_NOT_FOUND`      | 404         | No credential resolved to a registration, the registration a GET names does not exist, or the path is not one AgentGov serves                                                                                                                       |
+| `BUDGET_EXCEEDED`      | 429         | The budget is Blocked or Exhausted on any limit type, so every governed call is refused; the refused request's own units stay recorded                                                                                                              |
+| `INTERNAL_ERROR`       | 500         | An unexpected failure; a POST's writes and charges are rolled back, and the detail is logged under the correlation id                                                                                                                               |
+| `CIRCUIT_BREAKER_OPEN` | 503         | The breaker is HALF_OPEN and its single probe is already taken, or OPEN while the agent's status was set back to Active by hand                                                                                                                     |
 
-Full details in [docs/rest-api-reference.md](docs/rest-api-reference.md).
+`RECORD_LOCKED` and `MAX_CONCURRENT_AGENTS` exist in the error-code enum but are not returned over REST: a REST request serves one agent, and only activating an agent checks the concurrency limit. Full details in [docs/rest-api-reference.md](docs/rest-api-reference.md).
 
 ---
 
@@ -639,8 +667,8 @@ Full details in [docs/rest-api-reference.md](docs/rest-api-reference.md).
 | -------------------------------------- | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Is_Enabled__c`                        | Checkbox | `true`  | Governance on or off. Unchecked is an emergency bypass: REST, the proxy, the Flow actions, and `AgentGovContext` skip the circuit breaker, policy, budget, and conflict checks, charge nothing, and allow and audit every action. A deactivated agent is still refused |
 | `Default_Agent_Priority__c`            | Number   | `5`     | Default priority for new agents (1 = highest)                                                                                                                                                                                                                          |
-| `Max_Concurrent_Agents__c`             | Number   | `10`    | Maximum agents in Active status simultaneously                                                                                                                                                                                                                         |
-| `Circuit_Breaker_Failure_Threshold__c` | Number   | `5`     | Failures before circuit breaker trips to OPEN                                                                                                                                                                                                                          |
+| `Max_Concurrent_Agents__c`             | Number   | `10`    | Maximum agents in Active status, checked when an agent is activated. An agent returning to Active from a tripped breaker is not checked, so the count can briefly exceed it                                                                                            |
+| `Circuit_Breaker_Failure_Threshold__c` | Number   | `5`     | Consecutive failures before the circuit breaker trips to OPEN; a success clears the count                                                                                                                                                                              |
 | `Circuit_Breaker_Cooldown_Minutes__c`  | Number   | `30`    | Minutes before an OPEN breaker admits a probe. A failed probe reopens it for twice this, capped at one day                                                                                                                                                             |
 | `Log_Retention_Days__c`                | Number   | `90`    | Days to retain action logs, conflict logs, and finished sessions                                                                                                                                                                                                       |
 | `Budget_Retention_Days__c`             | Number   | `400`   | Days to retain daily budget rows, which the console's usage history is read from                                                                                                                                                                                       |
@@ -665,15 +693,15 @@ The thresholds are whole numbers of percent. A budget's status is the most sever
 
 ### AgentGov_Policy__mdt (Custom Metadata Type)
 
-| Field                            | Type     | Description                                                                                             |
-| -------------------------------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `Agent_Type__c`                  | Text     | Agent type this policy applies to (`Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`, or `All`) |
-| `Object_Name__c`                 | Text     | Salesforce object API name, or `*` for all objects                                                      |
-| `Operation__c`                   | Text     | Operation type (`Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*`)    |
-| `Is_Allowed__c`                  | Checkbox | Whether this action is allowed (explicit deny overrides allow)                                          |
-| `Field_Restrictions__c`          | Text     | Comma-separated field API names the agent may neither read nor write through the proxy                  |
-| `Max_Records_Per_Transaction__c` | Number   | Maximum records per proxy request; also caps `/query` results                                           |
-| `Description__c`                 | Text     | Human-readable description of the policy intent                                                         |
+| Field                            | Type           | Description                                                                                                                                                                                        |
+| -------------------------------- | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Agent_Type__c`                  | Text           | Agent type this policy applies to: the stored value (`Agentforce`, `MCP_External`, `Custom_Apex`, `Flow_Based`) or the label shown on records (such as MCP External), in any letter case, or `All` |
+| `Object_Name__c`                 | Text           | Salesforce object API name, or `*` for all objects                                                                                                                                                 |
+| `Operation__c`                   | Text           | Operation type (`Query`, `Create`, `Update`, `Delete`, `Upsert`, `API_Call`, `Flow_Trigger`, or `*`)                                                                                               |
+| `Is_Allowed__c`                  | Checkbox       | Whether this action is allowed (explicit deny overrides allow)                                                                                                                                     |
+| `Field_Restrictions__c`          | Long Text Area | Comma-separated field API names the agent may neither read nor write through the proxy                                                                                                             |
+| `Max_Records_Per_Transaction__c` | Number         | Maximum records per proxy request; also caps `/query` results                                                                                                                                      |
+| `Description__c`                 | Long Text Area | Human-readable description of the policy intent                                                                                                                                                    |
 
 ---
 
@@ -701,7 +729,7 @@ stateDiagram-v2
 - Cooldown period: **30** minutes
 - Retry backoff: a failed probe reopens the breaker for **twice** the configured cooldown, capped at **24 hours**; the cooldown does not keep doubling on later failures
 
-The proxy records outcomes automatically: a success when a query returns or any record in a write is saved, and a failure when every record in a write fails. Register Agent Action records a success when it authorizes a request. Log Agent Action records the status it logs, a `Failure` as a failure and a `Success` as a success, one outcome per agent per batch, so a Flow that logs the outcome of its work trips and recovers its breaker too. Agents using `/authorize` report their own outcome by sending `"success": true` or `false` on the following `POST /agentgov/report` call. A successful report from an agent whose breaker is HALF_OPEN closes the breaker and returns it to Active.
+Outcomes reach the breaker from three places. The proxy records them automatically: a success when a query returns or any record in a write is saved, and a failure when every record in a write fails. Agents using `/authorize` report their own outcome by sending `"success": true` or `false` on the following `POST /agentgov/report` call. Flows log it with Log Agent Action: a `Failure` counts as a failure and a `Success` as a success, one outcome per agent per batch. Authorizing records no outcome, whether through `/authorize` or Register Agent Action, because the work has not run yet. While the breaker is OPEN, outcomes are ignored, so failures reported while the agent is refused never push its retry back. A successful outcome for an agent whose breaker is HALF_OPEN closes the breaker and returns the agent to Active; a failed one counts as another failure and reopens it for twice the cooldown.
 
 ---
 

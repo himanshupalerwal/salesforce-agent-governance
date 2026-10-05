@@ -14,7 +14,7 @@
     </actionOverrides>
     <compactLayoutAssignment>AgentGov_Agent_Highlights</compactLayoutAssignment>
     <deploymentStatus>Deployed</deploymentStatus>
-    <description>Registers AI agents (Agentforce, MCP, Custom, Flow-based) operating within the Salesforce org for governance tracking.</description>
+    <description>Registers the AI agents AgentGov governs (Agentforce, MCP External, Custom Apex, and Flow Based) with their credentials, daily budgets, priority, and circuit breaker state.</description>
     <enableActivities>true</enableActivities>
     <enableBulkApi>true</enableBulkApi>
     <enableHistory>true</enableHistory>

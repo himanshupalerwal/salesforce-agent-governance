@@ -1,3 +1,5 @@
+@import 'c/agentGovStyles';
+
 /* Colors come from SLDS 2 global styling hooks with SLDS 1 fallbacks. */
 .key-row {
     display: flex;

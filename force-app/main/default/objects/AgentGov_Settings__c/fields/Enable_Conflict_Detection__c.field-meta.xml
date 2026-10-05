@@ -2,6 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Enable_Conflict_Detection__c</fullName>
     <defaultValue>true</defaultValue>
+    <description>Detects two agents claiming the same record within one transaction, such as in one Register Agent Action batch, and lets the agent with the better priority (a lower number, or the first claim on a tie) proceed while the other's request is refused; each conflict is written to the conflict log. Unchecked, no conflict is detected or logged and every such request proceeds. Requests in separate transactions are never compared.</description>
     <externalId>false</externalId>
     <label>Enable Conflict Detection</label>
     <trackTrending>false</trackTrending>

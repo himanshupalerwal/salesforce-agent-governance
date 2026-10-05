@@ -81,13 +81,13 @@ sf org assign permset --name AgentGov_Admin --target-org agentgov
 AgentGov ships five ways to grant access. Give each person or integration one of them;
 `AgentGov_Responder` is the exception, added on top of `AgentGov_User`:
 
-| Grant                | Give it to                                             | What it allows                                                                                                                                                                                                                                                                                                           |
-| -------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `AgentGov_Admin`     | Administrators who configure and operate the framework | Full access to the five AgentGov custom objects, with the audit, key, and bookkeeping fields read-only; all tabs; all Apex classes; the `AgentGov_Admin_Access` custom permission that allows reading any agent through the REST API; and both console permissions: `AgentGov_Operate_Agents` and `AgentGov_Manage_Keys` |
-| `AgentGov_User`      | People who only need to watch the dashboards           | Read-only on the AgentGov objects and every field the dashboards show, all tabs, and the dashboard controller. The API key and key hash fields are deliberately excluded                                                                                                                                                 |
-| `AgentGov_Responder` | On-call staff, together with `AgentGov_User`           | The console's actions on agents (reset breakers, activate and deactivate, end sessions, credit budgets, schedule jobs) through `AgentGov_Operate_Agents`, without the right to rotate API keys                                                                                                                           |
-| `AgentGov_Agent`     | The Salesforce user an AI agent runs as                | The two REST resources and nothing else. The framework records its own bookkeeping in system mode, so this user needs no access to AgentGov objects                                                                                                                                                                      |
-| `AgentGov_Operators` | Administrators, as a single assignment                 | A permission set group containing `AgentGov_Admin` and `AgentGov_User`                                                                                                                                                                                                                                                   |
+| Grant                | Give it to                                             | What it allows                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `AgentGov_Admin`     | Administrators who configure and operate the framework | Full access, including Modify All, to the five AgentGov custom objects. The API key fields, the framework's computed fields, and most action and conflict log fields are read-only; usage, circuit breaker, and session fields stay editable for corrections. All tabs; all Apex classes; the `AgentGov_Admin_Access` custom permission that allows reading any agent through the REST API; and both console permissions: `AgentGov_Operate_Agents` and `AgentGov_Manage_Keys` |
+| `AgentGov_User`      | People who only need to watch the dashboards           | Read-only on the AgentGov objects and every field the dashboards show, all tabs, and the dashboard controller. The API key and key hash fields are deliberately excluded                                                                                                                                                                                                                                                                                                       |
+| `AgentGov_Responder` | On-call staff, together with `AgentGov_User`           | The console's actions on agents (reset breakers, activate and deactivate, end sessions, credit budgets, schedule jobs) through `AgentGov_Operate_Agents`, without the right to rotate API keys                                                                                                                                                                                                                                                                                 |
+| `AgentGov_Agent`     | The Salesforce user an AI agent runs as                | The two REST resources and nothing else. The framework records its own bookkeeping in system mode, so this user needs no access to AgentGov objects                                                                                                                                                                                                                                                                                                                            |
+| `AgentGov_Operators` | Administrators, as a single assignment                 | A permission set group containing `AgentGov_Admin` and `AgentGov_User`                                                                                                                                                                                                                                                                                                                                                                                                         |
 
 ```bash
 # The group, if you prefer one assignment for administrators
@@ -142,11 +142,11 @@ sf apex run --file scripts/setup/schedule-jobs.apex --target-org agentgov
 The **Schedule jobs** button on the console's Setup tab does the same. Running either again
 replaces the jobs rather than duplicating them.
 
-| Job                   | Runs            | Does                                                                                                        |
-| --------------------- | --------------- | ----------------------------------------------------------------------------------------------------------- |
-| AgentGov Daily Reset  | Midnight daily  | Creates today's budget row for every active agent                                                           |
-| AgentGov Health Check | Hourly          | Moves OPEN circuit breakers to HALF_OPEN after their cooldown, closes idle sessions                         |
-| AgentGov Cleanup      | Sunday at 02:00 | Deletes logs, conflicts, finished sessions, and budget rows past their retention, with a summary per object |
+| Job                   | Runs            | Does                                                                                                                      |
+| --------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| AgentGov Daily Reset  | Midnight daily  | Creates today's budget row for every active agent                                                                         |
+| AgentGov Health Check | Hourly          | Moves OPEN circuit breakers to HALF_OPEN after their cooldown, and closes sessions that are idle or have run for 24 hours |
+| AgentGov Cleanup      | Sunday at 02:00 | Deletes logs, conflicts, finished sessions, and budget rows past their retention, with a summary per object               |
 
 **Confirm it worked.** The console's Setup tab, or Setup, **Scheduled Jobs**, lists all three
 with a next run time.
@@ -183,6 +183,9 @@ AgentGovSampleData.deleteSampleData(); // returns the number of rows removed
 APEX
 ```
 
+One run removes at most 1,500 rows of each kind and removes the agents only once none of their
+rows remain, so after heavy use of the sample agents, run it again until it returns 0.
+
 > **`deleteAll()` is a different method.** It removes **every** AgentGov row in the org,
 > including real agents, budgets and the entire audit trail. It exists for resetting a scratch
 > org. Never run it against an org that holds anything you want to keep. It purges in bounded
@@ -201,8 +204,11 @@ sf apex run test --target-org agentgov --test-level RunLocalTests \
   --code-coverage --result-format human --wait 30
 ```
 
-Every test must pass and org-wide coverage must be at least 85%, which is what CI enforces.
-The suite currently reports 303 tests and about 92% coverage. A failure means the deploy is
+Every test must pass and org-wide coverage must be at least 85%, which is what CI enforces in
+a scratch org that holds only AgentGov. `RunLocalTests` runs every local test in the org, so
+in an org with Apex of its own, run the AgentGov test classes instead and judge the coverage
+of the AgentGov classes.
+The suite currently reports 358 tests and about 94% coverage. A failure means the deploy is
 incomplete.
 
 In a scratch org you can also run the end-to-end suite, which drives the deployed
@@ -275,9 +281,11 @@ Open the agent's record and edit the **Budget Configuration** section. Defaults 
 API calls, 5,000 SOQL queries, and 3,000 DML operations per day. **Priority** decides who
 wins a record conflict: the lower number wins.
 
-Budgets are consumed in three ways, described in the README under _How Budget Tracking
-Works_: the governed proxy counts real records, `AgentGovContext` measures Apex usage, and
-`/authorize` with `/report` lets an agent declare and then reconcile its own usage.
+Budgets are consumed in the ways described in the README under _How Budget Tracking Works_:
+the governed proxy charges one DML operation per record submitted and one SOQL query per
+query, `AgentGovContext` measures Apex usage, `/authorize` with `/report` lets an agent
+declare and then add its own usage, Register Agent Action charges one unit per authorized
+request, and Report Agent Usage charges what a Flow reports.
 
 ## Write the access policies
 
@@ -393,8 +401,9 @@ and the error codes.
    job it removed.
 
 2. Deploy this version.
-3. Give on-call staff `AgentGov_Responder` if they should act on agents from the console.
-   `AgentGov_Admin` already includes both new console permissions.
+3. Give on-call staff `AgentGov_Responder`, together with `AgentGov_User`, if they should act
+   on agents from the console; on its own it opens nothing. `AgentGov_Admin` already includes
+   both new console permissions.
 4. Schedule the jobs again:
 
    ```bash
@@ -409,7 +418,7 @@ org's time zone, and a user bound to several agents must send a key.
 
 ## Upgrading from v1.1
 
-Follow these steps, which also bring you through v1.2, then the v1.2 steps above.
+Follow these steps instead of the v1.2 steps above; they include everything those steps do.
 `npm run e2e:upgrade` rehearses the whole path in a scratch org.
 
 1. **If your org ever created duplicate daily budget rows, run this first.** v1.2 adds a
@@ -422,16 +431,17 @@ Follow these steps, which also bring you through v1.2, then the v1.2 steps above
    ```
 
 2. **Clear the scheduled jobs.** Salesforce refuses to deploy an Apex class that a scheduled
-   job refers to, and a v1.1 install following this guide will have three of them. Either tick
-   **Allow deployments of components when corresponding Apex jobs are pending or in progress**
-   in Setup, Deployment Settings, or remove them and schedule them again after the deploy:
+   job refers to, and a v1.1 install following this guide will have three of them. Remove
+   them, including any copies you scheduled under names of your own:
 
    ```bash
    sf apex run --file scripts/setup/unschedule-jobs.apex --target-org agentgov
    ```
 
-3. Deploy and assign permission sets as in Part 1. Schedule the jobs again afterwards using
-   the command in Part 1, Step 5.
+3. Deploy and assign permission sets as in Part 1, and give on-call staff
+   `AgentGov_Responder` together with `AgentGov_User` if they should act on agents from the
+   console. Schedule the jobs again afterwards using the command in Part 1, Step 5, and
+   recreate any copies of your own that step 2 listed.
 
 4. Move any remaining plaintext API keys to hashed storage. Keys are also upgraded
    automatically the first time each agent connects, so this is optional but tidy.
@@ -440,12 +450,22 @@ Follow these steps, which also bring you through v1.2, then the v1.2 steps above
    sf apex run --file scripts/migrate/hash-api-keys.apex --target-org agentgov
    ```
 
-5. Update your REST clients. Two changes break v1.1 callers:
-   - Send the API key in the `X-AgentGov-Key` header. The body `apiKey` still works, and every
-     successful response to a request that used it carries a `deprecation` notice, but it is
-     removed in v1.4.
+5. Update your REST clients. These changes break v1.1 callers:
    - `/agentgov-proxy/query` no longer accepts SOQL. Send `objectName`, `fields`, and
      optional `where`, `orderBy`, and `limit`.
+   - Responses use one envelope: `success` and `correlationId` beside the payload, and on an
+     error `errorCode`, `message`, and `timestamp`. A proxy write reports its per-record
+     outcome in `allSucceeded`, not the top-level `success`.
+   - `GET /budget/{id}` and `GET /health/{id}` answer only the agent itself or a holder of
+     `AgentGov_Admin_Access`.
+   - `/report` no longer credits unused pre-authorization back, refuses negative counts, and
+     requires an active agent. `/authorize` refuses an unknown `operation` and an `amount`
+     below 1.
+   - A caller-supplied API key must be at least 24 characters.
+
+   One more is a deprecation rather than a break: send the API key in the `X-AgentGov-Key`
+   header. The body `apiKey` still works until v1.4, and every successful response to a
+   request that used it carries a `deprecation` notice.
 
    [CHANGELOG.md](../CHANGELOG.md) lists every behavior change.
 

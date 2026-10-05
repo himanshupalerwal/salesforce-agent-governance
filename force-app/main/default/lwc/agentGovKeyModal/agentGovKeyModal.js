@@ -8,8 +8,11 @@ import { api } from 'lwc';
 import LightningModal from 'lightning/modal';
 
 export default class AgentGovKeyModal extends LightningModal {
+    /**
+     * Name of the agent whose key was replaced, shown in the dialog.
+     * @type {string}
+     */
     @api agentName;
-    @api apiKeyPrefix;
 
     key;
     copyStatus = '';

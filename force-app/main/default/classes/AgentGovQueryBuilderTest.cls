@@ -1,11 +1,35 @@
 /**
  * @description Tests for AgentGovQueryBuilder: parsing, validation, SOQL compilation with
- *              bind variables, limits, and value conversion.
+ *              bind variables, limits and record caps, value conversion, the read-access check,
+ *              and how a query the database refuses is classified.
  */
 @IsTest
 private class AgentGovQueryBuilderTest {
     private static Map<String, Object> body(String objectName, List<String> fields) {
         return new Map<String, Object>{ 'objectName' => objectName, 'fields' => fields };
+    }
+
+    private static Map<String, Object> withCondition(
+        Map<String, Object> request,
+        String field,
+        String op,
+        Object value
+    ) {
+        request.put(
+            'where',
+            new List<Object>{ new Map<String, Object>{ 'field' => field, 'op' => op, 'value' => value } }
+        );
+        return request;
+    }
+
+    private static void expectInvalidWith(Map<String, Object> request, String expectedMessage) {
+        try {
+            build(request, null);
+            Assert.fail('Must be rejected: ' + expectedMessage);
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode(), e.getMessage());
+            Assert.areEqual(expectedMessage, e.getMessage());
+        }
     }
 
     private static AgentGovQueryBuilder.BuiltQuery build(Map<String, Object> request, Integer maxRecords) {
@@ -235,7 +259,7 @@ private class AgentGovQueryBuilderTest {
         for (String candidate : new List<String>{ null, '', ' ', '1Field', 'Name;DROP' }) {
             try {
                 AgentGovQueryBuilder.resolveField(candidate, fields, 'Account');
-                Assert.fail('Rejected: ' + candidate);
+                Assert.fail('Must be rejected: ' + candidate);
             } catch (AgentGovException e) {
                 Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
             }
@@ -245,5 +269,220 @@ private class AgentGovQueryBuilderTest {
             AgentGovQueryBuilder.resolveField('name', fields, 'Account'),
             'Matching is case-insensitive'
         );
+    }
+
+    @IsTest
+    static void conditionsAndSortsTheDatabaseCannotRunAreRefusedWhileCompiling() {
+        // Account.Description is a long text area: it can be neither filtered nor sorted.
+        expectInvalidWith(
+            withCondition(body('Account', new List<String>{ 'Id' }), 'Description', '=', 'x'),
+            String.format(AgentGovConstants.ERR_FIELD_NOT_FILTERABLE, new List<String>{ 'Account', 'Description' })
+        );
+
+        Map<String, Object> sorted = body('Account', new List<String>{ 'Id' });
+        sorted.put('orderBy', new Map<String, Object>{ 'field' => 'description' });
+        expectInvalidWith(
+            sorted,
+            String.format(AgentGovConstants.ERR_FIELD_NOT_SORTABLE, new List<String>{ 'Account', 'Description' })
+        );
+
+        expectInvalidWith(
+            withCondition(body('Account', new List<String>{ 'Id' }), 'NumberOfEmployees', 'LIKE', '1%'),
+            String.format(AgentGovConstants.ERR_LIKE_NOT_TEXT, new List<String>{ 'Account', 'NumberOfEmployees' })
+        );
+        expectInvalidWith(
+            withCondition(body('Account', new List<String>{ 'Id' }), 'OwnerId', 'like', '005%'),
+            String.format(AgentGovConstants.ERR_LIKE_NOT_TEXT, new List<String>{ 'Account', 'OwnerId' })
+        );
+
+        AgentGovQueryBuilder.BuiltQuery picklistLike = build(
+            withCondition(body('Account', new List<String>{ 'Id' }), 'Industry', 'LIKE', 'Ener%'),
+            null
+        );
+        Assert.areEqual(0, AgentGovQueryBuilder.execute(picklistLike).size(), 'LIKE on a picklist runs');
+    }
+
+    @IsTest
+    static void valuesForTextFieldsAreUsedAsText() {
+        Assert.areEqual('12345', AgentGovQueryBuilder.convertFieldValue(12345, Schema.DisplayType.STRING));
+        Assert.areEqual('true', AgentGovQueryBuilder.convertFieldValue(true, Schema.DisplayType.PICKLIST));
+        Assert.areEqual('12.5', AgentGovQueryBuilder.convertFieldValue(12.5, Schema.DisplayType.PHONE));
+        Assert.areEqual(
+            new List<String>{ '1', 'two' },
+            (List<String>) AgentGovQueryBuilder.typedList(new List<Object>{ 1, 'two' }, Schema.DisplayType.EMAIL)
+        );
+
+        insert new Account(Name = '12345');
+        AgentGovQueryBuilder.BuiltQuery built = build(
+            withCondition(body('Account', new List<String>{ 'Id', 'Name' }), 'Name', '=', 12345),
+            null
+        );
+        Assert.areEqual('12345', built.binds.get('b0'), 'The number is bound as text');
+        Assert.areEqual(1, AgentGovQueryBuilder.execute(built).size(), 'A number matches the text it is written as');
+    }
+
+    @IsTest
+    static void aJsonObjectOrListIsNeverAFieldValue() {
+        for (
+            Schema.DisplayType fieldType : new List<Schema.DisplayType>{
+                Schema.DisplayType.STRING,
+                Schema.DisplayType.BOOLEAN,
+                Schema.DisplayType.DATE,
+                Schema.DisplayType.ID
+            }
+        ) {
+            for (Object value : new List<Object>{ new Map<String, Object>{ 'a' => 1 }, new List<Object>{ 'a' } }) {
+                try {
+                    AgentGovQueryBuilder.convertFieldValue(value, fieldType);
+                    Assert.fail('Must be rejected for a ' + fieldType + ' field: ' + JSON.serialize(value));
+                } catch (AgentGovException e) {
+                    Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+                    Assert.areEqual(
+                        String.format(
+                            AgentGovConstants.ERR_VALUE_NOT_SCALAR,
+                            new List<String>{ String.valueOf(fieldType) }
+                        ),
+                        e.getMessage()
+                    );
+                }
+            }
+        }
+        expectInvalidWith(
+            withCondition(
+                body('Account', new List<String>{ 'Id' }),
+                'Name',
+                'IN',
+                new List<Object>{ new Map<String, Object>{ 'nested' => true } }
+            ),
+            String.format(AgentGovConstants.ERR_VALUE_NOT_SCALAR, new List<String>{ 'STRING' })
+        );
+    }
+
+    @IsTest
+    static void timeValuesAreConverted() {
+        Assert.areEqual(
+            Time.newInstance(10, 30, 0, 0),
+            AgentGovQueryBuilder.convertFieldValue('10:30:00.000Z', Schema.DisplayType.TIME)
+        );
+        Assert.isInstanceOfType(
+            AgentGovQueryBuilder.typedList(new List<Object>{ '08:00:00.000Z' }, Schema.DisplayType.TIME),
+            List<Time>.class
+        );
+        try {
+            AgentGovQueryBuilder.convertFieldValue('half past ten', Schema.DisplayType.TIME);
+            Assert.fail('A value that is not a time must be rejected');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+        }
+        // BusinessHours.MondayStartTime is a standard Time field every org has.
+        AgentGovQueryBuilder.BuiltQuery built = build(
+            withCondition(body('BusinessHours', new List<String>{ 'Id' }), 'MondayStartTime', '>=', '00:00:00.000Z'),
+            null
+        );
+        Assert.isInstanceOfType(built.binds.get('b0'), Time.class);
+        AgentGovQueryBuilder.execute(built);
+    }
+
+    @IsTest
+    static void aRecordCapLowersTheLimitButNeverRaisesIt() {
+        Map<String, Object> request = body('Account', new List<String>{ 'Id' });
+        request.put('limit', 500);
+        AgentGovQueryBuilder.BuiltQuery built = build(request, null);
+        Assert.areEqual(500, built.effectiveLimit);
+        Assert.isTrue(built.soql.endsWith(' LIMIT 500'), built.soql);
+
+        AgentGovQueryBuilder.applyRecordCap(built, 50);
+        Assert.areEqual(50, built.effectiveLimit);
+        Assert.areEqual('SELECT Id FROM Account LIMIT 50', built.soql);
+
+        AgentGovQueryBuilder.applyRecordCap(built, 100);
+        AgentGovQueryBuilder.applyRecordCap(built, null);
+        Assert.areEqual(50, built.effectiveLimit, 'A later, larger cap does not raise the limit');
+        Assert.areEqual('SELECT Id FROM Account LIMIT 50', built.soql);
+        Assert.areEqual(0, AgentGovQueryBuilder.execute(built).size());
+    }
+
+    @IsTest
+    static void assertReadableRefusesWhatTheUserCannotRead() {
+        AgentGovTestDataFactory.createSettings();
+        User noAccess = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+        // AgentGov_User reads registrations but not the stored key hash.
+        User reader = AgentGovTestDataFactory.createRestrictedUser(new List<String>{ 'AgentGov_User' });
+        AgentGovQueryBuilder.BuiltQuery selectsHash = build(
+            body('AgentGov_Registration__c', new List<String>{ 'Id', 'Agent_Name__c', 'API_Key_Hash__c' }),
+            null
+        );
+        AgentGovQueryBuilder.BuiltQuery filtersOnHash = build(
+            withCondition(body('AgentGov_Registration__c', new List<String>{ 'Id' }), 'API_Key_Hash__c', '=', 'x'),
+            null
+        );
+        AgentGovQueryBuilder.BuiltQuery readable = build(
+            body('AgentGov_Registration__c', new List<String>{ 'Id', 'Agent_Name__c' }),
+            null
+        );
+
+        System.runAs(noAccess) {
+            expectAccessDenied(
+                readable,
+                String.format(
+                    AgentGovConstants.ERR_OBJECT_NOT_ACCESSIBLE,
+                    new List<String>{ 'read', 'AgentGov_Registration__c' }
+                )
+            );
+        }
+        System.runAs(reader) {
+            AgentGovQueryBuilder.assertReadable(readable);
+            String hashRefused = String.format(
+                AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
+                new List<String>{ 'read', 'AgentGov_Registration__c', 'API_Key_Hash__c' }
+            );
+            expectAccessDenied(selectsHash, hashRefused);
+            expectAccessDenied(filtersOnHash, hashRefused);
+        }
+    }
+
+    private static void expectAccessDenied(AgentGovQueryBuilder.BuiltQuery built, String expectedMessage) {
+        try {
+            AgentGovQueryBuilder.assertReadable(built);
+            Assert.fail('Must be refused: ' + expectedMessage);
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.ACCESS_DENIED, e.getErrorCode());
+            Assert.areEqual(expectedMessage, e.getMessage());
+        }
+    }
+
+    @IsTest
+    static void aQueryTheDatabaseRefusesForAnotherReasonIsInvalidInput() {
+        // Boolean fields take only = and !=, which the builder leaves to the database.
+        AgentGovQueryBuilder.BuiltQuery built = build(
+            withCondition(body('Account', new List<String>{ 'Id' }), 'IsDeleted', '<', true),
+            null
+        );
+        try {
+            AgentGovQueryBuilder.execute(built);
+            Assert.fail('The database refuses the query');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+            Assert.areEqual(
+                String.format(AgentGovConstants.ERR_QUERY_NOT_RUN, new List<String>{ 'Account' }),
+                e.getMessage()
+            );
+        }
+    }
+
+    @IsTest
+    static void anObjectNameThatIsNotTextIsRefused() {
+        try {
+            AgentGovQueryBuilder.parse(
+                new Map<String, Object>{ 'objectName' => 42, 'fields' => new List<String>{ 'Id' } }
+            );
+            Assert.fail('A number is not an object name');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.INVALID_INPUT, e.getErrorCode());
+            Assert.areEqual(
+                String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ 'objectName' }),
+                e.getMessage()
+            );
+        }
     }
 }

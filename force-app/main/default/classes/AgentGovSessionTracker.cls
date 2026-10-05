@@ -53,8 +53,12 @@ public inherited sharing class AgentGovSessionTracker {
         DateTime now = DateTime.now();
         List<AgentGov_Action_Log__c> notes = new List<AgentGov_Action_Log__c>();
 
-        // Registration rows are written before session rows are locked, the same order the
-        // health check and deactivation use, so those paths cannot deadlock with this one.
+        // When Last_Active__c is due, the registration is written, and so locked, before any
+        // session row: the order deactivation, startSession and the health check use. When it is
+        // not due, nothing here locks the registration, but the proxy and /report lock it after
+        // this to record a failure, or a success on a breaker that is not CLOSED with no
+        // failures. That reverses the order, so such a request and a concurrent deactivation or
+        // startSession for the same agent can deadlock, and one of them fails with a lock error.
         touchRegistrations(agentIds, now, notes);
 
         Map<Id, AgentGov_Session__c> active = simulateMissedSession

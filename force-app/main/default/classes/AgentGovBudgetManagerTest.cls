@@ -20,6 +20,7 @@ private class AgentGovBudgetManagerTest {
     }
 
     private static AgentGov_Budget__c todaysBudget(Id registrationId) {
+        Date orgToday = AgentGovBudgetManager.budgetDate();
         return [
             SELECT
                 Id,
@@ -29,7 +30,7 @@ private class AgentGovBudgetManagerTest {
                 SOQL_Queries_Consumed__c,
                 DML_Operations_Consumed__c
             FROM AgentGov_Budget__c
-            WHERE Agent_Registration__c = :registrationId AND Budget_Date__c = TODAY
+            WHERE Agent_Registration__c = :registrationId AND Budget_Date__c = :orgToday
         ];
     }
 
@@ -211,7 +212,7 @@ private class AgentGovBudgetManagerTest {
         Assert.isTrue(result.allowed);
         Assert.areEqual(1, [SELECT COUNT() FROM AgentGov_Budget__c WHERE Agent_Registration__c = :reg.Id]);
         Assert.areEqual(
-            AgentGovBudgetManager.buildBudgetKey(reg.Id, Date.today()),
+            AgentGovBudgetManager.buildBudgetKey(reg.Id, AgentGovBudgetManager.budgetDate()),
             todaysBudget(reg.Id).Budget_Key__c,
             'The unique key is populated on creation'
         );
@@ -372,9 +373,10 @@ private class AgentGovBudgetManagerTest {
         AgentGovBudgetManager.resetDailyBudgets();
         Test.stopTest();
 
+        Date orgToday = AgentGovBudgetManager.budgetDate();
         Assert.areEqual(
             2,
-            [SELECT COUNT() FROM AgentGov_Budget__c WHERE Budget_Date__c = TODAY],
+            [SELECT COUNT() FROM AgentGov_Budget__c WHERE Budget_Date__c = :orgToday],
             'One row per active agent, no duplicates'
         );
     }

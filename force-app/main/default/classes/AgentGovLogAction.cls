@@ -1,9 +1,12 @@
 /**
- * @description Invocable action that records an agent action in the audit log.
- *              Bulk-safe: all requests in a batch are published with one event publish.
+ * @description Invocable action that records agent actions in the audit log and reports their
+ *              Success and Failure outcomes to each agent's circuit breaker. It is how a Flow
+ *              agent tells the breaker how the work that Register Agent Action authorized went.
+ *              Bulk-safe: all requests in a batch are published with one event publish, and the
+ *              breaker outcomes are written in one update.
  *
- *              Security posture: with sharing. Audit writes run in system mode through
- *              AgentGovTriggerHandler.
+ *              Security posture: with sharing. Audit and breaker writes run in system mode
+ *              through AgentGovTriggerHandler and AgentGovCircuitBreaker.
  */
 public with sharing class AgentGovLogAction {
     /** @description One action to record. */
@@ -35,7 +38,7 @@ public with sharing class AgentGovLogAction {
         public Integer executionTimeMs;
         @InvocableVariable(
             label='Correlation ID'
-            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Flow runs batched into one transaction share the first id supplied.'
+            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Every AgentGov action in one transaction uses the id of the first one that ran, or a generated id if it had none.'
         )
         public String correlationId;
     }
@@ -50,9 +53,10 @@ public with sharing class AgentGovLogAction {
 
     /**
      * @description Records each action. A Success or Failure status is also reported to the
-     *              agent's circuit breaker, so a Flow that logs its own failures trips the
-     *              breaker as REST and proxy agents do. No outcome is recorded for a deactivated
-     *              agent, or while governance is switched off.
+     *              agent's circuit breaker, so a Flow that logs the outcome of its work trips
+     *              the breaker, and closes a half-open one, as REST and proxy agents do. The
+     *              breaker ignores outcomes while it is OPEN, and none is recorded for a
+     *              deactivated agent or while governance is switched off.
      * @param requests Requests in Flow order
      * @return Results in the same order
      */
@@ -109,8 +113,8 @@ public with sharing class AgentGovLogAction {
         return results;
     }
 
-    // One outcome per agent per batch, as the other entry points record it: a failure anywhere
-    // in the batch counts as a failure, and only Success and Failure count at all.
+    // One outcome per agent per batch: a failure anywhere in the batch counts as a failure, and
+    // only Success and Failure count at all.
     private static void noteOutcome(Map<Id, Boolean> outcomes, Id registrationId, String status) {
         if (status == AgentGovConstants.ACTION_FAILURE) {
             outcomes.put(registrationId, false);

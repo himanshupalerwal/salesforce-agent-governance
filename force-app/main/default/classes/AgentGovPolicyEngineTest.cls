@@ -150,4 +150,92 @@ private class AgentGovPolicyEngineTest {
     static void shippedPoliciesAreValid() {
         Assert.isTrue(AgentGovPolicyEngine.validatePolicies().isEmpty(), 'Shipped policy records use valid operations');
     }
+
+    // Custom metadata cannot be inserted in a test, and some of its fields cannot be assigned,
+    // so in-memory records are built from JSON.
+    private static AgentGov_Policy__mdt denyPolicy(String developerName, String agentType) {
+        return denyPolicy(developerName, agentType, AgentGovConstants.ACTION_DELETE);
+    }
+
+    private static AgentGov_Policy__mdt denyPolicy(String developerName, String agentType, String operation) {
+        return (AgentGov_Policy__mdt) JSON.deserialize(
+            JSON.serialize(
+                new Map<String, Object>{
+                    'DeveloperName' => developerName,
+                    'MasterLabel' => developerName,
+                    'Agent_Type__c' => agentType,
+                    'Object_Name__c' => 'Contact',
+                    'Operation__c' => operation,
+                    'Is_Allowed__c' => false
+                }
+            ),
+            AgentGov_Policy__mdt.class
+        );
+    }
+
+    @IsTest
+    static void operationsAreValidatedInAnyLetterCaseAsTheyAreMatched() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
+            'Apex Agent',
+            AgentGovConstants.AGENT_TYPE_CUSTOM_APEX,
+            true
+        );
+        AgentGovSelector.usePolicies(
+            new List<AgentGov_Policy__mdt>{
+                denyPolicy('Lower_Case_Delete', AgentGovConstants.AGENT_TYPE_CUSTOM_APEX, 'delete'),
+                denyPolicy('Not_An_Operation', AgentGovConstants.AGENT_TYPE_CUSTOM_APEX, 'Read')
+            }
+        );
+
+        Assert.isFalse(
+            AgentGovPolicyEngine.evaluatePolicy(reg.Id, 'Contact', AgentGovConstants.ACTION_DELETE).allowed,
+            'A lower-case operation is enforced'
+        );
+        List<String> issues = AgentGovPolicyEngine.validatePolicies();
+        Assert.areEqual(1, issues.size(), 'Only the policy that names no operation is reported: ' + issues);
+        Assert.isTrue(issues[0].contains('Not_An_Operation') && issues[0].contains('"Read"'), issues[0]);
+    }
+
+    @IsTest
+    static void aPolicyMayNameTheAgentTypeByTheLabelShownOnRecords() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
+            'Apex Agent',
+            AgentGovConstants.AGENT_TYPE_CUSTOM_APEX,
+            true
+        );
+        AgentGovSelector.usePolicies(
+            new List<AgentGov_Policy__mdt>{ denyPolicy('Deny_Contact_Delete', 'custom apex') }
+        );
+
+        Assert.isFalse(
+            AgentGovPolicyEngine.evaluatePolicy(reg.Id, 'Contact', AgentGovConstants.ACTION_DELETE).allowed,
+            'A deny policy naming the type by its label, in any case, applies'
+        );
+        Assert.isTrue(
+            AgentGovPolicyEngine.evaluatePolicy(reg.Id, 'Contact', AgentGovConstants.ACTION_UPDATE).allowed,
+            'It still applies only to what it names'
+        );
+        Assert.isTrue(AgentGovPolicyEngine.validatePolicies().isEmpty(), 'A label is a valid way to name the type');
+    }
+
+    @IsTest
+    static void aPolicyThatNamesNoAgentTypeIsReported() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration(
+            'Apex Agent',
+            AgentGovConstants.AGENT_TYPE_CUSTOM_APEX,
+            true
+        );
+        AgentGovSelector.usePolicies(
+            new List<AgentGov_Policy__mdt>{ denyPolicy('Typo', 'Custom'), denyPolicy('Unscoped', null) }
+        );
+
+        List<String> issues = AgentGovPolicyEngine.validatePolicies();
+        Assert.areEqual(2, issues.size(), String.join(issues, ' | '));
+        Assert.isTrue(issues[0].contains('Unknown agent type "Custom"'), issues[0]);
+        Assert.isTrue(issues[1].contains('Agent_Type__c is blank'), issues[1]);
+        Assert.isTrue(
+            AgentGovPolicyEngine.evaluatePolicy(reg.Id, 'Contact', AgentGovConstants.ACTION_DELETE).allowed,
+            'A policy that names no agent type applies to none'
+        );
+    }
 }

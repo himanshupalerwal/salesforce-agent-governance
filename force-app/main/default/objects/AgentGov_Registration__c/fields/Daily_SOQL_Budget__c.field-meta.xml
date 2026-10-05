@@ -9,5 +9,5 @@
     <unique>false</unique>
     <externalId>false</externalId>
     <defaultValue>5000</defaultValue>
-    <description>Maximum number of SOQL queries allowed per day</description>
+    <description>Daily allocation of SOQL queries. Requests are refused once SOQL query usage reaches the Block threshold in AgentGov Limit Config, 95% of this number by default. Copied onto each day's budget row when that row is created, so a change applies from the next budget day.</description>
 </CustomField>

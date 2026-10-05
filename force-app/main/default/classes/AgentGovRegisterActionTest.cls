@@ -152,47 +152,105 @@ private class AgentGovRegisterActionTest {
         AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
 
         Test.startTest();
-        AgentGovRegisterAction.registerAction(new List<AgentGovRegisterAction.Request>{ request(reg.Id, 'Explode') });
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(
+            new List<AgentGovRegisterAction.Request>{ request(reg.Id, 'Explode'), request(reg.Id, '') }
+        );
         Test.getEventBus().deliver();
         Test.stopTest();
 
-        // Every other denial branch writes an audit row. This one used to return silently,
-        // leaving no record that the agent had attempted anything.
-        //
-        // The entry lands as a System row: 'Explode' is not in the Action_Type__c picklist, so
-        // the database rejects the original and the handler re-inserts a row it fully
-        // controls, carrying the rejected values in the details. That is the audit-preserving
-        // path, and the point here is that something is recorded at all.
+        // Action_Type__c accepts only the recognised operations, so the denial is recorded with
+        // the action type System, as REST records one. Written with the raw value, the row would
+        // be rejected and replaced by a System row with no agent link.
+        Assert.isFalse(results[0].authorized);
+        Assert.isFalse(results[1].authorized, 'A blank action type is refused too');
         List<AgentGov_Action_Log__c> logs = [
-            SELECT Action_Type__c, Status__c, Details__c
+            SELECT Agent_Registration__c, Action_Type__c, Status__c, Details__c, Error_Message__c
             FROM AgentGov_Action_Log__c
         ];
-        Assert.areEqual(1, logs.size(), 'The denial is recorded in the audit trail');
-        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, logs[0].Action_Type__c);
-        Assert.isTrue(logs[0].Details__c.contains('Explode'), 'The rejected action type is preserved in the entry');
+        Assert.areEqual(2, logs.size(), 'Each denial is recorded in the audit trail');
+        for (AgentGov_Action_Log__c row : logs) {
+            Assert.areEqual(reg.Id, row.Agent_Registration__c, 'The row is linked to the agent that asked');
+            Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, row.Action_Type__c);
+            Assert.areEqual(AgentGovConstants.ACTION_DENIED, row.Status__c);
+            Assert.isTrue(row.Details__c.startsWith(AgentGovConstants.ERR_INVALID_ACTION_TYPE.trim()), row.Details__c);
+            Assert.areEqual(row.Details__c, row.Error_Message__c, 'The reason is the row\'s error message');
+        }
+        Set<String> reasons = new Set<String>{ logs[0].Details__c, logs[1].Details__c };
         Assert.isTrue(
-            logs[0].Details__c.contains(reg.Id),
-            'The acting agent is preserved even though the lookup could not be reused'
+            reasons.contains(AgentGovConstants.ERR_INVALID_ACTION_TYPE + 'Explode'),
+            'The requested type is named: ' + reasons
         );
     }
 
     @IsTest
-    static void exhaustedBudgetDeniesEveryRequestOfThatAgent() {
+    static void anInvalidActionTypeDuringTheBypassIsAuditedAgainstTheAgent() {
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Is_Enabled__c = false;
+        update settings;
+        AgentGovSelector.clearCache();
+        AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
+
+        Test.startTest();
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(
+            new List<AgentGovRegisterAction.Request>{ request(reg.Id, 'Explode') }
+        );
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        Assert.isTrue(results[0].authorized, 'The bypass authorizes every request for a known, active agent');
+        AgentGov_Action_Log__c row = [
+            SELECT Agent_Registration__c, Action_Type__c, Status__c, Details__c
+            FROM AgentGov_Action_Log__c
+        ];
+        Assert.areEqual(reg.Id, row.Agent_Registration__c, 'The row is linked to the agent');
+        Assert.areEqual(AgentGovConstants.ACTION_SYSTEM, row.Action_Type__c);
+        Assert.areEqual(AgentGovConstants.ACTION_SUCCESS, row.Status__c);
+        Assert.areEqual(
+            AgentGovConstants.ERR_INVALID_ACTION_TYPE + 'Explode',
+            row.Details__c,
+            'The row names the type it could not record'
+        );
+    }
+
+    // 2848 of 3000 DML operations: one more is 94.97%, below the shipped 95% block threshold,
+    // and two more reach it exactly.
+    private static Id agentWithDmlConsumed(Integer consumed) {
         AgentGov_Registration__c reg = [SELECT Id FROM AgentGov_Registration__c LIMIT 1];
         AgentGov_Budget__c budget = [SELECT Id FROM AgentGov_Budget__c WHERE Agent_Registration__c = :reg.Id];
-        budget.DML_Operations_Consumed__c = 2999;
+        budget.DML_Operations_Consumed__c = consumed;
         update budget;
+        return reg.Id;
+    }
+
+    @IsTest
+    static void combinedUsageThatReachesTheBlockThresholdDeniesEveryRequestOfThatAgent() {
+        Id agentId = agentWithDmlConsumed(2848);
 
         List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(
             new List<AgentGovRegisterAction.Request>{
-                request(reg.Id, AgentGovConstants.ACTION_UPDATE),
-                request(reg.Id, AgentGovConstants.ACTION_UPDATE)
+                request(agentId, AgentGovConstants.ACTION_UPDATE),
+                request(agentId, AgentGovConstants.ACTION_UPDATE)
             }
         );
 
-        Assert.isFalse(results[0].authorized, 'Two updates together exceed the budget, so both are denied');
+        Assert.isFalse(
+            results[0].authorized,
+            'Two updates together reach the block threshold, so both are denied, though either alone would pass'
+        );
         Assert.isFalse(results[1].authorized);
         Assert.isTrue(results[0].denialReason.contains(AgentGovConstants.LIMIT_DML_OPERATIONS));
+    }
+
+    @IsTest
+    static void oneRequestThatStaysBelowTheBlockThresholdIsAuthorized() {
+        Id agentId = agentWithDmlConsumed(2848);
+
+        List<AgentGovRegisterAction.Result> results = AgentGovRegisterAction.registerAction(
+            new List<AgentGovRegisterAction.Request>{ request(agentId, AgentGovConstants.ACTION_UPDATE) }
+        );
+
+        Assert.isTrue(results[0].authorized, 'One update from the same starting point stays below the threshold');
+        Assert.areEqual(AgentGovConstants.BUDGET_THROTTLED, results[0].budgetStatus);
     }
 
     @IsTest
@@ -226,6 +284,11 @@ private class AgentGovRegisterActionTest {
             results[1].denialReason.contains('Circuit breaker'),
             'The rest are refused like any other open breaker'
         );
+        Assert.areEqual(
+            AgentGovConstants.CB_HALF_OPEN,
+            [SELECT Circuit_Breaker_State__c FROM AgentGov_Registration__c WHERE Id = :reg.Id].Circuit_Breaker_State__c,
+            'Authorizing the probe records no outcome; the breaker waits for the one the Flow logs'
+        );
     }
 
     @IsTest
@@ -251,8 +314,8 @@ private class AgentGovRegisterActionTest {
         List<AgentGovRegisterAction.Request> requests = new List<AgentGovRegisterAction.Request>();
         for (Integer i = 0; i < 200; i++) {
             AgentGovRegisterAction.Request req = request(agents[Math.mod(i, 5)].Id, AgentGovConstants.ACTION_QUERY);
-            // Each agent works on its own records here; agents contending for one record are
-            // covered by the conflict tests.
+            // The requests name no record, so the agents never contend; agents contending for
+            // one record are covered by the conflict tests.
             req.recordId = null;
             requests.add(req);
         }

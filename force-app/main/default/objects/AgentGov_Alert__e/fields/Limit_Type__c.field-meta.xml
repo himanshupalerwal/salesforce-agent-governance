@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Limit_Type__c</fullName>
-    <description>API_Calls, SOQL_Queries, or DML_Operations</description>
+    <description>API_Calls, SOQL_Queries, or DML_Operations for a budget alert; Circuit_Breaker when a circuit breaker tripped, in which case Current Usage is the failure count and Budget Allocated the failure threshold.</description>
     <externalId>false</externalId>
     <isFilteringDisabled>false</isFilteringDisabled>
     <isNameField>false</isNameField>

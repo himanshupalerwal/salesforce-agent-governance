@@ -1,5 +1,7 @@
 /**
- * @description Tests for the action-log purge job.
+ * @description Tests for the retention purge job: action-log retention from an explicit period
+ *              and from settings, one summary row per chained phase, the scheduled entry point,
+ *              and the documented schedule.
  */
 @IsTest
 private class AgentGovCleanupTest {
@@ -57,6 +59,20 @@ private class AgentGovCleanupTest {
 
     @IsTest
     static void defaultRetentionComesFromSettings() {
+        // A period other than the 90-day fallback, so a job that ignored the setting would
+        // keep the 60-day-old row.
+        AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
+        settings.Log_Retention_Days__c = 50;
+        update settings;
+        AgentGovSelector.clearCache();
+        Id agentId = [SELECT Id FROM AgentGov_Registration__c LIMIT 1].Id;
+        insert new AgentGov_Action_Log__c(
+            Agent_Registration__c = agentId,
+            Action_Type__c = AgentGovConstants.ACTION_QUERY,
+            Status__c = AgentGovConstants.ACTION_SUCCESS,
+            Timestamp__c = DateTime.now().addDays(-60)
+        );
+
         Test.startTest();
         Database.executeBatch(new AgentGovCleanup(), 200);
         Test.stopTest();
@@ -64,8 +80,18 @@ private class AgentGovCleanupTest {
         Assert.areEqual(
             1,
             [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_QUERY],
-            'Rows older than the 90-day default are gone; the 10-day-old row survives'
+            'Under the 50-day setting the 100- and 60-day-old rows are gone; the 10-day-old row survives'
         );
+        List<String> summaries = new List<String>();
+        for (AgentGov_Action_Log__c summary : [
+            SELECT Details__c
+            FROM AgentGov_Action_Log__c
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM
+        ]) {
+            summaries.add(summary.Details__c);
+        }
+        String all = String.join(summaries, '\n');
+        Assert.isTrue(all.contains('Action log purge: deleted 6 rows older than 50 days'), all);
     }
 
     @IsTest
@@ -87,9 +113,13 @@ private class AgentGovCleanupTest {
     @IsTest
     static void jobCanBeScheduled() {
         Test.startTest();
-        String jobId = System.schedule('AgentGov Cleanup Test', '0 0 2 ? * SUN', new AgentGovCleanup());
+        Id jobId = System.schedule('AgentGov Cleanup Test', '0 0 2 ? * SUN', new AgentGovCleanup());
         Test.stopTest();
 
-        Assert.isNotNull(jobId, 'The documented System.schedule call compiles and schedules');
+        Assert.areEqual(
+            '0 0 2 ? * SUN',
+            [SELECT CronExpression FROM CronTrigger WHERE Id = :jobId].CronExpression,
+            'The documented System.schedule call schedules the weekly run'
+        );
     }
 }

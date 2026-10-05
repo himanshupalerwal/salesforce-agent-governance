@@ -12,6 +12,6 @@ IF(DML_Operations_Allocated__c &gt; 0, BLANKVALUE(DML_Operations_Consumed__c, 0)
 )</formula>
     <formulaTreatBlanksAs>BlankAsZero</formulaTreatBlanksAs>
     <externalId>false</externalId>
-    <description>Usage of the most-used limit type as a share of its allocation. This is the figure the budget status is decided on, so it is the one to sort and report by. A zero allocation with any usage counts as full.</description>
+    <description>Usage of the most-used limit type as a share of its allocation; a zero allocation with any usage counts as full. Sort and report by this figure. The budget status follows it while the three limit types share thresholds, as they do by default; with different thresholds, each type is judged against its own.</description>
     <trackTrending>false</trackTrending>
 </CustomField>

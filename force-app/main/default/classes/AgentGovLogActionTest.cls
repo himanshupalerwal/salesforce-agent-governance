@@ -48,6 +48,99 @@ private class AgentGovLogActionTest {
         }
     }
 
+    private static AgentGovRegisterAction.Result authorize(Id registrationId) {
+        AgentGovRegisterAction.Request req = new AgentGovRegisterAction.Request();
+        req.registrationId = registrationId;
+        req.actionType = AgentGovConstants.ACTION_QUERY;
+        req.objectName = 'Account';
+        return AgentGovRegisterAction.registerAction(new List<AgentGovRegisterAction.Request>{ req })[0];
+    }
+
+    @IsTest
+    static void failuresLoggedAfterEachAuthorizationTripTheBreaker() {
+        setFailureThreshold(3);
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Flow Agent', 'Flow_Based', true);
+
+        Test.startTest();
+        // The documented Flow pattern: Register Agent Action, then the work, then Log Agent Action.
+        for (Integer i = 0; i < 3; i++) {
+            Assert.isTrue(authorize(reg.Id).authorized, 'The breaker is still closed before attempt ' + i);
+            logFailures(reg.Id, 1);
+        }
+        Test.stopTest();
+
+        AgentGov_Registration__c tripped = breakerOf(reg.Id);
+        Assert.areEqual(
+            AgentGovConstants.CB_OPEN,
+            tripped.Circuit_Breaker_State__c,
+            'An authorization between the failures does not clear their count'
+        );
+        Assert.areEqual(3, tripped.Failure_Count__c);
+        Assert.areEqual(AgentGovConstants.STATUS_BLOCKED, tripped.Status__c);
+    }
+
+    @IsTest
+    static void aProbeAuthorizedByRegisterWaitsForTheLoggedOutcome() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Flow Agent', 'Flow_Based', true);
+        reg.Circuit_Breaker_State__c = AgentGovConstants.CB_HALF_OPEN;
+        reg.Status__c = AgentGovConstants.STATUS_THROTTLED;
+        reg.Failure_Count__c = 3;
+        update reg;
+        AgentGovSelector.clearCache();
+
+        Test.startTest();
+        Assert.isTrue(authorize(reg.Id).authorized, 'The probe is admitted');
+        Assert.areEqual(
+            AgentGovConstants.CB_HALF_OPEN,
+            breakerOf(reg.Id).Circuit_Breaker_State__c,
+            'The breaker stays half-open while the probe runs'
+        );
+        AgentGovLogAction.logAction(
+            new List<AgentGovLogAction.Request>{ request(reg.Id, AgentGovConstants.ACTION_SUCCESS, 'probe') }
+        );
+        Test.stopTest();
+
+        AgentGov_Registration__c after = breakerOf(reg.Id);
+        Assert.areEqual(AgentGovConstants.CB_CLOSED, after.Circuit_Breaker_State__c, 'The logged success closes it');
+        Assert.areEqual(AgentGovConstants.STATUS_ACTIVE, after.Status__c);
+    }
+
+    @IsTest
+    static void failuresLoggedWhileTheBreakerIsOpenDoNotPushBackTheRetry() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Flow Agent', 'Flow_Based', true);
+        reg.Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN;
+        reg.Status__c = AgentGovConstants.STATUS_BLOCKED;
+        reg.Failure_Count__c = 3;
+        reg.Cooldown_Until__c = DateTime.now().addMinutes(20);
+        update reg;
+        AgentGovSelector.clearCache();
+        DateTime retryAt = [SELECT Cooldown_Until__c FROM AgentGov_Registration__c WHERE Id = :reg.Id]
+        .Cooldown_Until__c;
+
+        Test.startTest();
+        logFailures(reg.Id, 2);
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        AgentGov_Registration__c after = [
+            SELECT Circuit_Breaker_State__c, Failure_Count__c, Cooldown_Until__c
+            FROM AgentGov_Registration__c
+            WHERE Id = :reg.Id
+        ];
+        Assert.areEqual(AgentGovConstants.CB_OPEN, after.Circuit_Breaker_State__c);
+        Assert.areEqual(retryAt, after.Cooldown_Until__c, 'The retry time is unchanged');
+        Assert.areEqual(3, after.Failure_Count__c, 'Failures reported while open are not counted');
+        Assert.areEqual(
+            2,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE Agent_Registration__c = :reg.Id AND Status__c = :AgentGovConstants.ACTION_FAILURE
+            ],
+            'The rows are still written'
+        );
+    }
+
     @IsTest
     static void failuresLoggedFromFlowTripTheBreaker() {
         setFailureThreshold(3);

@@ -17,8 +17,21 @@ public with sharing class AgentGovDashboardController {
     private static final Integer DEFAULT_LOG_PAGE = 50;
     private static final Integer MAX_HISTORY_DAYS = 90;
     private static final Integer MAX_ALERTS = 100;
+    private static final Integer MAX_CONFLICTS = 200;
 
-    /** @description One row of the console's agent list: the agent, today's budget, and its live session. */
+    // Rows no agent's request writes: alerts, and administrators' changes from the console.
+    // System rows are not among them, because they also record an agent's request whose action
+    // type is not a recognised operation.
+    private static final Set<String> NON_AGENT_ACTION_TYPES = new Set<String>{
+        AgentGovConstants.ACTION_ALERT,
+        AgentGovConstants.ACTION_ADMIN
+    };
+
+    /**
+     * @description One row of the console's agent list: the agent, today's budget, and its live
+     *              session. hasApiKey is true when the agent holds an API key, also one with no
+     *              stored prefix.
+     */
     public class AgentSummary {
         @AuraEnabled
         public Id id;
@@ -57,6 +70,8 @@ public with sharing class AgentGovDashboardController {
         @AuraEnabled
         public DateTime apiKeyLastRotated;
         @AuraEnabled
+        public Boolean hasApiKey;
+        @AuraEnabled
         public Boolean boundToUser;
     }
 
@@ -84,7 +99,10 @@ public with sharing class AgentGovDashboardController {
         public String budgetStatus;
     }
 
-    /** @description Returns every agent registration the viewer can see, up to 2,000. */
+    /**
+     * @description Returns every agent registration the viewer can see, up to 2,000.
+     * @return The registrations, by agent name
+     */
     @AuraEnabled(cacheable=true)
     public static List<AgentGov_Registration__c> getAllRegistrations() {
         try {
@@ -115,7 +133,10 @@ public with sharing class AgentGovDashboardController {
         }
     }
 
-    /** @description Returns today's budgets, by the org's calendar, with the owning agent's name. */
+    /**
+     * @description Returns today's budgets, by the org's calendar, with the owning agent's name.
+     * @return Today's budget rows, by agent name, up to 2,000
+     */
     @AuraEnabled(cacheable=true)
     public static List<AgentGov_Budget__c> getAllTodaysBudgets() {
         Date today = AgentGovBudgetManager.budgetDate();
@@ -146,11 +167,12 @@ public with sharing class AgentGovDashboardController {
 
     /**
      * @description Returns the most recent conflict logs.
-     * @param limitCount Maximum number of rows to return
+     * @param limitCount Rows to return, at most 200
+     * @return The conflicts, newest first
      */
     @AuraEnabled(cacheable=true)
     public static List<AgentGov_Conflict_Log__c> getRecentConflictLogs(Integer limitCount) {
-        Integer rowLimit = limitCount == null || limitCount < 1 ? 50 : limitCount;
+        Integer rowLimit = limitCount == null || limitCount < 1 ? 50 : Math.min(limitCount, MAX_CONFLICTS);
         try {
             return [
                 SELECT
@@ -177,8 +199,13 @@ public with sharing class AgentGovDashboardController {
     }
 
     /**
-     * @description Counts the actions logged since midnight in the org's time zone. Filters
-     *              on CreatedDate, which is indexed, so the count stays fast on a large log.
+     * @description Counts the action log rows written since midnight in the org's time zone,
+     *              leaving out Alert rows and administrators' Admin rows, so the figure follows
+     *              agents' actions, refusals, and usage reports. System rows are counted: they
+     *              also record an agent's request of an unrecognised action type, besides the
+     *              framework's own occasional events. Filters on CreatedDate, which is indexed,
+     *              so the count stays fast on a large log.
+     * @return The number of rows
      */
     @AuraEnabled(cacheable=true)
     public static Integer getTodaysActionCount() {
@@ -188,7 +215,10 @@ public with sharing class AgentGovDashboardController {
             return [
                 SELECT COUNT()
                 FROM AgentGov_Action_Log__c
-                WHERE CreatedDate >= :dayStart AND CreatedDate < :dayEnd
+                WHERE
+                    CreatedDate >= :dayStart
+                    AND CreatedDate < :dayEnd
+                    AND Action_Type__c NOT IN :NON_AGENT_ACTION_TYPES
                 WITH USER_MODE
             ];
         } catch (Exception e) {
@@ -200,6 +230,7 @@ public with sharing class AgentGovDashboardController {
      * @description Returns live sessions, most recently active first: active and used within
      *              the idle window, so the list is accurate even when the health check that
      *              closes idle sessions is not scheduled.
+     * @return The live sessions, up to 200
      */
     @AuraEnabled(cacheable=true)
     public static List<AgentGov_Session__c> getActiveSessions() {
@@ -233,7 +264,10 @@ public with sharing class AgentGovDashboardController {
         }
     }
 
-    /** @description Counts agents whose circuit breaker is OPEN. */
+    /**
+     * @description Counts agents whose circuit breaker is OPEN.
+     * @return The number of agents
+     */
     @AuraEnabled(cacheable=true)
     public static Integer getTrippedCircuitBreakerCount() {
         try {
@@ -251,6 +285,7 @@ public with sharing class AgentGovDashboardController {
     /**
      * @description Returns every agent the viewer can see, up to 2,000, with today's budget
      *              usage and its live session, for the console's agent list.
+     * @return One summary per agent, by agent name
      */
     @AuraEnabled(cacheable=true)
     public static List<AgentSummary> getAgentSummaries() {
@@ -371,8 +406,10 @@ public with sharing class AgentGovDashboardController {
 
     /**
      * @description Returns the most recent alerts, newest first: the Alert rows the framework
-     *              writes for every budget escalation and circuit breaker trip.
+     *              writes for budget escalations and circuit breaker trips. None are written
+     *              while Enable Real Time Events is unchecked in AgentGov Settings.
      * @param limitCount Rows to return, at most 100
+     * @return The Alert rows, newest first
      */
     @AuraEnabled(cacheable=true)
     public static List<AgentGov_Action_Log__c> getRecentAlerts(Integer limitCount) {
@@ -428,17 +465,63 @@ public with sharing class AgentGovDashboardController {
         ]) {
             budgets.put(budget.Agent_Registration__c, budget);
         }
+        Map<Id, AgentGov_Session__c> sessions = liveSessionsByAgent(agentIds);
+        Set<Id> keyHolders = agentsWithKeysInKeyFields(agentIds);
+        List<AgentSummary> summaries = new List<AgentSummary>();
+        for (AgentGov_Registration__c agent : agents) {
+            AgentSummary summary = toSummary(agent, budgets.get(agent.Id), sessions.get(agent.Id));
+            summary.hasApiKey = summary.hasApiKey || keyHolders.contains(agent.Id);
+            summaries.add(summary);
+        }
+        return summaries;
+    }
+
+    // Each agent's own live session, read for those agents only: the org-wide list of live
+    // sessions is capped, so an agent's session could be missing from it. Most recent first, so
+    // an agent with more than one live session shows its latest.
+    private static Map<Id, AgentGov_Session__c> liveSessionsByAgent(Set<Id> agentIds) {
+        DateTime now = DateTime.now();
+        DateTime idleCutoff = now.addMinutes(-sessionIdleMinutes());
+        DateTime maxStartCutoff = now.addHours(-AgentGovConstants.MAX_SESSION_HOURS);
         Map<Id, AgentGov_Session__c> sessions = new Map<Id, AgentGov_Session__c>();
-        for (AgentGov_Session__c session : getActiveSessions()) {
-            if (agentIds.contains(session.Agent_Registration__c)) {
+        for (AgentGov_Session__c session : [
+            SELECT Id, Agent_Registration__c, Actions_Count__c
+            FROM AgentGov_Session__c
+            WHERE
+                Agent_Registration__c IN :agentIds
+                AND Status__c = :AgentGovConstants.SESSION_ACTIVE
+                AND Last_Activity__c >= :idleCutoff
+                AND Session_Start__c >= :maxStartCutoff
+            WITH USER_MODE
+            ORDER BY Last_Activity__c DESC
+        ]) {
+            if (!sessions.containsKey(session.Agent_Registration__c)) {
                 sessions.put(session.Agent_Registration__c, session);
             }
         }
-        List<AgentSummary> summaries = new List<AgentSummary>();
-        for (AgentGov_Registration__c agent : agents) {
-            summaries.add(toSummary(agent, budgets.get(agent.Id), sessions.get(agent.Id)));
+        return sessions;
+    }
+
+    // A key stored as a hash also stamps API_Key_Last_Rotated__c, which every viewer can read,
+    // so toSummary sees it. A plaintext key that has not been converted yet shows only in the
+    // key fields, so it is found here, and only for people allowed to read those fields.
+    private static Set<Id> agentsWithKeysInKeyFields(Set<Id> agentIds) {
+        if (
+            agentIds.isEmpty() ||
+            !AgentGov_Registration__c.API_Key__c.getDescribe().isAccessible() ||
+            !AgentGov_Registration__c.API_Key_Hash__c.getDescribe().isAccessible()
+        ) {
+            return new Set<Id>();
         }
-        return summaries;
+        return new Map<Id, AgentGov_Registration__c>(
+                [
+                    SELECT Id
+                    FROM AgentGov_Registration__c
+                    WHERE Id IN :agentIds AND (API_Key_Hash__c != NULL OR API_Key__c != NULL)
+                    WITH USER_MODE
+                ]
+            )
+            .keySet();
     }
 
     private static AgentSummary toSummary(
@@ -458,6 +541,7 @@ public with sharing class AgentGovDashboardController {
         summary.lastActive = agent.Last_Active__c;
         summary.apiKeyPrefix = agent.API_Key_Prefix__c;
         summary.apiKeyLastRotated = agent.API_Key_Last_Rotated__c;
+        summary.hasApiKey = agent.API_Key_Prefix__c != null || agent.API_Key_Last_Rotated__c != null;
         summary.boundToUser = agent.Agent_User__c != null;
         if (budget != null) {
             summary.budgetStatus = budget.Budget_Status__c;

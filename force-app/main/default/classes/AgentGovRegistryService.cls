@@ -225,7 +225,7 @@ public inherited sharing class AgentGovRegistryService {
     /**
      * @description Deactivates several agents at once and ends all of their active sessions,
      *              including duplicates left by releases before v1.3. This is the per-agent
-     *              kill switch: a deactivated agent is refused on every entry point.
+     *              kill switch: a deactivated agent is refused on every governed entry point.
      * @param registrationIds Agents to deactivate
      * @return The registrations that were found
      */
@@ -276,14 +276,13 @@ public inherited sharing class AgentGovRegistryService {
     }
 
     /**
-     * @description Ends a session.
+     * @description Ends a session. A session that has already ended is returned unchanged, so
+     *              its recorded end time is never rewritten.
      * @param sessionId The session Id
-     * @return The updated session
+     * @return The session as it now stands
      * @throws AgentGovException AGENT_NOT_FOUND when the session does not exist
      */
     public static AgentGov_Session__c endSession(Id sessionId) {
-        // Guarded below: re-ending a Completed or Terminated session used to overwrite its
-        // end time, rewriting history for a session that had already finished.
         AgentGov_Session__c session = AgentGovSelector.getSessionById(sessionId);
         if (session == null) {
             throw new AgentGovException(

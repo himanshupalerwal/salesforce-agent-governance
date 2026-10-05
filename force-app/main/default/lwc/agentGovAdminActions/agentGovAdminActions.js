@@ -37,6 +37,15 @@ function nameList(agents) {
     return agents.length === 1 ? agents[0].name : agentCount(agents.length);
 }
 
+// A reset closes the breaker and clears its failure count, nothing more: an agent that was
+// deactivated stays deactivated, and a Blocked or Exhausted budget still refuses requests.
+function resetMessage(agents) {
+    if (agents.length === 1) {
+        return `The circuit breaker of ${agents[0].name} closes and its failure count is cleared, so the breaker stops refusing its requests. A deactivated agent stays deactivated, and today's budget limits still apply. Reset a breaker once the cause of the failures is fixed.`;
+    }
+    return `The circuit breakers of ${agentCount(agents.length)} close and their failure counts are cleared, so the breakers stop refusing their requests. Deactivated agents stay deactivated, and today's budget limits still apply. Reset breakers once the cause of the failures is fixed.`;
+}
+
 // Each action: the label on its button or menu item, the label for several agents, who may use
 // it, which agents it applies to, the confirmation when it is disruptive, and how it runs.
 const ACTIONS = {
@@ -47,7 +56,7 @@ const ACTIONS = {
         appliesTo: (agent) => !!agent.breakerState && agent.breakerState !== 'CLOSED',
         confirm: (agents) => ({
             label: agents.length === 1 ? 'Reset circuit breaker?' : 'Reset circuit breakers?',
-            message: `${nameList(agents)} will accept requests again right away. Reset a breaker once the cause of the failures is fixed.`,
+            message: resetMessage(agents),
             theme: 'warning'
         }),
         run: (agents) => resetBreakers({ registrationIds: agents.map((agent) => agent.id) }),
@@ -70,7 +79,10 @@ const ACTIONS = {
         appliesTo: (agent) => agent.status !== 'Inactive',
         confirm: (agents) => ({
             label: agents.length === 1 ? 'Deactivate agent?' : 'Deactivate agents?',
-            message: `${nameList(agents)} will be refused on every entry point, and live sessions end, until activated again.`,
+            message:
+                agents.length === 1
+                    ? `${nameList(agents)} will be refused wherever it asks to act or to report usage, and its live session ends, until it is activated again.`
+                    : `${nameList(agents)} will be refused wherever they ask to act or to report usage, and their live sessions end, until they are activated again.`,
             theme: 'warning'
         }),
         run: (agents) => deactivateAgents({ registrationIds: agents.map((agent) => agent.id) }),
@@ -215,8 +227,7 @@ async function rotateKey(host, [agent]) {
             label: 'New API key',
             description: `The new API key for ${agent.name}. It is shown once.`,
             agentName: agent.name,
-            apiKey: issued.apiKey,
-            apiKeyPrefix: prefix
+            apiKey: issued.apiKey
         });
     } finally {
         // The key is shown once and never stored. Dropping this reference leaves the dialog as

@@ -2,10 +2,12 @@
  * @description Governed CRUD proxy for external and MCP agents.
  *
  *              Agents call these endpoints instead of the standard REST API. Each request is
- *              authenticated, run through the circuit breaker and policy engine, checked for
- *              record conflicts, charged to the agent's budget by the number of records it
- *              touches, executed, and logged. Budget is therefore consumed by the real record
- *              count, not by a self-reported estimate.
+ *              authenticated and validated in full, then run through the circuit breaker and
+ *              policy engine, checked for record conflicts and for the calling user's access,
+ *              charged to the agent's budget, executed, and logged. A write is charged one DML
+ *              operation per record submitted and a query one SOQL query, so the budget never
+ *              depends on a self-reported estimate. A request refused while it is validated is
+ *              not charged, leaves no audit row, and does not use a half-open breaker's probe.
  *
  *              Endpoints (POST): /query, /create, /update, /delete, /upsert.
  *
@@ -47,6 +49,11 @@ global with sharing class AgentGovProxyApi {
         AgentGovException.ErrorCode.ACCESS_DENIED
     };
     private static final String JSON_ATTRIBUTES_KEY = 'attributes';
+
+    // The most rows one transaction may write. A larger write could never be saved, so it is
+    // refused before its records are built; a policy's record cap, which is applied only once
+    // the request has been validated, is usually far lower.
+    private static final Integer MAX_RECORDS_PER_REQUEST = Limits.getLimitDmlRows();
 
     // Set by the handler in progress so that a denial can be logged with its context.
     private static String currentOperation;
@@ -152,20 +159,29 @@ global with sharing class AgentGovProxyApi {
 
     // --- Handlers ---
 
+    // Each handler validates the whole request before runGovernancePipeline consults the circuit
+    // breaker, so a malformed request is refused before it can claim a half-open breaker's single
+    // probe or be charged. The policy, conflict and access checks then run before the charge.
     private static Map<String, Object> handleQuery(AgentGov_Registration__c registration, Map<String, Object> body) {
         AgentGovQueryBuilder.QueryRequest queryRequest = AgentGovQueryBuilder.parse(body);
         Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(queryRequest.objectName);
+        AgentGovQueryBuilder.BuiltQuery built = AgentGovQueryBuilder.build(queryRequest, describe, null);
+
+        Savepoint beforeGovernance = Database.setSavepoint();
         AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
             registration,
             describe.getName(),
             AgentGovConstants.ACTION_QUERY
         );
-        AgentGovQueryBuilder.BuiltQuery built = AgentGovQueryBuilder.build(queryRequest, describe, policy.maxRecords);
+        AgentGovQueryBuilder.applyRecordCap(built, policy.maxRecords);
         AgentGovPolicyEngine.assertFieldsAllowed(policy, built.referencedFields);
+        AgentGovQueryBuilder.assertReadable(built);
 
         AgentGovBudgetManager.BudgetResult budget = charge(registration, AgentGovConstants.LIMIT_SOQL_QUERIES, 1);
-        List<SObject> results = AgentGovQueryBuilder.execute(built);
+        List<SObject> results = executeQuery(built, beforeGovernance);
 
+        // The outcome comes before the audit row, for the reason given in finishWrite.
+        recordOutcome(registration, true);
         AgentGovTriggerHandler.logAction(
             registration.Id,
             AgentGovConstants.ACTION_QUERY,
@@ -174,7 +190,6 @@ global with sharing class AgentGovProxyApi {
             AgentGovConstants.ACTION_SUCCESS,
             results.size() + ' records returned'
         );
-        recordOutcome(registration, true);
 
         return new Map<String, Object>{
             'totalSize' => results.size(),
@@ -184,18 +199,31 @@ global with sharing class AgentGovProxyApi {
         };
     }
 
+    // A query the database refuses as invalid is undone back to before the breaker was consulted,
+    // so it is treated like a request refused while it is validated: nothing is charged and a
+    // half-open breaker's probe stays free for the next request.
+    private static List<SObject> executeQuery(AgentGovQueryBuilder.BuiltQuery built, Savepoint beforeGovernance) {
+        try {
+            return AgentGovQueryBuilder.execute(built);
+        } catch (AgentGovException refused) {
+            if (refused.getErrorCode() == AgentGovException.ErrorCode.INVALID_INPUT) {
+                Database.rollback(beforeGovernance);
+            }
+            throw refused;
+        }
+    }
+
     private static Map<String, Object> handleCreate(AgentGov_Registration__c registration, Map<String, Object> body) {
-        List<Object> rawRecords = requireRecords(body);
         Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        Set<String> fieldsUsed = new Set<String>();
+        List<SObject> records = buildSObjects(describe, requireRecords(body), fieldsUsed, false);
+
         AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
             registration,
             describe.getName(),
             AgentGovConstants.ACTION_CREATE
         );
-        AgentGovPolicyEngine.assertRecordCount(policy, rawRecords.size());
-
-        Set<String> fieldsUsed = new Set<String>();
-        List<SObject> records = buildSObjects(describe, rawRecords, fieldsUsed, false);
+        AgentGovPolicyEngine.assertRecordCount(policy, records.size());
         AgentGovPolicyEngine.assertFieldsAllowed(policy, fieldsUsed);
         assertFieldAccess(AccessType.CREATABLE, records, describe.getName(), 'create');
 
@@ -216,17 +244,16 @@ global with sharing class AgentGovProxyApi {
     }
 
     private static Map<String, Object> handleUpdate(AgentGov_Registration__c registration, Map<String, Object> body) {
-        List<Object> rawRecords = requireRecords(body);
         Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        Set<String> fieldsUsed = new Set<String>();
+        List<SObject> records = buildSObjects(describe, requireRecords(body), fieldsUsed, true);
+
         AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
             registration,
             describe.getName(),
             AgentGovConstants.ACTION_UPDATE
         );
-        AgentGovPolicyEngine.assertRecordCount(policy, rawRecords.size());
-
-        Set<String> fieldsUsed = new Set<String>();
-        List<SObject> records = buildSObjects(describe, rawRecords, fieldsUsed, true);
+        AgentGovPolicyEngine.assertRecordCount(policy, records.size());
         AgentGovPolicyEngine.assertFieldsAllowed(policy, fieldsUsed);
         assertNoConflicts(registration, records, describe.getName());
         assertFieldAccess(AccessType.UPDATABLE, records, describe.getName(), 'update');
@@ -246,21 +273,26 @@ global with sharing class AgentGovProxyApi {
 
     private static Map<String, Object> handleDelete(AgentGov_Registration__c registration, Map<String, Object> body) {
         Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
-        Object rawIds = body.get('ids');
-        if (!(rawIds instanceof List<Object>) || ((List<Object>) rawIds).isEmpty()) {
-            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NO_IDS);
-        }
+        List<Id> ids = requireIds(body, describe);
+
         AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
             registration,
             describe.getName(),
             AgentGovConstants.ACTION_DELETE
         );
-        List<Id> ids = new List<Id>();
-        for (Object rawId : (List<Object>) rawIds) {
-            ids.add(parseId(rawId, describe));
-        }
         AgentGovPolicyEngine.assertRecordCount(policy, ids.size());
         assertNoConflictsForIds(registration, ids, describe.getName());
+        // In user mode a delete the user may not make fails record by record, which would be
+        // charged and counted as a failure by the circuit breaker; it is refused here instead.
+        if (!describe.isDeletable()) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.ACCESS_DENIED,
+                String.format(
+                    AgentGovConstants.ERR_OBJECT_NOT_ACCESSIBLE,
+                    new List<String>{ 'delete', describe.getName() }
+                )
+            );
+        }
 
         AgentGovBudgetManager.BudgetResult budget = consumeDml(registration, ids.size());
         WriteSummary summary = summarizeDeleteResults(Database.delete(ids, false, AccessLevel.USER_MODE), ids);
@@ -276,36 +308,19 @@ global with sharing class AgentGovProxyApi {
     }
 
     private static Map<String, Object> handleUpsert(AgentGov_Registration__c registration, Map<String, Object> body) {
-        List<Object> rawRecords = requireRecords(body);
         Schema.DescribeSObjectResult describe = AgentGovQueryBuilder.describe(requireObjectName(body));
+        Schema.SObjectField externalIdField = resolveExternalIdField(body, describe);
+        Set<String> fieldsUsed = new Set<String>();
+        // Upsert requires a list of the concrete SObject type, not a generic SObject list.
+        List<SObject> records = (List<SObject>) Type.forName('List<' + describe.getName() + '>').newInstance();
+        records.addAll(buildSObjects(describe, requireRecords(body), fieldsUsed, false));
+
         AgentGovPolicyEngine.PolicyResult policy = runGovernancePipeline(
             registration,
             describe.getName(),
             AgentGovConstants.ACTION_UPSERT
         );
-        AgentGovPolicyEngine.assertRecordCount(policy, rawRecords.size());
-
-        Schema.SObjectField externalIdField;
-        String externalIdFieldName = (String) body.get('externalIdField');
-        if (String.isNotBlank(externalIdFieldName)) {
-            String apiName = AgentGovQueryBuilder.resolveField(
-                externalIdFieldName,
-                describe.fields.getMap(),
-                describe.getName()
-            );
-            externalIdField = describe.fields.getMap().get(apiName.toLowerCase());
-            if (!externalIdField.getDescribe().isExternalId() && !externalIdField.getDescribe().isIdLookup()) {
-                throw new AgentGovException(
-                    AgentGovException.ErrorCode.INVALID_INPUT,
-                    'externalIdField must be an External ID field: ' + apiName
-                );
-            }
-        }
-
-        Set<String> fieldsUsed = new Set<String>();
-        // Upsert requires a list of the concrete SObject type, not a generic SObject list.
-        List<SObject> records = (List<SObject>) Type.forName('List<' + describe.getName() + '>').newInstance();
-        records.addAll(buildSObjects(describe, rawRecords, fieldsUsed, false));
+        AgentGovPolicyEngine.assertRecordCount(policy, records.size());
         AgentGovPolicyEngine.assertFieldsAllowed(policy, fieldsUsed);
         assertNoConflicts(registration, records, describe.getName());
         assertFieldAccess(AccessType.UPSERTABLE, records, describe.getName(), 'upsert');
@@ -410,9 +425,9 @@ global with sharing class AgentGovProxyApi {
     }
 
     /**
-     * Conflict check for a list of record Ids. Every handler routes through here so the
-     * Is_Enabled__c bypass is honoured uniformly; /delete used to call the resolver directly
-     * and kept enforcing conflicts during an emergency bypass.
+     * Conflict check for a list of record Ids. /update, /upsert and /delete all route through
+     * here, so the Is_Enabled__c bypass skips the conflict check on every write that names
+     * existing records.
      */
     private static void assertNoConflictsForIds(
         AgentGov_Registration__c registration,
@@ -477,6 +492,10 @@ global with sharing class AgentGovProxyApi {
         String verb
     ) {
         Boolean anySucceeded = summary.successCount > 0;
+        // The breaker outcome is recorded before the audit row is published: an action event
+        // published before an unexpected failure is still delivered after the request is rolled
+        // back, and would record work that was undone.
+        recordOutcome(registration, anySucceeded);
         AgentGovTriggerHandler.logAction(
             registration.Id,
             action,
@@ -486,11 +505,6 @@ global with sharing class AgentGovProxyApi {
             summary.successCount + '/' + recordCount + ' records ' + verb,
             summary.firstError
         );
-        if (anySucceeded) {
-            recordOutcome(registration, true);
-        } else {
-            recordOutcome(registration, false);
-        }
         return new Map<String, Object>{
             'allSucceeded' => summary.successCount == recordCount,
             'recordsProcessed' => recordCount,
@@ -538,7 +552,7 @@ global with sharing class AgentGovProxyApi {
     }
 
     private static String requireObjectName(Map<String, Object> body) {
-        String objectName = (String) body.get('objectName');
+        String objectName = AgentGovRestResponder.readString(body, 'objectName');
         if (String.isBlank(objectName)) {
             throw new AgentGovException(
                 AgentGovException.ErrorCode.INVALID_INPUT,
@@ -553,7 +567,69 @@ global with sharing class AgentGovProxyApi {
         if (!(rawRecords instanceof List<Object>) || ((List<Object>) rawRecords).isEmpty()) {
             throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NO_RECORDS);
         }
-        return (List<Object>) rawRecords;
+        List<Object> records = (List<Object>) rawRecords;
+        assertWithinRequestMaximum(records.size());
+        return records;
+    }
+
+    private static List<Id> requireIds(Map<String, Object> body, Schema.DescribeSObjectResult describe) {
+        Object rawIds = body.get('ids');
+        if (!(rawIds instanceof List<Object>) || ((List<Object>) rawIds).isEmpty()) {
+            throw new AgentGovException(AgentGovException.ErrorCode.INVALID_INPUT, AgentGovConstants.ERR_NO_IDS);
+        }
+        assertWithinRequestMaximum(((List<Object>) rawIds).size());
+        List<Id> ids = new List<Id>();
+        Set<Id> seen = new Set<Id>();
+        for (Object rawId : (List<Object>) rawIds) {
+            Id recordId = parseId(rawId, describe);
+            assertFirstMention(seen, recordId);
+            ids.add(recordId);
+        }
+        return ids;
+    }
+
+    private static void assertWithinRequestMaximum(Integer recordCount) {
+        if (recordCount > MAX_RECORDS_PER_REQUEST) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(
+                    AgentGovConstants.ERR_TOO_MANY_RECORDS,
+                    new List<String>{ String.valueOf(MAX_RECORDS_PER_REQUEST), String.valueOf(recordCount) }
+                )
+            );
+        }
+    }
+
+    // The database refuses an update or upsert list that names a record twice, and a delete of
+    // such a list removes the record once while reporting it twice, so a repeated Id is refused
+    // before anything runs.
+    private static void assertFirstMention(Set<Id> seen, Id recordId) {
+        if (!seen.add(recordId)) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(AgentGovConstants.ERR_DUPLICATE_RECORD_ID, new List<String>{ String.valueOf(recordId) })
+            );
+        }
+    }
+
+    private static Schema.SObjectField resolveExternalIdField(
+        Map<String, Object> body,
+        Schema.DescribeSObjectResult describe
+    ) {
+        String externalIdFieldName = AgentGovRestResponder.readString(body, 'externalIdField');
+        if (String.isBlank(externalIdFieldName)) {
+            return null;
+        }
+        Map<String, Schema.SObjectField> fieldMap = describe.fields.getMap();
+        String apiName = AgentGovQueryBuilder.resolveField(externalIdFieldName, fieldMap, describe.getName());
+        Schema.SObjectField externalIdField = fieldMap.get(apiName.toLowerCase());
+        if (!externalIdField.getDescribe().isExternalId() && !externalIdField.getDescribe().isIdLookup()) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                'externalIdField must be an External ID field: ' + apiName
+            );
+        }
+        return externalIdField;
     }
 
     private static List<SObject> buildSObjects(
@@ -564,6 +640,7 @@ global with sharing class AgentGovProxyApi {
     ) {
         Map<String, Schema.SObjectField> fieldMap = describe.fields.getMap();
         List<SObject> records = new List<SObject>();
+        Set<Id> seenIds = new Set<Id>();
         for (Object rawRecord : rawRecords) {
             if (!(rawRecord instanceof Map<String, Object>)) {
                 throw new AgentGovException(
@@ -573,22 +650,26 @@ global with sharing class AgentGovProxyApi {
             }
             Map<String, Object> values = (Map<String, Object>) rawRecord;
             SObject record = describe.getSObjectType().newSObject();
-            Boolean hasId = false;
             for (String fieldName : values.keySet()) {
                 if (fieldName.equalsIgnoreCase(JSON_ATTRIBUTES_KEY)) {
                     continue;
                 }
                 if (fieldName.equalsIgnoreCase('Id')) {
                     record.Id = parseId(values.get(fieldName), describe);
-                    hasId = true;
                     continue;
                 }
                 String apiName = AgentGovQueryBuilder.resolveField(fieldName, fieldMap, describe.getName());
                 fieldsUsed.add(apiName);
-                Schema.DisplayType fieldType = fieldMap.get(apiName.toLowerCase()).getDescribe().getType();
-                record.put(apiName, AgentGovQueryBuilder.convertFieldValue(values.get(fieldName), fieldType));
+                setField(
+                    record,
+                    fieldMap.get(apiName.toLowerCase()).getDescribe(),
+                    values.get(fieldName),
+                    describe.getName()
+                );
             }
-            if (requireId && !hasId) {
+            if (record.Id != null) {
+                assertFirstMention(seenIds, record.Id);
+            } else if (requireId) {
                 throw new AgentGovException(
                     AgentGovException.ErrorCode.INVALID_INPUT,
                     AgentGovConstants.ERR_RECORD_ID_REQUIRED
@@ -597,6 +678,20 @@ global with sharing class AgentGovProxyApi {
             records.add(record);
         }
         return records;
+    }
+
+    // A value the field cannot hold, or a field no request may set, such as a formula or an audit
+    // field, is refused as bad input rather than failing the whole request with a 500.
+    private static void setField(SObject record, Schema.DescribeFieldResult field, Object rawValue, String objectName) {
+        Object value = AgentGovQueryBuilder.convertFieldValue(rawValue, field.getType());
+        try {
+            record.put(field.getName(), value);
+        } catch (SObjectException e) {
+            throw new AgentGovException(
+                AgentGovException.ErrorCode.INVALID_INPUT,
+                String.format(AgentGovConstants.ERR_FIELD_NOT_SETTABLE, new List<String>{ objectName, field.getName() })
+            );
+        }
     }
 
     private static Id parseId(Object rawId, Schema.DescribeSObjectResult describe) {

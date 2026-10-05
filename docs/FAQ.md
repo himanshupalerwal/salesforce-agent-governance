@@ -34,7 +34,7 @@ AgentGov supports four agent types:
 | `Custom_Apex`  | Custom Apex-based automation agents          |
 | `Flow_Based`   | Salesforce Flow-based automation agents      |
 
-Policies can differ by type: each policy names the agent type it applies to, or `All`. Budgets do not depend on the type. They are set per agent, through the daily budget fields on its registration, and fall back to the default for each limit type in `AgentGov_Limit_Config__mdt`.
+Policies can differ by type: each policy names the agent type it applies to, by the value above or the label shown on records (such as `MCP External`), or `All`. Budgets do not depend on the type. They are set per agent, through the daily budget fields on its registration, and fall back to the default for each limit type in `AgentGov_Limit_Config__mdt`.
 
 ### What Salesforce editions are supported?
 
@@ -58,7 +58,7 @@ Each agent has a daily budget for three resource types: API Calls, SOQL Queries,
 
 ### When do budgets reset?
 
-A budget row is created per agent per day on first use, so an agent is never blocked by yesterday's usage even with no job scheduled. Days are counted in the org's default time zone, whoever the calling user is, so a new day starts at the org's midnight for every agent. The `AgentGovDailyReset` job creates the day's rows up front, which keeps the dashboards populated before any agent acts. Old rows remain for the console's usage history until `Budget_Retention_Days__c` (default 400) passes.
+A budget row is created per agent per day on first use, so an agent is never blocked by yesterday's usage even with no job scheduled. Days are counted in the org's default time zone, whoever the calling user is, so a new day starts at the org's midnight for every agent. The `AgentGovDailyReset` job creates the day's rows for active agents up front, which keeps the dashboards populated before any agent acts. It runs at midnight in the time zone of the user who scheduled it, so schedule it as a user in the org's time zone. Old rows remain for the console's usage history until `Budget_Retention_Days__c` (default 400) passes.
 
 ### What is a session?
 
@@ -92,9 +92,9 @@ Instead of external agents calling Salesforce's standard REST API directly (whic
 
 The circuit breaker is a resilience pattern that automatically disables agents that are failing repeatedly. It has three states:
 
-- **CLOSED:** Normal operation. Failures are counted.
-- **OPEN:** Agent is blocked. All requests denied. Waiting for cooldown.
-- **HALF_OPEN:** Exactly one probe request is admitted; others are denied until it reports. Success closes the breaker; failure re-opens it with a doubled cooldown, capped at one day.
+- **CLOSED:** Normal operation. Consecutive failures are counted, and a success clears the count.
+- **OPEN:** Agent is blocked. All requests are denied until the cooldown has passed, and outcomes reported meanwhile are ignored.
+- **HALF_OPEN:** Exactly one probe request is admitted; others are denied until its outcome is reported, or until the configured cooldown passes without one. Success closes the breaker; failure re-opens it with a doubled cooldown, capped at one day.
 
 ### How many failures before the circuit breaker trips?
 
@@ -102,21 +102,23 @@ By default, 5 consecutive failures. This is configurable via `AgentGov_Settings_
 
 ### What counts as a "failure"?
 
-Any `AgentGovCircuitBreaker.recordFailure(agentId)` call counts as a failure. The proxy records a failure when every record in a write fails, and a `/report` call with `"success": false` records one for the calling agent. Governance denials (policy, budget, conflict) are not failures: the agent is not broken, it was refused.
+An outcome reported as failed. The proxy records a failure when every record in a write fails, a `/report` call with `"success": false` records one for the calling agent, and Log Agent Action records one for a `Failure` row. Apex can record one with `AgentGovCircuitBreaker.recordFailure(agentId)`. Governance denials (policy, budget, conflict) are not failures: the agent is not broken, it was refused. While the breaker is OPEN, reported outcomes are ignored.
 
-In Flow, Log Agent Action records the status it logs: a row with the status Failure counts as a failure and one with Success as a success, one outcome per agent per batch. Register Agent Action records a success when it authorizes a request, and Report Agent Usage records none. Log what happened after the work, and a Flow agent trips and recovers its breaker the way REST and proxy agents do.
+In Flow, an agent follows Register Agent Action, then the work, then Log Agent Action with `Success` or `Failure`, as a REST agent calls `/authorize`, does the work, and calls `/report`. Register Agent Action records no outcome, because the work has not run yet, and Report Agent Usage records none. Log Agent Action records one outcome per agent per batch, and a `Failure` anywhere in the batch makes it a failure. Logged failures are what trip the breaker at the threshold, and the outcome logged for the request admitted as the probe after the cooldown is what closes the breaker or re-opens it. Log work that was refused as `Denied`, which counts for nothing, not as `Failure`.
 
 ### Can I manually reset a circuit breaker?
 
-Yes:
+Yes, with **Reset breaker** on the console, which records who reset it, or from Apex:
 
 ```apex
 AgentGovCircuitBreaker.resetBreaker(agentId);
 ```
 
+A reset closes the breaker from any state and returns a Blocked or Throttled agent to Active.
+
 ### How does the retry cooldown grow?
 
-When an agent's probe request (in HALF_OPEN state) fails, the circuit breaker re-opens with twice the configured base cooldown rather than the base itself. It is a fixed doubling, not a compounding backoff: a repeatedly failing agent waits twice the base before each new probe, never longer. The result is capped at one day, which only binds if the base cooldown is set above twelve hours.
+When an agent's probe request (in HALF_OPEN state) fails, the circuit breaker re-opens with twice the configured base cooldown rather than the base itself. It is a fixed doubling, not a compounding backoff: each failed probe sets a cooldown of twice the base, never longer, and outcomes reported while the breaker is OPEN are ignored, so they cannot push the retry back. The result is capped at one day, which only binds if the base cooldown is set above twelve hours. Once the cooldown has passed, the breaker moves to HALF_OPEN on the agent's next request through `/authorize`, the proxy or Register Agent Action, or when the hourly health check runs.
 
 ---
 
@@ -126,10 +128,12 @@ When an agent's probe request (in HALF_OPEN state) fails, the circuit breaker re
 
 Policies are matched in this order:
 
-1. Find all policies where `Agent_Type__c` matches the agent's type or is `All`.
-2. Within those, find policies where `Object_Name__c` and `Operation__c` match (exact or wildcard `*`).
+1. Find all policies where `Agent_Type__c` matches the agent's type or is `All`. The type may be given as the stored value (`MCP_External`) or the label shown on records (`MCP External`), in any letter case.
+2. Within those, find policies where `Object_Name__c` and `Operation__c` match (by name in any letter case, or wildcard `*`).
 3. If any matching policy has `Is_Allowed__c = false`, the action is denied (deny always wins).
 4. If no policies match at all, the action is allowed by default.
+
+A policy whose `Agent_Type__c`, `Object_Name__c` or `Operation__c` is blank, or whose agent type names no type, applies to no agent. The console's Setup tab lists such policies as problems.
 
 ### Can I restrict specific fields?
 

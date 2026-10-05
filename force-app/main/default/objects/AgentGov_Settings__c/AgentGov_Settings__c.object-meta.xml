@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
     <customSettingsType>Hierarchy</customSettingsType>
-    <description>Global and user-level settings for the AgentGov framework. Controls feature flags, default values, and notification preferences.</description>
+    <description>Org-wide settings for the AgentGov framework: the governance switch, circuit breaker and session settings, defaults, retention, and alert delivery. Only the organization-level default record is read; values saved for a profile or a user are ignored.</description>
     <enableFeeds>false</enableFeeds>
     <label>AgentGov Settings</label>
     <visibility>Public</visibility>

@@ -57,10 +57,11 @@
                         </h2>
                     </div>
                 </header>
-                <template lwc:if={hasAttention}>
+                <template lwc:if={showAttentionLink}>
                     <div class="slds-no-flex">
                         <lightning-button
                             variant="base"
+                            class="open-attention"
                             label="Open in agent list"
                             onclick={handleViewAttention}
                         ></lightning-button>
@@ -141,14 +142,19 @@
                         </table>
                     </div>
                     <template lwc:if={moreAttention}>
-                        <div class="ag-footer-link">
-                            <lightning-button
-                                variant="base"
-                                class="more-attention"
-                                label={moreAttentionLabel}
-                                onclick={handleViewAttention}
-                            ></lightning-button>
-                        </div>
+                        <template lwc:if={canDrillDown}>
+                            <div class="ag-footer-link">
+                                <lightning-button
+                                    variant="base"
+                                    class="more-attention"
+                                    label={moreAttentionLabel}
+                                    onclick={handleViewAttention}
+                                ></lightning-button>
+                            </div>
+                        </template>
+                        <template lwc:else>
+                            <p class="ag-meta ag-footer-link more-attention-text">{moreAttentionText}</p>
+                        </template>
                     </template>
                 </template>
                 <template lwc:else>
@@ -336,10 +342,11 @@
                             </li>
                         </template>
                     </ul>
-                    <template lwc:if={usageTruncated}>
+                    <template lwc:if={showUsageLink}>
                         <div class="ag-footer-link">
                             <lightning-button
                                 variant="base"
+                                class="more-usage"
                                 label="View every agent in the agent list"
                                 data-key="total"
                                 onclick={handleKpiSelect}
@@ -401,7 +408,8 @@
                             </span>
                             <p class="ag-empty__title">No alerts yet</p>
                             <p class="ag-empty__text">
-                                An alert is raised when a budget crosses a threshold or a circuit breaker trips.
+                                Alerts are raised when a budget crosses a threshold or a circuit breaker trips, while
+                                real-time events are on in AgentGov Settings.
                             </p>
                         </div>
                     </template>

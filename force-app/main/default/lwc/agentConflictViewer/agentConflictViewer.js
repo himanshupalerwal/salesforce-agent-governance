@@ -17,8 +17,6 @@ import {
 
 const ROWS = 50;
 const FRAMED_ROWS = 12;
-// The record a conflict was about is "new" when both agents were creating it.
-const NEW_RECORD = 'new';
 const COLUMNS = [
     { label: 'Time', fieldName: 'formattedTime', type: 'text', sortable: false },
     {
@@ -34,7 +32,7 @@ const COLUMNS = [
         typeAttributes: { label: { fieldName: 'agent2Name' }, target: '_self' }
     },
     { label: 'Object', fieldName: 'Object_Name__c', type: 'text' },
-    { label: 'Record', fieldName: 'recordLabel', type: 'text' },
+    { label: 'Record', fieldName: 'Record_Id__c', type: 'text' },
     { label: 'Type', fieldName: 'typeLabel', type: 'text' },
     { label: 'Outcome', fieldName: 'outcome', type: 'text', wrapText: true },
     {
@@ -95,7 +93,6 @@ export default class AgentConflictViewer extends LightningElement {
                 agent2Name: conflict.Agent_2__r ? conflict.Agent_2__r.Agent_Name__c : 'Unknown',
                 agent2Url: recordUrl(conflict.Agent_2__c),
                 formattedTime: formatDateTime(conflict.Timestamp__c),
-                recordLabel: conflict.Record_Id__c === NEW_RECORD ? 'New record' : conflict.Record_Id__c,
                 typeLabel: sentenceCase(conflict.Conflict_Type__c),
                 outcome: outcomeOf(conflict),
                 severityCellClass: conflict.Severity__c === 'High' ? 'slds-text-color_error' : ''

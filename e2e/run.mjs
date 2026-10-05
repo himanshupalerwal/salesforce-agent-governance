@@ -13,7 +13,9 @@
  *   --dev-hub <alias>         Dev Hub for a temporary org (default: the CLI's default Dev Hub)
  *   --label <name>            label for the saved results file, for example baseline-v1.2
  *
- * Results are written to e2e/results/ so two runs can be compared with e2e/compare.mjs.
+ * Results of a run that finishes are written to e2e/results/ so two runs can be compared with
+ * e2e/compare.mjs. A run that stops early, because a suite could not go on, prints the results of
+ * the suites that finished and saves nothing.
  */
 import { parseArgs } from 'node:util';
 import { printTable, redact, saveResults } from './lib/checks.mjs';

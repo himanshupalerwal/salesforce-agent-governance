@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">
-    <description>Full administrative access to every AgentGov object, field, tab, and Apex class, plus the AgentGov_Admin_Access custom permission that allows reading any agent through the REST API.</description>
+    <description>Full access, including Modify All, to the five AgentGov custom objects (API key and computed fields read-only), tabs and Apex classes, plus AgentGov_Admin_Access (read any agent over REST) and both console permissions.</description>
     <hasActivationRequired>false</hasActivationRequired>
     <label>AgentGov Admin</label>
     <applicationVisibilities>
