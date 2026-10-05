@@ -2,6 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Is_Allowed__c</fullName>
     <defaultValue>true</defaultValue>
+    <description>Checked, the policy allows the operations it matches and adds its field restrictions and record cap. Unchecked, it denies them, and a deny wins over any allow. An action that no policy matches is allowed.</description>
     <externalId>false</externalId>
     <fieldManageability>DeveloperControlled</fieldManageability>
     <label>Is Allowed</label>

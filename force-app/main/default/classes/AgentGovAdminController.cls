@@ -16,7 +16,23 @@
  *              thrown exception would also roll back the System row that records the cause.
  */
 public with sharing class AgentGovAdminController {
-    /** @description Outcome of an action for one record. */
+    // AgentGovConstants.LIMIT_LABELS names several units of a limit type; these name one.
+    private static final Map<String, String> SINGULAR_LIMIT_LABELS = new Map<String, String>{
+        AgentGovConstants.LIMIT_API_CALLS => 'API call',
+        AgentGovConstants.LIMIT_SOQL_QUERIES => 'SOQL query',
+        AgentGovConstants.LIMIT_DML_OPERATIONS => 'DML operation'
+    };
+
+    // Lets a test fail an action after its change and its audit rows are written, to prove that
+    // both are undone together.
+    @TestVisible
+    private static Exception failureAfterAudit;
+
+    /**
+     * @description Outcome of an action for one record. success is true when the record ends
+     *              in the state the action asks for, also when it was already in that state;
+     *              the message says which.
+     */
     public class ActionOutcome {
         @AuraEnabled
         public Id recordId;
@@ -44,6 +60,8 @@ public with sharing class AgentGovAdminController {
     public class SetupStatus {
         @AuraEnabled
         public Boolean governanceEnabled;
+        @AuraEnabled
+        public Boolean realTimeEventsEnabled;
         @AuraEnabled
         public Boolean adminEmailConfigured;
         @AuraEnabled
@@ -77,7 +95,7 @@ public with sharing class AgentGovAdminController {
                     'Circuit_Breaker_State__c'
                 )
             );
-            return outcomes(registrationIds, targets.keySet(), 'Circuit breaker closed.');
+            return outcomes(registrationIds, sameMessage(targets.keySet(), 'Circuit breaker closed.'));
         } catch (Exception e) {
             return failed(savepoint, registrationIds, 'The circuit breakers could not be reset.', e);
         }
@@ -85,6 +103,7 @@ public with sharing class AgentGovAdminController {
 
     /**
      * @description Activates the selected agents, subject to the org's concurrent-agent limit.
+     *              An agent that is already active is left as it is and gets no audit row.
      * @param registrationIds Agents to activate, at most 200
      * @return One outcome per requested agent
      */
@@ -92,12 +111,20 @@ public with sharing class AgentGovAdminController {
     public static List<ActionOutcome> activateAgents(List<Id> registrationIds) {
         requireOperate();
         Map<Id, AgentGov_Registration__c> targets = visibleRegistrations(registrationIds);
+        Map<Id, AgentGov_Registration__c> changing = withStatusOtherThan(targets, AgentGovConstants.STATUS_ACTIVE);
         AgentGovRequestContext.begin(null);
         Savepoint savepoint = Database.setSavepoint();
         try {
-            AgentGovRegistryService.activateAgents(targets.keySet());
-            audit(describeEach(targets.values(), 'Agent activated from the console. Its status was ', 'Status__c'));
-            return outcomes(registrationIds, targets.keySet(), 'Agent activated.');
+            if (!changing.isEmpty()) {
+                AgentGovRegistryService.activateAgents(changing.keySet());
+                audit(
+                    describeEach(changing.values(), 'Agent activated from the console. Its status was ', 'Status__c')
+                );
+            }
+            return outcomes(
+                registrationIds,
+                changedOrNot(targets.keySet(), changing.keySet(), 'Agent activated.', 'The agent was already active.')
+            );
         } catch (Exception e) {
             return failed(savepoint, registrationIds, 'The agents could not be activated.', e);
         }
@@ -105,7 +132,8 @@ public with sharing class AgentGovAdminController {
 
     /**
      * @description Deactivates the selected agents and ends their sessions. A deactivated
-     *              agent is refused on every entry point until it is activated again.
+     *              agent is refused at every governed entry point until it is activated again.
+     *              An agent that is already inactive is left as it is and gets no audit row.
      * @param registrationIds Agents to deactivate, at most 200
      * @return One outcome per requested agent
      */
@@ -113,12 +141,25 @@ public with sharing class AgentGovAdminController {
     public static List<ActionOutcome> deactivateAgents(List<Id> registrationIds) {
         requireOperate();
         Map<Id, AgentGov_Registration__c> targets = visibleRegistrations(registrationIds);
+        Map<Id, AgentGov_Registration__c> changing = withStatusOtherThan(targets, AgentGovConstants.STATUS_INACTIVE);
         AgentGovRequestContext.begin(null);
         Savepoint savepoint = Database.setSavepoint();
         try {
-            AgentGovRegistryService.deactivateAgents(targets.keySet());
-            audit(describeEach(targets.values(), 'Agent deactivated from the console. Its status was ', 'Status__c'));
-            return outcomes(registrationIds, targets.keySet(), 'Agent deactivated.');
+            if (!changing.isEmpty()) {
+                AgentGovRegistryService.deactivateAgents(changing.keySet());
+                audit(
+                    describeEach(changing.values(), 'Agent deactivated from the console. Its status was ', 'Status__c')
+                );
+            }
+            return outcomes(
+                registrationIds,
+                changedOrNot(
+                    targets.keySet(),
+                    changing.keySet(),
+                    'Agent deactivated.',
+                    'The agent was already inactive.'
+                )
+            );
         } catch (Exception e) {
             return failed(savepoint, registrationIds, 'The agents could not be deactivated.', e);
         }
@@ -126,7 +167,8 @@ public with sharing class AgentGovAdminController {
 
     /**
      * @description Ends the selected sessions. The agents keep working; their next governed
-     *              call opens a new session.
+     *              call opens a new session. A session that had already ended is left as it is
+     *              and gets no audit row.
      * @param sessionIds Sessions to end, at most 200
      * @return One outcome per requested session
      */
@@ -146,8 +188,10 @@ public with sharing class AgentGovAdminController {
         Savepoint savepoint = Database.setSavepoint();
         try {
             List<AgentGov_Session__c> ended = AgentGovRegistryService.terminateSessions(targets.keySet());
+            Set<Id> endedIds = new Set<Id>();
             List<AgentGov_Action_Log__c> rows = new List<AgentGov_Action_Log__c>();
             for (AgentGov_Session__c session : ended) {
+                endedIds.add(session.Id);
                 rows.add(
                     adminRow(
                         targets.get(session.Id).Agent_Registration__c,
@@ -155,17 +199,24 @@ public with sharing class AgentGovAdminController {
                     )
                 );
             }
-            AgentGovDml.insertRecords(rows, true);
-            return outcomes(sessionIds, targets.keySet(), 'Session ended.');
+            writeAudit(rows);
+            return outcomes(
+                sessionIds,
+                changedOrNot(targets.keySet(), endedIds, 'Session ended.', 'The session had already ended.')
+            );
         } catch (Exception e) {
             return failed(savepoint, sessionIds, 'The sessions could not be ended.', e);
         }
     }
 
     /**
-     * @description Credits usage back to an agent's budget for today, for example after an
-     *              incident was resolved. The budget status is re-evaluated from the corrected
-     *              usage, so a Blocked budget can return to a lower status.
+     * @description Credits usage of one limit type back to an agent's budget for today, the
+     *              current day in the org's time zone, for example after an incident was
+     *              resolved. Usage never goes below zero, so a credit larger than today's usage
+     *              brings it to zero, and the outcome and the audit row say how much was
+     *              actually credited. The budget status is re-evaluated from the corrected
+     *              usage, so a Blocked budget can return to a lower status. When nothing of the
+     *              limit type has been used today, nothing changes and the outcome says so.
      * @param registrationId The agent
      * @param limitType API_Calls, SOQL_Queries, or DML_Operations
      * @param amount Units to credit back, at least 1
@@ -186,27 +237,45 @@ public with sharing class AgentGovAdminController {
         Savepoint savepoint = Database.setSavepoint();
         try {
             if (targets.isEmpty()) {
-                return outcomes(requested, targets.keySet(), null)[0];
+                return outcomes(requested, new Map<Id, String>())[0];
             }
-            AgentGovBudgetManager.BudgetResult budget = AgentGovBudgetManager.creditBudget(
+            // Crediting nothing first takes the lock on today's budget row and reports its usage,
+            // so the amount the real credit removes is exact even when usage stops at zero.
+            AgentGovBudgetManager.BudgetResult before = AgentGovBudgetManager.creditBudget(
+                registrationId,
+                limitType,
+                0
+            );
+            AgentGovBudgetManager.BudgetResult after = AgentGovBudgetManager.creditBudget(
                 registrationId,
                 limitType,
                 amount
             );
-            String limitLabel = AgentGovConstants.LIMIT_LABELS.containsKey(limitType)
-                ? AgentGovConstants.LIMIT_LABELS.get(limitType)
-                : limitType;
-            String summary = 'Credited ' + amount + ' ' + limitLabel + ' to today\'s budget.';
-            AgentGovDml.insertRecords(
+            Integer credited = (remainingOf(after, limitType) - remainingOf(before, limitType)).intValue();
+            if (credited == 0) {
+                Database.rollback(savepoint);
+                return refused(
+                    registrationId,
+                    'Nothing was credited: no ' +
+                        AgentGovConstants.LIMIT_LABELS.get(limitType) +
+                        ' have been used today.'
+                );
+            }
+            String summary = 'Credited ' + credited + ' ' + unitsOf(limitType, credited) + ' to today\'s budget';
+            String details = summary;
+            if (credited < amount) {
+                summary += ', bringing its ' + SINGULAR_LIMIT_LABELS.get(limitType) + ' usage to zero';
+                details = summary + ' (a credit of ' + amount + ' was requested)';
+            }
+            writeAudit(
                 new List<AgentGov_Action_Log__c>{
                     adminRow(
                         registrationId,
-                        summary + ' Status is now ' + budget.budgetStatus + '. Done from the console.'
+                        details + '. Status is now ' + after.budgetStatus + '. Done from the console.'
                     )
-                },
-                true
+                }
             );
-            return outcomes(requested, targets.keySet(), summary)[0];
+            return outcomes(requested, new Map<Id, String>{ registrationId => summary + '.' })[0];
         } catch (Exception e) {
             return failed(savepoint, requested, 'The budget could not be credited.', e)[0];
         }
@@ -232,16 +301,15 @@ public with sharing class AgentGovAdminController {
         try {
             if (targets.isEmpty()) {
                 issued.success = false;
-                issued.message = outcomes(requested, targets.keySet(), null)[0].message;
+                issued.message = outcomes(requested, new Map<Id, String>())[0].message;
                 return issued;
             }
             String apiKey = AgentGovRegistryService.issueApiKey(registrationId);
             String prefix = AgentGovRestAuth.keyPrefix(apiKey);
-            AgentGovDml.insertRecords(
+            writeAudit(
                 new List<AgentGov_Action_Log__c>{
                     adminRow(registrationId, 'API key replaced from the console. New key prefix: ' + prefix + '.')
-                },
-                true
+                }
             );
             issued.success = true;
             issued.apiKey = apiKey;
@@ -256,8 +324,9 @@ public with sharing class AgentGovAdminController {
     }
 
     /**
-     * @description Schedules the three background jobs, replacing any AgentGov jobs that are
-     *              already scheduled.
+     * @description Schedules the three background jobs to run as the current user, in that
+     *              user's time zone, replacing the AgentGov jobs already scheduled; see
+     *              AgentGovJobScheduler.scheduleAll for which jobs it replaces.
      * @return The outcome
      */
     @AuraEnabled
@@ -268,11 +337,15 @@ public with sharing class AgentGovAdminController {
         List<Id> none = new List<Id>{ null };
         try {
             AgentGovJobScheduler.scheduleAll();
-            AgentGovDml.insertRecords(
-                new List<AgentGov_Action_Log__c>{ adminRow(null, 'Background jobs scheduled from the console.') },
-                true
+            writeAudit(
+                new List<AgentGov_Action_Log__c>{ adminRow(null, 'Background jobs scheduled from the console.') }
             );
-            return outcomes(none, new Set<Id>{ null }, 'The three background jobs are scheduled.')[0];
+            return outcomes(
+                none,
+                new Map<Id, String>{
+                    null => 'The three background jobs are scheduled to run as you, in your time zone, replacing those already scheduled.'
+                }
+            )[0];
         } catch (Exception e) {
             return failed(savepoint, none, 'The background jobs could not be scheduled.', e)[0];
         }
@@ -280,8 +353,9 @@ public with sharing class AgentGovAdminController {
 
     /**
      * @description Reports the setup state the console's checklist shows: whether governance
-     *              is on, whether alerts reach anyone, the jobs and their next runs, and any
-     *              policy misconfiguration.
+     *              and real-time events are on, whether alerts reach anyone, the session idle
+     *              window in force, the jobs and their next runs, and any policy
+     *              misconfiguration.
      * @return The setup state
      */
     @AuraEnabled(cacheable=true)
@@ -290,11 +364,10 @@ public with sharing class AgentGovAdminController {
         AgentGov_Settings__c settings = AgentGovSelector.getSettings();
         SetupStatus status = new SetupStatus();
         status.governanceEnabled = AgentGovSelector.isFrameworkEnabled();
+        status.realTimeEventsEnabled = AgentGovSelector.isRealTimeEventsEnabled();
         status.adminEmailConfigured = String.isNotBlank(settings.Admin_Notification_Email__c);
         status.notifyAgentOwners = settings.Notify_Agent_Owners__c == true;
-        status.sessionIdleMinutes = settings.Session_Idle_Minutes__c == null
-            ? AgentGovConstants.DEFAULT_SESSION_IDLE_MINUTES
-            : settings.Session_Idle_Minutes__c.intValue();
+        status.sessionIdleMinutes = idleMinutesInForce(settings.Session_Idle_Minutes__c);
         status.jobs = AgentGovJobScheduler.getJobStatus();
         status.policyProblems = AgentGovPolicyEngine.validatePolicies();
         return status;
@@ -348,6 +421,19 @@ public with sharing class AgentGovAdminController {
         }
     }
 
+    private static Map<Id, AgentGov_Registration__c> withStatusOtherThan(
+        Map<Id, AgentGov_Registration__c> registrations,
+        String status
+    ) {
+        Map<Id, AgentGov_Registration__c> others = new Map<Id, AgentGov_Registration__c>();
+        for (AgentGov_Registration__c registration : registrations.values()) {
+            if (registration.Status__c != status) {
+                others.put(registration.Id, registration);
+            }
+        }
+        return others;
+    }
+
     private static Map<Id, String> describeEach(List<AgentGov_Registration__c> targets, String prefix, String field) {
         Map<Id, String> details = new Map<Id, String>();
         for (AgentGov_Registration__c target : targets) {
@@ -362,7 +448,14 @@ public with sharing class AgentGovAdminController {
         for (Id agentId : detailsByAgent.keySet()) {
             rows.add(adminRow(agentId, detailsByAgent.get(agentId)));
         }
+        writeAudit(rows);
+    }
+
+    private static void writeAudit(List<AgentGov_Action_Log__c> rows) {
         AgentGovDml.insertRecords(rows, true);
+        if (failureAfterAudit != null) {
+            throw failureAfterAudit;
+        }
     }
 
     // The person who acted is the row's CreatedById, so no name is copied into the text.
@@ -377,16 +470,48 @@ public with sharing class AgentGovAdminController {
         );
     }
 
-    private static List<ActionOutcome> outcomes(List<Id> requested, Set<Id> done, String message) {
+    private static Map<Id, String> sameMessage(Set<Id> reached, String message) {
+        Map<Id, String> messages = new Map<Id, String>();
+        for (Id recordId : reached) {
+            messages.put(recordId, message);
+        }
+        return messages;
+    }
+
+    // The records the action reached get the first message when it changed them and the
+    // second when they were already in the state it asks for.
+    private static Map<Id, String> changedOrNot(
+        Set<Id> reached,
+        Set<Id> changed,
+        String changedMessage,
+        String unchangedMessage
+    ) {
+        Map<Id, String> messages = new Map<Id, String>();
+        for (Id recordId : reached) {
+            messages.put(recordId, changed.contains(recordId) ? changedMessage : unchangedMessage);
+        }
+        return messages;
+    }
+
+    // A requested record with no message is one the user cannot see.
+    private static List<ActionOutcome> outcomes(List<Id> requested, Map<Id, String> messages) {
         List<ActionOutcome> results = new List<ActionOutcome>();
         for (Id recordId : requested) {
             ActionOutcome outcome = new ActionOutcome();
             outcome.recordId = recordId;
-            outcome.success = done.contains(recordId);
-            outcome.message = outcome.success ? message : AgentGovConstants.ERR_NO_RECORD_ACCESS;
+            outcome.success = messages.containsKey(recordId);
+            outcome.message = outcome.success ? messages.get(recordId) : AgentGovConstants.ERR_NO_RECORD_ACCESS;
             results.add(outcome);
         }
         return results;
+    }
+
+    private static ActionOutcome refused(Id recordId, String message) {
+        ActionOutcome outcome = new ActionOutcome();
+        outcome.recordId = recordId;
+        outcome.success = false;
+        outcome.message = message;
+        return outcome;
     }
 
     private static List<ActionOutcome> failed(
@@ -412,13 +537,32 @@ public with sharing class AgentGovAdminController {
         }
         List<ActionOutcome> results = new List<ActionOutcome>();
         for (Id recordId : requested) {
-            ActionOutcome outcome = new ActionOutcome();
-            outcome.recordId = recordId;
-            outcome.success = false;
-            outcome.message = shown;
-            results.add(outcome);
+            results.add(refused(recordId, shown));
         }
         return results;
+    }
+
+    private static Decimal remainingOf(AgentGovBudgetManager.BudgetResult budget, String limitType) {
+        if (limitType == AgentGovConstants.LIMIT_API_CALLS) {
+            return budget.apiCallsRemaining;
+        }
+        if (limitType == AgentGovConstants.LIMIT_SOQL_QUERIES) {
+            return budget.soqlQueriesRemaining;
+        }
+        return budget.dmlOperationsRemaining;
+    }
+
+    private static String unitsOf(String limitType, Integer count) {
+        return count == 1 ? SINGULAR_LIMIT_LABELS.get(limitType) : AgentGovConstants.LIMIT_LABELS.get(limitType);
+    }
+
+    // The session tracker treats a value outside 1 to 1440 as the default, so the checklist
+    // shows the window in force rather than the raw setting.
+    private static Integer idleMinutesInForce(Decimal configured) {
+        if (configured == null || configured < 1 || configured > AgentGovConstants.MAX_SESSION_IDLE_MINUTES) {
+            return AgentGovConstants.DEFAULT_SESSION_IDLE_MINUTES;
+        }
+        return configured.intValue();
     }
 
     private static AuraHandledException auraError(String message) {

@@ -1,7 +1,7 @@
 /**
- * Setup checklist for the AgentGov console: whether governance is on, whether alerts reach an
- * administrator, the three background jobs and when each runs next, and any policy problems,
- * with a button that schedules the jobs.
+ * Setup checklist for the AgentGov console: whether governance and real-time events are on,
+ * whom alerts reach, the session idle window in force, the three background jobs and when each
+ * runs next, and any policy problems, with a button that schedules the jobs.
  *
  * AgentGovAdminController.getSetupStatus and scheduleJobs both require the
  * AgentGov_Operate_Agents custom permission on the server; the console shows this tab only to
@@ -24,8 +24,10 @@ import {
 import { canOperate } from 'c/agentGovAdminActions';
 
 const JOB_PURPOSES = {
-    'AgentGov Daily Reset': "Starts each agent's budget afresh at midnight.",
-    'AgentGov Health Check': 'Every hour: moves cooled-down breakers to half-open and closes idle sessions.',
+    'AgentGov Daily Reset':
+        "Creates today's budget row for every active agent ahead of first use. Budgets start afresh each day in the org's time zone whether or not this runs.",
+    'AgentGov Health Check':
+        'Every hour: moves cooled-down breakers to half-open and closes sessions that are idle or have run for 24 hours.',
     'AgentGov Cleanup': 'Sundays at 02:00: purges audit rows, sessions, conflicts, and budgets past retention.'
 };
 
@@ -36,6 +38,47 @@ function checkView(key, state, label) {
         info: { icon: 'utility:info', variant: undefined, stateText: 'Information' }
     };
     return { key, label, ...views[state] };
+}
+
+// Alerts are raised and emailed only while real-time events are on, so with them off the email
+// settings describe what will happen, not what happens.
+function emailCheck(status, eventsOn) {
+    if (!eventsOn) {
+        return status.adminEmailConfigured
+            ? checkView(
+                  'email',
+                  'info',
+                  'An administrator email is set. Alerts are emailed to it once real-time events are on.'
+              )
+            : checkView('email', 'action', 'No administrator email is set.');
+    }
+    if (status.adminEmailConfigured) {
+        return checkView('email', 'done', 'Alerts are emailed to an administrator.');
+    }
+    return status.notifyAgentOwners
+        ? checkView(
+              'email',
+              'action',
+              'No administrator email is set. Alerts are recorded in the action log and emailed only to the owners of the agents concerned.'
+          )
+        : checkView(
+              'email',
+              'action',
+              'No administrator email is set, so alerts are recorded in the action log but not emailed.'
+          );
+}
+
+function ownersCheck(status, eventsOn) {
+    if (!status.notifyAgentOwners) {
+        return checkView('owners', 'info', 'Agent owners are not emailed about alerts.');
+    }
+    return checkView(
+        'owners',
+        'info',
+        eventsOn
+            ? "Agent owners are emailed about their own agents' alerts."
+            : "Agent owners are emailed about their own agents' alerts once real-time events are on."
+    );
 }
 
 export default class AgentGovSetupStatus extends LightningElement {
@@ -177,9 +220,12 @@ export default class AgentGovSetupStatus extends LightningElement {
 
     get checks() {
         const status = this.status;
+        // An unset value counts as on, as the server counts an unset setting.
+        const eventsOn = status.realTimeEventsEnabled !== false;
         const jobs = status.jobs || [];
         const scheduled = jobs.filter((job) => job.scheduled).length;
         const problems = (status.policyProblems || []).length;
+        const idle = status.sessionIdleMinutes;
         return [
             status.governanceEnabled
                 ? checkView('governance', 'done', 'Governance is on.')
@@ -188,24 +234,19 @@ export default class AgentGovSetupStatus extends LightningElement {
                       'action',
                       'Governance is off. Agents are not governed until it is turned on in AgentGov Settings.'
                   ),
-            status.adminEmailConfigured
-                ? checkView('email', 'done', 'Alerts are emailed to an administrator.')
+            eventsOn
+                ? checkView('events', 'done', 'Real-time events are on, so alerts are raised and recorded.')
                 : checkView(
-                      'email',
+                      'events',
                       'action',
-                      'No administrator email is set, so alerts are recorded in the action log but not emailed.'
+                      'Real-time events are off in AgentGov Settings, so no alerts are raised or emailed and the console does not update by itself.'
                   ),
-            checkView(
-                'owners',
-                'info',
-                status.notifyAgentOwners
-                    ? "Agent owners are emailed about their own agents' alerts."
-                    : 'Agent owners are not emailed about alerts.'
-            ),
+            emailCheck(status, eventsOn),
+            ownersCheck(status, eventsOn),
             checkView(
                 'idle',
                 'info',
-                `A session ends after ${status.sessionIdleMinutes} ${status.sessionIdleMinutes === 1 ? 'minute' : 'minutes'} without activity.`
+                `A session ends after ${idle} ${idle === 1 ? 'minute' : 'minutes'} without activity, or after 24 hours.`
             ),
             scheduled === jobs.length && jobs.length > 0
                 ? checkView('jobs', 'done', 'All background jobs are scheduled.')

@@ -26,30 +26,14 @@ describe('agentGovUtils presentation helpers', () => {
             expect(view.pillClass).toBe('ag-pill ag-pill_error');
         });
 
-        it('rewords a budget alert written before alerts were reworded and drops its GMT time', () => {
-            const view = alertView(
-                'Warning alert for agent Case Triage Agent: API_Calls at 85.00% (85.0 of 100.0) at 2026-09-28 17:16:19'
-            );
-            expect(view.label).toBe('Warning');
-            expect(view.text).toBe("API calls at 85% of today's budget (85 of 100).");
-            expect(view.variant).toBe('warning');
-        });
-
-        it('rewords an old throttle alert with the status the budget reached', () => {
-            const view = alertView(
-                'Throttle alert for agent Budget: SOQL_Queries at 90.00% (18.0 of 20.0) at 2026-09-28 16:25:52'
-            );
-            expect(view.label).toBe('Throttled');
-            expect(view.text).toBe("SOQL queries at 90% of today's budget (18 of 20).");
-        });
-
-        it('rewords an old circuit breaker alert as the failures that opened it', () => {
-            const view = alertView(
-                'Block alert for agent Order Sync Agent: Circuit_Breaker at 100.00% (3.0 of 3.0) at 2026-09-28 17:16:32'
-            );
-            expect(view.label).toBe('Breaker open');
-            expect(view.text).toBe('3 failures reached the threshold of 3.');
-            expect(view.variant).toBe('error');
+        it('gives a throttled budget a warning and an open breaker an error', () => {
+            const throttled = alertView("Throttled: SOQL queries at 90% of today's budget (18 of 20).");
+            expect(throttled.label).toBe('Throttled');
+            expect(throttled.variant).toBe('warning');
+            const breaker = alertView('Breaker open: 3 failures reached the threshold of 3.');
+            expect(breaker.label).toBe('Breaker open');
+            expect(breaker.text).toBe('3 failures reached the threshold of 3.');
+            expect(breaker.variant).toBe('error');
         });
 
         it('shows other text whole, as an informational alert', () => {
@@ -58,6 +42,9 @@ describe('agentGovUtils presentation helpers', () => {
             expect(view.text).toBe('Something the framework reported');
             expect(view.pillClass).toBe('ag-pill ag-pill_info');
             expect(alertView(null).text).toBe('');
+            // A colon further in than a label would reach is part of the sentence.
+            const long = 'Block alert for agent Order Sync Agent: Circuit_Breaker at 100.00% (3.0 of 3.0)';
+            expect(alertView(long)).toMatchObject({ label: 'Alert', text: long });
         });
     });
 
@@ -93,9 +80,12 @@ describe('agentGovUtils presentation helpers', () => {
             expect(formatRelativeTime(NOW - 3 * 3600 * 1000, NOW)).toBe('3 hours ago');
         });
 
-        it('shows a date and time for moments a day or more away, or in the future', () => {
+        it('reads "now" up to a minute ahead, and dates a moment a day or more ago or later today', () => {
+            expect(formatRelativeTime(NOW + 30 * 1000, NOW)).toBe('now');
             expect(formatRelativeTime(NOW - 2 * 86400 * 1000, NOW)).toBe('Sep 26, 2026, 12:00 PM');
+            // Later on the viewer's current day, the time alone.
             expect(formatRelativeTime(NOW + 3600 * 1000, NOW)).toBe('1:00 PM');
+            expect(formatRelativeTime(NOW + 2 * 86400 * 1000, NOW)).toBe('Sep 30, 2026, 12:00 PM');
         });
 
         it('is blank for a missing or invalid value', () => {

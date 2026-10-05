@@ -56,11 +56,15 @@ export default class AgentGovConsole extends LightningElement {
         return this.liveUpdates ? 'Live' : 'Live updates off';
     }
 
+    // Live means the page is subscribed, not that events arrive: nothing is published while
+    // real-time events are off in AgentGov Settings, and the console cannot read that setting.
     get liveUpdatesTitle() {
         if (this.liveUpdates === undefined) {
             return 'Connecting to live updates';
         }
-        return this.liveUpdates ? 'Changes appear as agents act' : 'Use Refresh to see the latest changes';
+        return this.liveUpdates
+            ? 'Listening for AgentGov events. None are published while real-time events are off in AgentGov Settings.'
+            : 'Use Refresh to see the latest changes';
     }
 
     get liveStatusClass() {

@@ -1,10 +1,10 @@
-// AgentGov v1.2 migration: move plaintext API keys to hashed storage.
+// AgentGov migration for orgs upgrading from v1.1: move plaintext API keys to hashed storage.
 //
 // Releases before v1.2 stored each agent's API key in API_Key__c. v1.2 stores only a
 // SHA-256 hash (API_Key_Hash__c) plus an identifying prefix, and upgrades legacy keys
-// lazily the first time each agent connects. Run this script once after deploying v1.2
-// to upgrade every remaining plaintext key immediately instead of waiting for that
-// first connection. It is safe to run more than once.
+// lazily the first time each agent connects. Run this script once after deploying v1.2 or
+// any later release to upgrade every remaining plaintext key immediately instead of waiting
+// for that first connection. It is safe to run more than once.
 //
 // A key too short to truncate safely is stored with no identifying prefix, because the
 // prefix field is readable by everyone holding AgentGov_User and a short key's prefix

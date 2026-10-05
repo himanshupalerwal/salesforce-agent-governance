@@ -14,7 +14,7 @@
     </actionOverrides>
     <compactLayoutAssignment>AgentGov_Session_Highlights</compactLayoutAssignment>
     <deploymentStatus>Deployed</deploymentStatus>
-    <description>Tracks active agent sessions with start/end times and resource consumption.</description>
+    <description>One run of an agent's governed activity, from its first governed action until it goes idle, reaches 24 hours, or is ended, with the run's usage and action count. Finished sessions are kept until the log retention period passes.</description>
     <enableActivities>false</enableActivities>
     <enableBulkApi>true</enableBulkApi>
     <enableReports>true</enableReports>

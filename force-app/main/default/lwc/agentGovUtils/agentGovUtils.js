@@ -14,7 +14,8 @@ export const ACTION_CHANNEL = '/event/AgentGov_Action_Event__e';
 export const REGISTRATION_OBJECT = 'AgentGov_Registration__c';
 
 // Busy agents publish many events a second. However many arrive, listeners are called at most
-// once per interval, so a burst of activity costs each component one refresh, not hundreds.
+// once per interval, so a burst of activity costs each component one refresh every five
+// seconds, not one per event.
 export const EVENT_REFRESH_INTERVAL_MS = 5000;
 
 // Replay id -1 delivers only events published after the subscription is created.
@@ -40,7 +41,6 @@ const NEUTRAL_PILL_CLASS = 'ag-pill ag-pill_neutral';
 
 const AGENT_STATUS_VARIANTS = { Active: 'success', Throttled: 'warning', Blocked: 'error' };
 
-const ALERT_LABELS = { Warning: 'Warning', Throttle: 'Throttled', Block: 'Blocked' };
 const ALERT_VARIANTS = {
     Warning: 'warning',
     Throttled: 'warning',
@@ -48,11 +48,6 @@ const ALERT_VARIANTS = {
     Exhausted: 'error',
     'Breaker open': 'error'
 };
-const LIMIT_LABELS = { API_Calls: 'API calls', SOQL_Queries: 'SOQL queries', DML_Operations: 'DML operations' };
-const BREAKER_LIMIT = 'Circuit_Breaker';
-// Alert rows written before alerts were reworded, such as "Block alert for agent Name:
-// API_Calls at 95.00% (95.0 of 100.0) at 2026-09-28 17:16:32". The trailing time is in GMT.
-const LEGACY_ALERT = /^(\w+) alert for agent .*?: (\w+) at ([\d.]+)% \(([\d.]+) of ([\d.]+)\)/;
 
 // Units of the usage maps that Report and Apex rows record as JSON, singular and plural.
 const USAGE_UNITS = {
@@ -162,8 +157,9 @@ export function percentOf(consumed, allocated) {
 
 /**
  * Usage of a budget's most-used limit type, as a rounded percentage clamped to 100. The server
- * decides Budget_Status__c on this same figure, so a bar drawn from it always agrees with the
- * status printed beside it.
+ * decides Budget_Status__c from the same usage, but compares unrounded percentages with each
+ * limit type's own thresholds, so a bar drawn from this figure can disagree with the status
+ * beside it within half a percent of a threshold, or when the limit types' thresholds differ.
  * @param {Object} budget An AgentGov_Budget__c record
  * @returns {number}
  */
@@ -192,10 +188,10 @@ export function clampPercent(value) {
 }
 
 /**
- * Presentation of a budget status: icon, icon variant, and badge class. Every status the
- * framework writes has its own entry; anything else is shown neutrally.
+ * Presentation of a budget status: icon, icon variant, badge class, and state pill class.
+ * Every status the framework writes has its own entry; anything else is shown neutrally.
  * @param {string} status
- * @returns {{label: string, icon: string, variant: string, badgeClass: string}}
+ * @returns {{label: string, icon: string, variant: string, badgeClass: string, pillClass: string}}
  */
 export function budgetStatusView(status) {
     const view = BUDGET_STATUS_VIEWS[status] || NEUTRAL_STATUS_VIEW;
@@ -230,12 +226,12 @@ export function agentStatusView(status) {
 }
 
 /**
- * Presentation of a circuit breaker: label, icon, variant, a severity rank for sorting, and a
- * detail line. An open breaker's detail says when the agent may retry.
+ * Presentation of a circuit breaker: label, icon, variant, a severity rank for sorting, a
+ * detail line, and the state pill class. An open breaker's detail says when the agent may retry.
  * @param {string} state CLOSED, OPEN, or HALF_OPEN
  * @param {string} cooldownUntil When the open breaker's cooldown ends
  * @param {number} [now] Current time in milliseconds
- * @returns {{state: string, label: string, icon: string, variant: string, rank: number, detail: string, isTripped: boolean}}
+ * @returns {{state: string, label: string, icon: string, variant: string, rank: number, detail: string, isTripped: boolean, pillClass: string}}
  */
 export function breakerView(state, cooldownUntil, now = Date.now()) {
     const key = BREAKER_VIEWS[state] ? state : 'CLOSED';
@@ -280,34 +276,20 @@ export function needsAttention(agent) {
 }
 
 /**
- * Reads an Alert row's details as a pill label, its variant, and a sentence. Rows written in the
- * current wording lead with the label, as in "Blocked: API calls at 95% of today's budget (95
- * of 100)."; rows written before it are reworded the same way, dropping their GMT timestamp.
+ * Reads an Alert row's details as a pill label, its variant, and a sentence. Alert rows lead
+ * with a short label, as in "Blocked: API calls at 95% of today's budget (95 of 100)."; other
+ * text is shown whole under the label Alert.
  * @param {string} details
  * @returns {{label: string, variant: string, pillClass: string, text: string}}
  */
 export function alertView(details) {
     const text = String(details || '').trim();
-    const legacy = LEGACY_ALERT.exec(text);
     let label = 'Alert';
     let sentence = text;
-    if (legacy) {
-        const [, type, limit, percent, used, allocated] = legacy;
-        if (limit === BREAKER_LIMIT) {
-            label = 'Breaker open';
-            sentence = `${formatNumber(used)} failures reached the threshold of ${formatNumber(allocated)}.`;
-        } else {
-            label = ALERT_LABELS[type] || type;
-            sentence =
-                `${LIMIT_LABELS[limit] || limit} at ${Math.round(Number(percent))}% of today's budget ` +
-                `(${formatNumber(used)} of ${formatNumber(allocated)}).`;
-        }
-    } else {
-        const colon = text.indexOf(': ');
-        if (colon > 0 && colon <= 20) {
-            label = text.slice(0, colon);
-            sentence = text.slice(colon + 2);
-        }
+    const colon = text.indexOf(': ');
+    if (colon > 0 && colon <= 20) {
+        label = text.slice(0, colon);
+        sentence = text.slice(colon + 2);
     }
     const variant = ALERT_VARIANTS[label] || 'info';
     return { label, variant, pillClass: pillClass(variant), text: sentence };
@@ -442,8 +424,11 @@ function relativeFormatter() {
 }
 
 /**
- * Says how long ago a moment was, such as "5 minutes ago", in the viewer's language. Moments a
- * day or more ago, and moments in the future, are shown as a date and time instead.
+ * Says how long ago a moment was, such as "5 minutes ago", in the viewer's language. A moment
+ * up to a minute ahead, as a server clock slightly ahead of the browser's can produce, reads
+ * "now".
+ * Moments a day or more ago, and moments more than a minute ahead, are shown as a time alone
+ * when they fall on the viewer's current day and as a date and time otherwise.
  * @param {string|number|Date} value
  * @param {number} [now] Current time in milliseconds
  * @returns {string}
@@ -543,7 +528,7 @@ export function listenToClock(onTick) {
  * Relative Lightning URL of a record's page, used as the href of record links.
  * @param {string} recordId
  * @param {string} [objectApiName]
- * @returns {string}
+ * @returns {string|undefined} Undefined when there is no record Id
  */
 export function recordUrl(recordId, objectApiName = REGISTRATION_OBJECT) {
     return recordId ? `/lightning/r/${objectApiName}/${recordId}/view` : undefined;
@@ -749,8 +734,11 @@ export function listenToAgentGovEvents(onEvent, onStatusChange) {
 }
 
 /**
- * Subscribes a callback to both AgentGov platform-event channels. Kept for code written against
- * v1.2; new code uses listenToAgentGovEvents. Resolves to a handle list for
+ * Listens to both AgentGov platform-event channels through the page's shared subscription, so
+ * the callback runs at most once every EVENT_REFRESH_INTERVAL_MS (five seconds), with the
+ * latest event when several arrived; the others are not delivered. Kept for code written
+ * against v1.2; new code uses listenToAgentGovEvents, and code that needs every event
+ * subscribes through lightning/empApi directly. Resolves to a handle list for
  * unsubscribeFromAgentGovEvents, or to an empty list when streaming is unavailable to this user.
  * @param {(event: Object) => void} onEvent
  * @returns {Promise<Object[]>}

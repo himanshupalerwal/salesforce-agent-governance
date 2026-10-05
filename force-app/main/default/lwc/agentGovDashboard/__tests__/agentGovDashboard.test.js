@@ -198,6 +198,15 @@ describe('c-agent-gov-dashboard', () => {
         expect(toastHandler.mock.calls[0][0].detail.variant).toBe('error');
     });
 
+    it('says it is connecting until live updates report their state', async () => {
+        const element = mount();
+        const live = element.shadowRoot.querySelector('[aria-live="polite"]');
+        expect(live.textContent).toBe('Connecting…');
+        expect(live.classList.contains('ag-live_on')).toBe(false);
+        await flushPromises();
+        expect(element.shadowRoot.querySelector('[aria-live="polite"]').textContent).toBe('Live updates on');
+    });
+
     it('subscribes to both platform-event channels and refreshes on an event', async () => {
         const element = mount();
         emitAll();

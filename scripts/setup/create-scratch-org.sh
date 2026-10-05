@@ -27,10 +27,10 @@ echo ""
 echo "4. Loading sample data..."
 sf apex run -f scripts/setup/load-sample-data.apex -o AgentGov
 
-# Open the org
+# Open the AgentGov console
 echo ""
-echo "5. Opening org..."
-sf org open -o AgentGov -p lightning/n/AgentGov_Registration__c
+echo "5. Opening the AgentGov console..."
+sf org open -o AgentGov -p lightning/n/AgentGov_Dashboard
 
 echo ""
 echo "============================================"

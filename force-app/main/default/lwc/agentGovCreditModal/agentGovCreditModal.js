@@ -1,8 +1,9 @@
 /**
- * Credits usage back to an agent's budget for today, for example after an incident is
- * resolved. The person picks the limit type and the number of units; the server re-evaluates
- * the budget status from the corrected usage. The dialog closes with the server's outcome when
- * the credit succeeds and stays open with the reason when it does not.
+ * Credits usage back to an agent's budget for today, the current day in the org's time zone,
+ * for example after an incident is resolved. The person picks the limit type and the number of
+ * units; the server never takes usage below zero and re-evaluates the budget status from the
+ * corrected usage. The dialog closes with the server's outcome, which says how much was
+ * credited, when the credit succeeds, and stays open with the reason when it does not.
  */
 import { api } from 'lwc';
 import LightningModal from 'lightning/modal';
@@ -17,7 +18,16 @@ const LIMIT_OPTIONS = [
 const AMOUNT_MESSAGE = 'Enter a whole number of at least 1.';
 
 export default class AgentGovCreditModal extends LightningModal {
+    /**
+     * Id of the agent registration whose budget is credited.
+     * @type {string}
+     */
     @api registrationId;
+
+    /**
+     * Name of the agent, shown in the dialog.
+     * @type {string}
+     */
     @api agentName;
 
     limitOptions = LIMIT_OPTIONS;

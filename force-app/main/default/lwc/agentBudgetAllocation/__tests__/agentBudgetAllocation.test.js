@@ -162,7 +162,7 @@ describe('c-agent-budget-allocation', () => {
         expect(pills.map((pill) => pill.textContent)).toEqual(statuses);
     });
 
-    it('stacks the three totals on narrow screens', async () => {
+    it('puts the three totals in the shared responsive tile grid', async () => {
         const element = mount();
         getAllTodaysBudgets.emit(BUDGETS);
         await flushPromises();

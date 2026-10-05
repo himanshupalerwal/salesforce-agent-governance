@@ -89,8 +89,7 @@ describe('c-agent-gov-activity-log', () => {
                 }),
                 row('r2', '2026-09-28T10:04:00.000+0000', {
                     Action_Type__c: 'Alert',
-                    Details__c:
-                        'Block alert for agent Order Sync Agent: Circuit_Breaker at 100.00% (3.0 of 3.0) at 2026-09-28 17:16:32'
+                    Details__c: 'Breaker open: 3 failures reached the threshold of 3.'
                 })
             ],
             hasMore: false

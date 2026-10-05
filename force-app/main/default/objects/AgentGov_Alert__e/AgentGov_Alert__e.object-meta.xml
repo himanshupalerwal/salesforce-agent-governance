@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
     <deploymentStatus>Deployed</deploymentStatus>
-    <description>Fires when an agent crosses a governor limit threshold (warning, throttle, or block).</description>
+    <description>Published when an agent's budget status escalates (Warning, Throttle, or Block; an Exhausted budget raises Block) and when its circuit breaker trips. Each alert is recorded as an Alert row in the action log and emailed to the administrator address and, when Notify Agent Owners is checked, to the agents' owners. Not published while Enable Real Time Events is unchecked.</description>
     <eventType>HighVolume</eventType>
     <label>AgentGov Alert</label>
     <pluralLabel>AgentGov Alerts</pluralLabel>

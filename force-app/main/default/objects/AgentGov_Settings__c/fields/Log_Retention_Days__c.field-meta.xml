@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Log_Retention_Days__c</fullName>
     <defaultValue>90</defaultValue>
-    <description>Days to retain action log records</description>
+    <description>Days to keep action logs, conflict logs, and finished sessions; the weekly AgentGov Cleanup job deletes older rows. Budget rows follow Budget Retention Days.</description>
     <externalId>false</externalId>
     <label>Log Retention Days</label>
     <precision>4</precision>

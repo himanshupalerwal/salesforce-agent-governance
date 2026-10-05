@@ -173,6 +173,27 @@ private class AgentGovRestAuthTest {
     }
 
     @IsTest
+    static void aBlockedAgentIsAdmittedOnlyWhenTheCallerAllowsAProbe() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Blocked Agent', 'Agentforce', false);
+        reg.Status__c = AgentGovConstants.STATUS_BLOCKED;
+
+        Assert.areEqual(reg, AgentGovRestAuth.requireActive(reg, true, true));
+        try {
+            AgentGovRestAuth.requireActive(reg, true, false);
+            Assert.fail('A Blocked agent is refused unless the caller allows a probe');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.AGENT_NOT_ACTIVE, e.getErrorCode());
+        }
+        try {
+            // The two-argument form, which /rotate-key uses, never admits Blocked.
+            AgentGovRestAuth.requireActive(reg, true);
+            Assert.fail('The two-argument check refuses a Blocked agent');
+        } catch (AgentGovException e) {
+            Assert.areEqual(AgentGovException.ErrorCode.AGENT_NOT_ACTIVE, e.getErrorCode());
+        }
+    }
+
+    @IsTest
     static void ownerOrAdminGuard() {
         AgentGov_Registration__c own = AgentGovTestDataFactory.createRegistration('Own Agent', 'Agentforce', true);
         AgentGov_Registration__c other = AgentGovTestDataFactory.createRegistration('Other Agent', 'Agentforce', true);

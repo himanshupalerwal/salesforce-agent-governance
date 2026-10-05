@@ -56,7 +56,7 @@ private class AgentGovConflictResolverTest {
     }
 
     @IsTest
-    static void lowerPriorityAgentIsQueuedAndAssertThrows() {
+    static void lowerPriorityAgentIsRefusedAndAssertThrows() {
         AgentGov_Registration__c high = agentWithPriority('High Priority', 1);
         AgentGov_Registration__c low = agentWithPriority('Low Priority', 5);
         AgentGovConflictResolver.checkForConflict(high.Id, RECORD, 'Account');
@@ -68,10 +68,11 @@ private class AgentGovConflictResolverTest {
         );
         Assert.isTrue(result.hasConflict);
         Assert.areEqual(high.Id, result.winningAgentId);
+        Assert.areEqual(AgentGovConstants.RESOLUTION_AGENT2_WON, result.resolution, 'The lock holder keeps the record');
 
         try {
             AgentGovConflictResolver.assertNoConflict(low.Id, RECORD, 'Account');
-            Assert.fail('The queued agent must be refused');
+            Assert.fail('The lower-priority agent must be refused');
         } catch (AgentGovException e) {
             Assert.areEqual(AgentGovException.ErrorCode.RECORD_LOCKED, e.getErrorCode());
         }

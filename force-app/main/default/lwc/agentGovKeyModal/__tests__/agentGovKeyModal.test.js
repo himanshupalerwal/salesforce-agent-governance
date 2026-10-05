@@ -23,7 +23,6 @@ describe('c-agent-gov-key-modal', () => {
         const element = createElement('c-agent-gov-key-modal', { is: AgentGovKeyModal });
         element.agentName = 'Order Sync Agent';
         element.apiKey = SECRET;
-        element.apiKeyPrefix = 'agk_01234567';
         document.body.appendChild(element);
         return element;
     }

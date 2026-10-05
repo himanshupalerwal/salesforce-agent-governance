@@ -2,8 +2,9 @@
  * @description Evaluates the metadata-driven access policies before an agent acts.
  *
  *              Policies live in AgentGov_Policy__mdt and match on agent type, object, and
- *              operation, with wildcards for any of the three. An explicit deny always wins
- *              over an allow. Matching allow policies contribute field restrictions and a
+ *              operation, in any letter case. The agent type may be All for every type, and the
+ *              object and the operation may be * for any. An explicit deny always wins over an
+ *              allow. Matching allow policies contribute field restrictions and a
  *              per-transaction record cap, which callers enforce through assertFieldsAllowed
  *              and assertRecordCount before touching data.
  *
@@ -12,6 +13,9 @@
  *              metadata cannot cause policies to be skipped.
  */
 public inherited sharing class AgentGovPolicyEngine {
+    // Agent type stored values, keyed by the lower-case value and label. Read once per transaction.
+    private static Map<String, String> agentTypesByName;
+
     /** @description Result of a policy evaluation. */
     public class PolicyResult {
         @AuraEnabled
@@ -128,6 +132,48 @@ public inherited sharing class AgentGovPolicyEngine {
     }
 
     /**
+     * @description Resolves the agent type a policy names to the value stored on
+     *              registrations. A policy may give the stored value, such as MCP_External, or
+     *              the label shown on records, such as MCP External, in any letter case, and
+     *              All for every type.
+     * @param named The policy's Agent_Type__c
+     * @return The stored value, AgentGovConstants.POLICY_ALL, or null when the text names no
+     *         agent type
+     */
+    public static String resolveAgentType(String named) {
+        if (String.isBlank(named)) {
+            return null;
+        }
+        String key = named.trim().toLowerCase();
+        if (key == AgentGovConstants.POLICY_ALL.toLowerCase()) {
+            return AgentGovConstants.POLICY_ALL;
+        }
+        if (agentTypesByName == null) {
+            agentTypesByName = new Map<String, String>();
+            for (
+                Schema.PicklistEntry entry : AgentGov_Registration__c.Agent_Type__c.getDescribe().getPicklistValues()
+            ) {
+                agentTypesByName.put(entry.getValue().toLowerCase(), entry.getValue());
+                agentTypesByName.put(entry.getLabel().toLowerCase(), entry.getValue());
+            }
+        }
+        return agentTypesByName.get(key);
+    }
+
+    /**
+     * @description Reports whether a policy applies to agents of a type. The policy may name
+     *              the type by its stored value or by the label shown on records, such as MCP
+     *              External, so a deny policy written either way is enforced.
+     * @param policy The policy record
+     * @param agentType The Agent_Type__c stored on a registration
+     * @return True when the policy names that type, or All
+     */
+    public static Boolean appliesToAgentType(AgentGov_Policy__mdt policy, String agentType) {
+        String named = resolveAgentType(policy.Agent_Type__c);
+        return named == AgentGovConstants.POLICY_ALL || (named != null && named == agentType);
+    }
+
+    /**
      * @description Throws when any of the given fields is restricted by the evaluated policy.
      *              Restricted fields are denied rather than silently dropped, so an agent is
      *              never left believing a write succeeded when part of it was discarded.
@@ -186,12 +232,23 @@ public inherited sharing class AgentGovPolicyEngine {
     }
 
     /**
-     * @description Validates every policy record and lists configuration problems.
+     * @description Validates every policy record and lists configuration problems: a blank or
+     *              unknown agent type, a blank object, and a blank or unknown operation. Names
+     *              are checked in any letter case, as evaluation matches them.
      * @return Human-readable issues; empty when all policies are valid
      */
     public static List<String> validatePolicies() {
         List<String> issues = new List<String>();
+        Set<String> operations = new Set<String>();
+        for (String operation : AgentGovConstants.VALID_OPERATIONS) {
+            operations.add(operation.toLowerCase());
+        }
         for (AgentGov_Policy__mdt policy : AgentGovSelector.getPolicies()) {
+            if (String.isBlank(policy.Agent_Type__c)) {
+                issues.add('Policy ' + policy.DeveloperName + ': Agent_Type__c is blank.');
+            } else if (resolveAgentType(policy.Agent_Type__c) == null) {
+                issues.add('Policy ' + policy.DeveloperName + ': Unknown agent type "' + policy.Agent_Type__c + '".');
+            }
             if (String.isBlank(policy.Object_Name__c)) {
                 issues.add('Policy ' + policy.DeveloperName + ': Object_Name__c is blank.');
             }
@@ -201,7 +258,7 @@ public inherited sharing class AgentGovPolicyEngine {
             if (
                 String.isNotBlank(policy.Operation__c) &&
                 policy.Operation__c != AgentGovConstants.POLICY_WILDCARD &&
-                !AgentGovConstants.VALID_OPERATIONS.contains(policy.Operation__c)
+                !operations.contains(policy.Operation__c.toLowerCase())
             ) {
                 issues.add('Policy ' + policy.DeveloperName + ': Invalid operation "' + policy.Operation__c + '".');
             }

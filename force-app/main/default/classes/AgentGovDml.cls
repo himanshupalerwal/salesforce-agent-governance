@@ -2,14 +2,14 @@
  * @description Data-manipulation layer for the framework's own records: registrations,
  *              budgets, sessions, action logs, conflict logs, and platform events.
  *
- *              Security posture: without sharing, and every statement runs in
- *              AccessLevel.SYSTEM_MODE. The framework's ledger must be written on behalf
- *              of whoever triggered the governed action, including Agentforce Agent Users
- *              and integration users that hold no CRUD or field-level access to AgentGov
- *              objects. Since API version 67.0 database operations default to user mode,
- *              so the elevation has to be explicit and is confined to this class. Anything
- *              executed on behalf of an agent against customer data (the proxy endpoints)
- *              deliberately does not use this class.
+ *              Security posture: without sharing, and every DML statement runs in
+ *              AccessLevel.SYSTEM_MODE; platform events are published as the running user.
+ *              The framework's ledger must be written on behalf of whoever triggered the
+ *              governed action, including Agentforce Agent Users and integration users that
+ *              hold no CRUD or field-level access to AgentGov objects. Since API version 67.0
+ *              database operations default to user mode, so the elevation has to be explicit
+ *              and is confined to this class. Anything executed on behalf of an agent against
+ *              customer data (the proxy endpoints) deliberately does not use this class.
  *
  *              Every method returns the results it gets back. Callers that pass
  *              allOrNone=false receive the raw results and decide what a failure means;
@@ -26,10 +26,10 @@ public without sharing class AgentGovDml {
         StatusCode.FIELD_CUSTOM_VALIDATION_EXCEPTION
     };
     /**
-     * @description Test-only switch that makes publishEvents behave as it does for a user
-     *              without Create on the platform event. Such a user cannot be constructed
-     *              inside a test, so this is the only way to cover the fallback that writes
-     *              the audit rows directly when a publish is refused.
+     * @description Test-only switch that makes publishEvents throw, so tests can cover the
+     *              fallbacks for a publish that fails outright. A user without Create on the
+     *              event is refused with failed save results instead, which tests reproduce by
+     *              publishing as such a user.
      */
     @TestVisible
     private static Boolean simulatePublishRefusal = false;
@@ -90,8 +90,10 @@ public without sharing class AgentGovDml {
     }
 
     /**
-     * @description Publishes platform events. Publishing is not subject to CRUD checks,
-     *              but routing it through this class keeps every framework write in one place.
+     * @description Publishes platform events as the running user. A user without Create on
+     *              the event is refused: the save results come back failed rather than an
+     *              exception being thrown, and the callers in AgentGovTriggerHandler then write
+     *              the audit rows, or deliver the alerts, directly in system mode.
      * @param events Platform events to publish
      * @return Save results in the same order as the input
      */
@@ -100,9 +102,6 @@ public without sharing class AgentGovDml {
             return new List<Database.SaveResult>();
         }
         if (Test.isRunningTest() && simulatePublishRefusal) {
-            // A user without Create on the platform event cannot publish, and that user cannot
-            // be built inside a test. This hook exercises the fallback that keeps the audit
-            // trail complete when the publish is refused.
             throw new System.NoAccessException();
         }
         return EventBus.publish(events);

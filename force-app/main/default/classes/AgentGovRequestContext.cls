@@ -3,10 +3,16 @@
  *              to its audit rows, and when the request started, so each row can record how long
  *              the call had taken when it was written.
  *
- *              Entry points call begin() first: the REST endpoints with the caller's
- *              X-Correlation-Id header, the invocable actions with the optional Correlation ID
- *              input. Rows written outside a request, by a scheduled job or an event trigger,
- *              carry neither a correlation id nor a duration.
+ *              Entry points start a request before they write anything. The REST and proxy
+ *              endpoints call begin() with the caller's X-Correlation-Id header, and the console
+ *              calls it with none, so an id is generated. The invocable actions call
+ *              ensureBegun() with the first Correlation ID input in their batch, so every
+ *              AgentGov action in one transaction uses the id of the first one that ran.
+ *
+ *              Rows written outside a request, by a scheduled job or by Apex that started none,
+ *              carry no correlation id and no request duration. Action rows persisted from
+ *              AgentGov_Action_Event__e keep the values captured when the event was built;
+ *              alert rows, and System rows written inside an event trigger, carry neither.
  *
  *              Touches no data. Security posture: inherited sharing.
  */

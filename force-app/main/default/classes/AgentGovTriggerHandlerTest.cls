@@ -114,6 +114,72 @@ private class AgentGovTriggerHandlerTest {
     }
 
     @IsTest
+    static void anActionLoggedByAUserWhoCannotPublishIsStillWritten() {
+        AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('Handler Agent', 'Agentforce', true);
+        User agentUser = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+
+        Test.startTest();
+        System.runAs(agentUser) {
+            AgentGovTriggerHandler.logAction(
+                reg.Id,
+                AgentGovConstants.ACTION_QUERY,
+                'Account',
+                null,
+                AgentGovConstants.ACTION_SUCCESS,
+                null
+            );
+        }
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        // The platform refuses this user's publish with a failed result, not an exception, and
+        // the row is then written directly.
+        Assert.areEqual(1, logsFor(reg.Id).size(), 'The refused publish falls back to a direct insert');
+    }
+
+    @IsTest
+    static void alertsAUserCannotPublishAreStillRecordedAndDelivered() {
+        AgentGov_Registration__c agent = AgentGovTestDataFactory.createRegistration('Tripped', 'Agentforce', true);
+        User agentUser = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+
+        Test.startTest();
+        System.runAs(agentUser) {
+            AgentGovTriggerHandler.publishAlerts(
+                new List<AgentGov_Alert__e>{
+                    new AgentGov_Alert__e(
+                        Agent_Id__c = agent.Id,
+                        Agent_Name__c = 'Tripped',
+                        Alert_Type__c = AgentGovConstants.ALERT_BLOCK,
+                        Limit_Type__c = AgentGovConstants.ALERT_LIMIT_CIRCUIT_BREAKER,
+                        Current_Usage__c = 3,
+                        Budget_Allocated__c = 3,
+                        Usage_Percentage__c = 100,
+                        Timestamp__c = DateTime.now()
+                    )
+                }
+            );
+        }
+        Test.getEventBus().deliver();
+        Test.stopTest();
+
+        // The alert trigger never sees an alert whose publish was refused, so the alert is
+        // delivered directly: recorded here, and emailed to anyone configured to receive it.
+        AgentGov_Action_Log__c recorded = [
+            SELECT Details__c
+            FROM AgentGov_Action_Log__c
+            WHERE Agent_Registration__c = :agent.Id AND Action_Type__c = :AgentGovConstants.ACTION_ALERT
+        ];
+        Assert.areEqual('Breaker open: 3 failures reached the threshold of 3.', recorded.Details__c);
+        List<AgentGov_Action_Log__c> notes = [
+            SELECT Details__c
+            FROM AgentGov_Action_Log__c
+            WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM
+        ];
+        Assert.areEqual(1, notes.size(), 'The refusal is recorded once');
+        Assert.isTrue(notes[0].Details__c.contains('delivering 1 alert(s) directly'), notes[0].Details__c);
+    }
+
+    @IsTest
     static void directInsertWhenEventsDisabled() {
         AgentGov_Settings__c settings = [SELECT Id FROM AgentGov_Settings__c LIMIT 1];
         settings.Enable_Real_Time_Events__c = false;
@@ -194,7 +260,7 @@ private class AgentGovTriggerHandlerTest {
     }
 
     @IsTest
-    static void unrecognisedAgentIdIsNotedOnTheRow() {
+    static void anActionWithNoAgentIsStillLogged() {
         Test.startTest();
         AgentGovTriggerHandler.logActions(
             new List<AgentGov_Action_Event__e>{
@@ -340,7 +406,7 @@ private class AgentGovTriggerHandlerTest {
             alerts.add(
                 new AgentGov_Alert__e(
                     Agent_Id__c = agent.Id,
-                    Agent_Name__c = 'Owned',
+                    Agent_Name__c = agent.Agent_Name__c,
                     Alert_Type__c = AgentGovConstants.ALERT_WARNING,
                     Limit_Type__c = AgentGovConstants.LIMIT_API_CALLS,
                     Timestamp__c = DateTime.now()
@@ -356,6 +422,35 @@ private class AgentGovTriggerHandlerTest {
         Test.stopTest();
 
         Assert.areEqual(1, emails, 'The administrator and both owners are emailed in one send');
+        Map<String, String> bodyByRecipient = new Map<String, String>();
+        for (Messaging.SingleEmailMessage message : AgentGovTriggerHandler.sentAlertMessages) {
+            Assert.areEqual(1, message.getToAddresses().size(), 'Each message has a single recipient');
+            bodyByRecipient.put(message.getToAddresses()[0], message.getPlainTextBody());
+        }
+        Assert.areEqual(
+            new Set<String>{ 'ops@example.com', 'agentgov-test@example.com', 'second-owner@example.com' },
+            bodyByRecipient.keySet(),
+            'The administrator and each owner get a message'
+        );
+        String first = agents[0].Agent_Name__c;
+        String second = agents[1].Agent_Name__c;
+        String adminBody = bodyByRecipient.get('ops@example.com');
+        Assert.isTrue(
+            adminBody.contains(first) && adminBody.contains(second),
+            'The administrator hears about both: ' + adminBody
+        );
+        String firstOwnerBody = bodyByRecipient.get('agentgov-test@example.com');
+        Assert.isTrue(firstOwnerBody.contains(first), firstOwnerBody);
+        Assert.isFalse(
+            firstOwnerBody.contains(second),
+            'An owner hears only about their own agents: ' + firstOwnerBody
+        );
+        String secondOwnerBody = bodyByRecipient.get('second-owner@example.com');
+        Assert.isTrue(secondOwnerBody.contains(second), secondOwnerBody);
+        Assert.isFalse(
+            secondOwnerBody.contains(first),
+            'An owner hears only about their own agents: ' + secondOwnerBody
+        );
         assertDelivery(canSend);
     }
 
@@ -404,7 +499,10 @@ private class AgentGovTriggerHandlerTest {
         AgentGov_Budget__c budget = AgentGovTestDataFactory.createBudget(reg.Id, true);
 
         AgentGov_Budget__c stored = [SELECT Budget_Key__c FROM AgentGov_Budget__c WHERE Id = :budget.Id];
-        Assert.areEqual(AgentGovBudgetManager.buildBudgetKey(reg.Id, Date.today()), stored.Budget_Key__c);
+        Assert.areEqual(
+            AgentGovBudgetManager.buildBudgetKey(reg.Id, AgentGovBudgetManager.budgetDate()),
+            stored.Budget_Key__c
+        );
     }
 
     @IsTest
@@ -450,7 +548,7 @@ private class AgentGovTriggerHandlerTest {
     }
 
     @IsTest
-    static void unknownRegistrationIsLoggedWithPlaceholderName() {
+    static void anActionForAnUnknownRegistrationIsStillLogged() {
         Id unknownId = AgentGov_Registration__c.SObjectType.getDescribe().getKeyPrefix() + '000000000001AAA';
 
         Test.startTest();
@@ -496,6 +594,18 @@ private class AgentGovTriggerHandlerTest {
         Test.stopTest();
 
         Assert.areEqual(1, emails, 'A batch of alerts produces a single email');
+        Assert.areEqual(1, AgentGovTriggerHandler.sentAlertMessages.size(), 'One message, to the administrator');
+        Messaging.SingleEmailMessage message = AgentGovTriggerHandler.sentAlertMessages[0];
+        Assert.areEqual('AgentGov: 3 agent alerts', message.getSubject());
+        String body = message.getPlainTextBody();
+        for (AgentGov_Alert__e alert : alerts) {
+            Assert.isTrue(
+                body.contains(
+                    alert.Agent_Name__c + ' - Blocked: DML operations at 100% of today\'s budget (3000 of 3000).'
+                ),
+                'Every alert is listed: ' + body
+            );
+        }
     }
 
     @IsTest
@@ -556,7 +666,7 @@ private class AgentGovTriggerHandlerTest {
 
     @IsTest
     static void budgetKeysAreOnlySetWhenBothPartsArePresent() {
-        AgentGov_Budget__c incomplete = new AgentGov_Budget__c(Budget_Date__c = Date.today());
+        AgentGov_Budget__c incomplete = new AgentGov_Budget__c(Budget_Date__c = AgentGovBudgetManager.budgetDate());
 
         AgentGovTriggerHandler.populateBudgetKeys(new List<AgentGov_Budget__c>{ incomplete });
 

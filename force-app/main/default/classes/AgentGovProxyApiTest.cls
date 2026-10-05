@@ -1,11 +1,13 @@
 /**
  * @description Tests for the governed proxy: structured queries, injection resistance,
- *              write validation, policy enforcement, and budget accounting.
+ *              write validation, the order in which a request is validated and governed,
+ *              policy enforcement, access checks, and budget accounting.
  */
 @IsTest
 private class AgentGovProxyApiTest {
     private static final String KEY = 'proxy-test-key-001';
     private static final String MCP_KEY = 'proxy-mcp-key-002';
+    private static final String PROXY_AGENT = 'Proxy Test Agent';
 
     @TestSetup
     static void setup() {
@@ -44,6 +46,28 @@ private class AgentGovProxyApiTest {
         return new Map<String, Object>{ 'field' => field, 'op' => op, 'value' => value };
     }
 
+    private static AgentGov_Registration__c proxyAgent() {
+        return [
+            SELECT Id, Circuit_Breaker_State__c, Status__c, Half_Open_Probe_At__c, Failure_Count__c
+            FROM AgentGov_Registration__c
+            WHERE Agent_Name__c = :PROXY_AGENT
+        ];
+    }
+
+    private static Integer chargedBudgetRows() {
+        return [
+            SELECT COUNT()
+            FROM AgentGov_Budget__c
+            WHERE SOQL_Queries_Consumed__c > 0 OR DML_Operations_Consumed__c > 0 OR API_Calls_Consumed__c > 0
+        ];
+    }
+
+    private static void assertRefused(Integer status, String errorCode, String message, Map<String, Object> result) {
+        Assert.areEqual(status, RestContext.response.statusCode, JSON.serialize(result));
+        Assert.areEqual(errorCode, result.get('errorCode'));
+        Assert.areEqual(message, result.get('message'));
+    }
+
     @IsTest
     static void structuredQueryReturnsRecords() {
         Map<String, Object> body = queryBody('AgentGov_Registration__c', new List<String>{ 'Id', 'Agent_Name__c' });
@@ -70,7 +94,11 @@ private class AgentGovProxyApiTest {
         );
 
         Assert.areEqual(400, RestContext.response.statusCode);
-        Assert.isTrue(String.valueOf(result.get('message')).contains('Raw SOQL'), 'The error explains the migration');
+        Assert.areEqual(
+            AgentGovConstants.ERR_RAW_SOQL_UNSUPPORTED,
+            result.get('message'),
+            'The error explains the migration'
+        );
     }
 
     @IsTest
@@ -162,9 +190,9 @@ private class AgentGovProxyApiTest {
     @IsTest
     static void anUnexpectedFailureUndoesTheWriteAndTheCharge() {
         AgentGovProxyApi.failureAfterWrite = new SimulatedFailureException('Simulated failure after the write.');
-        createOnce();
+        Map<String, Object> result = createOnce();
         Assert.areEqual(500, RestContext.response.statusCode, 'The failure is answered as an internal error');
-        assertCreateUndone('Simulated failure after the write');
+        assertCreateUndone('Simulated failure after the write', result);
     }
 
     @IsTest
@@ -175,14 +203,14 @@ private class AgentGovProxyApiTest {
             AgentGovException.ErrorCode.INTERNAL_ERROR,
             'Simulated ledger failure after the write.'
         );
-        createOnce();
+        Map<String, Object> result = createOnce();
         Assert.areEqual(500, RestContext.response.statusCode, 'The failure is answered as an internal error');
-        assertCreateUndone('Simulated ledger failure after the write');
+        assertCreateUndone('Simulated ledger failure after the write', result);
     }
 
-    private static void createOnce() {
+    private static Map<String, Object> createOnce() {
         Test.startTest();
-        post(
+        Map<String, Object> result = post(
             '/create',
             new Map<String, Object>{
                 'objectName' => 'Account',
@@ -191,9 +219,10 @@ private class AgentGovProxyApiTest {
             KEY
         );
         Test.stopTest();
+        return result;
     }
 
-    private static void assertCreateUndone(String failureText) {
+    private static void assertCreateUndone(String failureText, Map<String, Object> result) {
         Assert.areEqual(
             0,
             [SELECT COUNT() FROM Account WHERE Name = 'Half Written Account'],
@@ -205,15 +234,16 @@ private class AgentGovProxyApiTest {
             'The charge for the undone write is undone too'
         );
         List<AgentGov_Action_Log__c> failures = [
-            SELECT Details__c, Error_Message__c
+            SELECT Details__c, Error_Message__c, Correlation_Id__c
             FROM AgentGov_Action_Log__c
             WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM AND Status__c = :AgentGovConstants.ACTION_FAILURE
         ];
-        Boolean recorded = false;
-        for (AgentGov_Action_Log__c failure : failures) {
-            recorded = recorded || String.valueOf(failure.Error_Message__c).contains(failureText);
-        }
-        Assert.isTrue(recorded, 'The failure itself survives the rollback: ' + JSON.serialize(failures));
+        Assert.areEqual(1, failures.size(), 'One failure leaves exactly one System row: ' + JSON.serialize(failures));
+        Assert.isTrue(
+            String.valueOf(failures[0].Error_Message__c).contains(failureText),
+            'The failure itself survives the rollback: ' + JSON.serialize(failures)
+        );
+        Assert.areEqual(result.get('correlationId'), failures[0].Correlation_Id__c, 'The row is under the request id');
     }
 
     @IsTest
@@ -498,5 +528,418 @@ private class AgentGovProxyApiTest {
         AgentGovProxyApi.doPost();
 
         Assert.areEqual(400, RestContext.response.statusCode);
+    }
+
+    private static List<Map<String, Object>> malformedRequests(Id accountId) {
+        Map<String, Object> notFilterable = queryBody('Account', new List<String>{ 'Id' });
+        notFilterable.put('where', new List<Object>{ condition('Description', '=', 'x') });
+        Map<String, Object> notSortable = queryBody('Account', new List<String>{ 'Id' });
+        notSortable.put('orderBy', new Map<String, Object>{ 'field' => 'Description' });
+        List<Object> sameRecordTwice = new List<Object>{
+            new Map<String, Object>{ 'Id' => accountId, 'Name' => 'First' },
+            new Map<String, Object>{ 'Id' => accountId, 'Name' => 'Second' }
+        };
+        return new List<Map<String, Object>>{
+            new Map<String, Object>{
+                'path' => '/query',
+                'body' => queryBody('Account', new List<String>{ 'No_Such_Field__c' })
+            },
+            new Map<String, Object>{ 'path' => '/query', 'body' => notFilterable },
+            new Map<String, Object>{ 'path' => '/query', 'body' => notSortable },
+            new Map<String, Object>{
+                'path' => '/update',
+                'body' => new Map<String, Object>{ 'objectName' => 'Account', 'records' => sameRecordTwice }
+            },
+            new Map<String, Object>{
+                'path' => '/delete',
+                'body' => new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'ids' => new List<Object>{ accountId, accountId }
+                }
+            },
+            new Map<String, Object>{
+                'path' => '/upsert',
+                'body' => new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'externalIdField' => 'Industry',
+                    'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 'x' } }
+                }
+            },
+            new Map<String, Object>{
+                'path' => '/create',
+                'body' => new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'records' => new List<Object>{
+                        new Map<String, Object>{ 'Name' => new Map<String, Object>{ 'first' => 'x' } }
+                    }
+                }
+            }
+        };
+    }
+
+    @IsTest
+    static void aMalformedRequestLeavesAHalfOpenBreakersProbeForTheNextRequest() {
+        AgentGov_Registration__c agent = proxyAgent();
+        update new AgentGov_Registration__c(
+            Id = agent.Id,
+            Circuit_Breaker_State__c = AgentGovConstants.CB_HALF_OPEN,
+            Status__c = AgentGovConstants.STATUS_THROTTLED,
+            Half_Open_Probe_At__c = null
+        );
+        Account account = new Account(Name = 'Probe Target');
+        insert account;
+
+        Test.startTest();
+        for (Map<String, Object> malformed : malformedRequests(account.Id)) {
+            Map<String, Object> result = post(
+                (String) malformed.get('path'),
+                (Map<String, Object>) malformed.get('body'),
+                KEY
+            );
+            Assert.areEqual(400, RestContext.response.statusCode, malformed.get('path') + ' ' + JSON.serialize(result));
+            AgentGov_Registration__c waiting = proxyAgent();
+            Assert.areEqual(AgentGovConstants.CB_HALF_OPEN, waiting.Circuit_Breaker_State__c);
+            Assert.isNull(waiting.Half_Open_Probe_At__c, 'A malformed request never claims the probe: ' + result);
+        }
+        Map<String, Object> probe = post('/query', queryBody('Account', new List<String>{ 'Id' }), KEY);
+        Test.stopTest();
+
+        Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(probe));
+        AgentGov_Registration__c closed = proxyAgent();
+        Assert.areEqual(
+            AgentGovConstants.CB_CLOSED,
+            closed.Circuit_Breaker_State__c,
+            'The first well-formed request was the probe, and its success closed the breaker'
+        );
+        Assert.areEqual(AgentGovConstants.STATUS_ACTIVE, closed.Status__c);
+        AgentGov_Budget__c budget = [
+            SELECT SOQL_Queries_Consumed__c, DML_Operations_Consumed__c
+            FROM AgentGov_Budget__c
+            WHERE Agent_Registration__c = :agent.Id
+        ];
+        Assert.areEqual(1, budget.SOQL_Queries_Consumed__c, 'Only the probe was charged');
+        Assert.areEqual(0, budget.DML_Operations_Consumed__c, 'No malformed write was charged');
+        Assert.areEqual(
+            0,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE Agent_Registration__c = :agent.Id AND Status__c != :AgentGovConstants.ACTION_SUCCESS
+            ],
+            'A malformed request leaves no audit row'
+        );
+        Assert.areEqual('Probe Target', [SELECT Name FROM Account WHERE Id = :account.Id].Name);
+    }
+
+    @IsTest
+    static void aMalformedRequestLeavesAnOpenBreakerForTheNextRequest() {
+        AgentGov_Registration__c agent = proxyAgent();
+        update new AgentGov_Registration__c(
+            Id = agent.Id,
+            Circuit_Breaker_State__c = AgentGovConstants.CB_OPEN,
+            Status__c = AgentGovConstants.STATUS_BLOCKED,
+            Cooldown_Until__c = DateTime.now().addMinutes(-5)
+        );
+
+        post('/query', queryBody('Account', new List<String>{ 'No_Such_Field__c' }), KEY);
+
+        Assert.areEqual(400, RestContext.response.statusCode);
+        AgentGov_Registration__c untouched = proxyAgent();
+        Assert.areEqual(AgentGovConstants.CB_OPEN, untouched.Circuit_Breaker_State__c, 'The breaker was not consulted');
+        Assert.areEqual(AgentGovConstants.STATUS_BLOCKED, untouched.Status__c);
+        Assert.isNull(untouched.Half_Open_Probe_At__c);
+    }
+
+    @IsTest
+    static void aQueryTheDatabaseRefusesIsNotChargedAndLeavesTheProbe() {
+        AgentGov_Registration__c agent = proxyAgent();
+        update new AgentGov_Registration__c(
+            Id = agent.Id,
+            Circuit_Breaker_State__c = AgentGovConstants.CB_HALF_OPEN,
+            Status__c = AgentGovConstants.STATUS_THROTTLED,
+            Half_Open_Probe_At__c = null
+        );
+        // Boolean fields take only = and !=. The builder leaves that rule to the database, so
+        // this query passes every check and is refused only when it runs.
+        Map<String, Object> refusedByDatabase = queryBody('Account', new List<String>{ 'Id' });
+        refusedByDatabase.put('where', new List<Object>{ condition('IsDeleted', '<', true) });
+
+        Test.startTest();
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            String.format(AgentGovConstants.ERR_QUERY_NOT_RUN, new List<String>{ 'Account' }),
+            post('/query', refusedByDatabase, KEY)
+        );
+        AgentGov_Registration__c waiting = proxyAgent();
+        Integer chargedAfterRefusal = chargedBudgetRows();
+        AgentGovSelector.clearCache();
+        Map<String, Object> probe = post('/query', queryBody('Account', new List<String>{ 'Id' }), KEY);
+        Test.stopTest();
+
+        Assert.areEqual(AgentGovConstants.CB_HALF_OPEN, waiting.Circuit_Breaker_State__c);
+        Assert.isNull(waiting.Half_Open_Probe_At__c, 'The refused query gave back the probe it had claimed');
+        Assert.areEqual(0, chargedAfterRefusal, 'The refused query was not charged');
+        Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(probe));
+        Assert.areEqual(AgentGovConstants.CB_CLOSED, proxyAgent().Circuit_Breaker_State__c);
+        Assert.areEqual(
+            1,
+            [SELECT SOQL_Queries_Consumed__c FROM AgentGov_Budget__c WHERE Agent_Registration__c = :agent.Id]
+            .SOQL_Queries_Consumed__c
+        );
+    }
+
+    @IsTest
+    static void aFieldTheUserCannotReadIsRefusedBeforeTheQueryIsCharged() {
+        // AgentGov_User reads registrations but not the stored key hash.
+        User reader = AgentGovTestDataFactory.createRestrictedUser(new List<String>{ 'AgentGov_User' });
+        Map<String, Object> selectsHash = queryBody(
+            'AgentGov_Registration__c',
+            new List<String>{ 'Id', 'API_Key_Hash__c' }
+        );
+        Map<String, Object> filtersOnHash = queryBody('AgentGov_Registration__c', new List<String>{ 'Id' });
+        filtersOnHash.put('where', new List<Object>{ condition('API_Key_Hash__c', '=', 'x') });
+        String refusal = String.format(
+            AgentGovConstants.ERR_FIELDS_NOT_ACCESSIBLE,
+            new List<String>{ 'read', 'AgentGov_Registration__c', 'API_Key_Hash__c' }
+        );
+
+        Test.startTest();
+        System.runAs(reader) {
+            assertRefused(403, 'ACCESS_DENIED', refusal, post('/query', selectsHash, KEY));
+            assertRefused(403, 'ACCESS_DENIED', refusal, post('/query', filtersOnHash, KEY));
+        }
+        Test.stopTest();
+
+        Assert.areEqual(0, chargedBudgetRows(), 'A query refused for access is not charged');
+        Assert.areEqual(
+            2,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE
+                    Agent_Registration__c = :proxyAgent().Id
+                    AND Action_Type__c = :AgentGovConstants.ACTION_QUERY
+                    AND Status__c = :AgentGovConstants.ACTION_DENIED
+            ],
+            'Each refusal is audited'
+        );
+    }
+
+    @IsTest
+    static void anObjectTheUserCannotReadIsRefusedBeforeTheQueryIsCharged() {
+        User restricted = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+
+        System.runAs(restricted) {
+            assertRefused(
+                403,
+                'ACCESS_DENIED',
+                String.format(AgentGovConstants.ERR_OBJECT_NOT_ACCESSIBLE, new List<String>{ 'read', 'Account' }),
+                post('/query', queryBody('Account', new List<String>{ 'Id', 'Name' }), KEY)
+            );
+        }
+
+        Assert.areEqual(0, chargedBudgetRows(), 'A query refused for access is not charged');
+    }
+
+    @IsTest
+    static void aDeleteTheUserMayNotMakeIsRefusedBeforeItIsCharged() {
+        Account account = new Account(Name = 'Kept');
+        insert account;
+        User restricted = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+
+        Test.startTest();
+        System.runAs(restricted) {
+            assertRefused(
+                403,
+                'ACCESS_DENIED',
+                String.format(AgentGovConstants.ERR_OBJECT_NOT_ACCESSIBLE, new List<String>{ 'delete', 'Account' }),
+                post(
+                    '/delete',
+                    new Map<String, Object>{ 'objectName' => 'Account', 'ids' => new List<Object>{ account.Id } },
+                    KEY
+                )
+            );
+        }
+        Test.stopTest();
+
+        Assert.areEqual(1, [SELECT COUNT() FROM Account WHERE Id = :account.Id]);
+        Assert.areEqual(0, chargedBudgetRows(), 'A delete refused for access is not charged');
+        AgentGov_Registration__c agent = proxyAgent();
+        Assert.areEqual(0, agent.Failure_Count__c, 'A refusal is not a failure the circuit breaker counts');
+        Assert.areEqual(
+            1,
+            [
+                SELECT COUNT()
+                FROM AgentGov_Action_Log__c
+                WHERE
+                    Agent_Registration__c = :agent.Id
+                    AND Action_Type__c = :AgentGovConstants.ACTION_DELETE
+                    AND Status__c = :AgentGovConstants.ACTION_DENIED
+            ]
+        );
+    }
+
+    @IsTest
+    static void aWriteThatNamesARecordTwiceIsRefusedBeforeAnythingRuns() {
+        Account account = new Account(Name = 'Named Twice');
+        insert account;
+        // The 15-character form names the same record as the 18-character one.
+        String shortId = String.valueOf(account.Id).left(15);
+        List<Object> sameRecordTwice = new List<Object>{
+            new Map<String, Object>{ 'Id' => account.Id, 'Name' => 'First' },
+            new Map<String, Object>{ 'Id' => shortId, 'Name' => 'Second' }
+        };
+        String refusal = String.format(
+            AgentGovConstants.ERR_DUPLICATE_RECORD_ID,
+            new List<String>{ String.valueOf(account.Id) }
+        );
+
+        for (String path : new List<String>{ '/update', '/upsert' }) {
+            assertRefused(
+                400,
+                'INVALID_INPUT',
+                refusal,
+                post(path, new Map<String, Object>{ 'objectName' => 'Account', 'records' => sameRecordTwice }, KEY)
+            );
+        }
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            refusal,
+            post(
+                '/delete',
+                new Map<String, Object>{ 'objectName' => 'Account', 'ids' => new List<Object>{ account.Id, shortId } },
+                KEY
+            )
+        );
+
+        Assert.areEqual('Named Twice', [SELECT Name FROM Account WHERE Id = :account.Id].Name);
+        Assert.areEqual(0, chargedBudgetRows(), 'Nothing was charged');
+    }
+
+    @IsTest
+    static void aNumberForATextFieldIsWrittenAndMatchedAsText() {
+        Map<String, Object> created = post(
+            '/create',
+            new Map<String, Object>{
+                'objectName' => 'Account',
+                'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 12345 } }
+            },
+            KEY
+        );
+        Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(created));
+        Assert.areEqual(1, [SELECT COUNT() FROM Account WHERE Name = '12345']);
+
+        Map<String, Object> query = queryBody('Account', new List<String>{ 'Id', 'Name' });
+        query.put('where', new List<Object>{ condition('Name', '=', 12345) });
+        Map<String, Object> found = post('/query', query, KEY);
+
+        Assert.areEqual(200, RestContext.response.statusCode, JSON.serialize(found));
+        Assert.areEqual(1, found.get('totalSize'));
+    }
+
+    @IsTest
+    static void aValueOfTheWrongJsonTypeIsBadInputNotAnInternalError() {
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ 'objectName' }),
+            post(
+                '/create',
+                new Map<String, Object>{
+                    'objectName' => new List<Object>{ 'Account' },
+                    'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 'x' } }
+                },
+                KEY
+            )
+        );
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ 'objectName' }),
+            post('/query', new Map<String, Object>{ 'objectName' => 7, 'fields' => new List<String>{ 'Id' } }, KEY)
+        );
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            String.format(AgentGovConstants.ERR_NOT_A_STRING, new List<String>{ 'externalIdField' }),
+            post(
+                '/upsert',
+                new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'externalIdField' => 5,
+                    'records' => new List<Object>{ new Map<String, Object>{ 'Name' => 'x' } }
+                },
+                KEY
+            )
+        );
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            String.format(AgentGovConstants.ERR_VALUE_NOT_SCALAR, new List<String>{ 'STRING' }),
+            post(
+                '/create',
+                new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'records' => new List<Object>{
+                        new Map<String, Object>{ 'Name' => new Map<String, Object>{ 'first' => 'x' } }
+                    }
+                },
+                KEY
+            )
+        );
+        // An audit field no request may set.
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            String.format(AgentGovConstants.ERR_FIELD_NOT_SETTABLE, new List<String>{ 'Account', 'CreatedDate' }),
+            post(
+                '/create',
+                new Map<String, Object>{
+                    'objectName' => 'Account',
+                    'records' => new List<Object>{
+                        new Map<String, Object>{ 'Name' => 'x', 'CreatedDate' => '2026-01-01T00:00:00.000Z' }
+                    }
+                },
+                KEY
+            )
+        );
+
+        Assert.areEqual(0, [SELECT COUNT() FROM Account], 'Nothing was written');
+        Assert.areEqual(
+            0,
+            [SELECT COUNT() FROM AgentGov_Action_Log__c WHERE Action_Type__c = :AgentGovConstants.ACTION_SYSTEM],
+            'No request failed as an internal error'
+        );
+    }
+
+    @IsTest
+    static void aWriteOverTheRequestMaximumIsRefusedBeforeItIsBuilt() {
+        Integer maximum = Limits.getLimitDmlRows();
+        List<Object> ids = new List<Object>();
+        List<Object> records = new List<Object>();
+        for (Integer i = 0; i <= maximum; i++) {
+            ids.add('001000000000001AAA');
+            records.add(new Map<String, Object>());
+        }
+        String refusal = String.format(
+            AgentGovConstants.ERR_TOO_MANY_RECORDS,
+            new List<String>{ String.valueOf(maximum), String.valueOf(maximum + 1) }
+        );
+
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            refusal,
+            post('/delete', new Map<String, Object>{ 'objectName' => 'Account', 'ids' => ids }, KEY)
+        );
+        assertRefused(
+            400,
+            'INVALID_INPUT',
+            refusal,
+            post('/create', new Map<String, Object>{ 'objectName' => 'Account', 'records' => records }, KEY)
+        );
+        Assert.areEqual(0, chargedBudgetRows());
     }
 }

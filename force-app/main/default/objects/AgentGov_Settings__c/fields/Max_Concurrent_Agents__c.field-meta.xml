@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Max_Concurrent_Agents__c</fullName>
     <defaultValue>10</defaultValue>
-    <description>Maximum number of agents that can be active simultaneously</description>
+    <description>Most agents that may be Active at once. Checked only when an agent is activated through the console or AgentGovRegistryService, which refuse an activation that would exceed it. Editing Status directly, or a circuit breaker closing and returning an agent to Active, is not checked.</description>
     <externalId>false</externalId>
     <label>Max Concurrent Agents</label>
     <precision>3</precision>

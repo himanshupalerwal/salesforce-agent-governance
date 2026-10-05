@@ -195,13 +195,40 @@ describe('c-agent-gov-agent-panel', () => {
         const root = element.shadowRoot;
         expect(root.querySelector('.breaker-detail')).toBeNull();
         expect(root.querySelector('.no-budget').textContent).toBe('No usage recorded today.');
-        expect(root.querySelector('.no-session').textContent).toBe(
-            "No live session. The agent's next governed action opens one."
-        );
+        // A deactivated agent is refused before anything opens a session.
+        expect(root.querySelector('.no-session').textContent).toBe('No live session. The agent is deactivated.');
         expect(root.querySelector('.key-prefix').textContent).toBe('No key issued');
         expect(root.querySelector('.key-rotated').textContent).toBe('Never');
         expect(root.querySelector('.bound-user').textContent).toBe('No');
         expect(root.querySelector('.failure-count').textContent).toBe('0');
+    });
+
+    it('shows a key with no stored prefix as issued, and counts one action in the singular', async () => {
+        const element = await mount({
+            ...TRIPPED,
+            apiKeyPrefix: null,
+            hasApiKey: true,
+            sessionActions: 1
+        });
+        const root = element.shadowRoot;
+        expect(root.querySelector('.key-prefix').textContent).toBe(
+            'Issued, with no prefix stored. Rotate it to get one.'
+        );
+        expect(text(root.querySelector('.live-session'))).toBe('Open the live session, 1 action so far.');
+    });
+
+    it('says the next governed action opens a session for an agent that is not deactivated', async () => {
+        const element = await mount({
+            id: 'a1',
+            name: 'Quiet Agent',
+            status: 'Active',
+            breakerState: 'CLOSED',
+            hasApiKey: false
+        });
+        expect(element.shadowRoot.querySelector('.no-session').textContent).toBe(
+            "No live session. The agent's next governed action opens one."
+        );
+        expect(element.shadowRoot.querySelector('.key-prefix').textContent).toBe('No key issued');
     });
 
     it('explains an agent it cannot load, and shows a load error', async () => {

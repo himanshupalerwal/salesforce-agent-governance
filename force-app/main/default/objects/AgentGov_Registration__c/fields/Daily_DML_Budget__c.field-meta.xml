@@ -9,5 +9,5 @@
     <unique>false</unique>
     <externalId>false</externalId>
     <defaultValue>3000</defaultValue>
-    <description>Maximum number of DML statements allowed per day</description>
+    <description>Daily allocation of DML operations: a Governed Proxy write is charged one per record, Apex run through AgentGovContext one per DML statement it issues, and other callers what they authorize or report. Requests are refused once DML usage reaches the Block threshold in AgentGov Limit Config, 95% of this number by default. Copied onto each day's budget row when that row is created, so a change applies from the next budget day.</description>
 </CustomField>

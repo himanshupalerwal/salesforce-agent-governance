@@ -5,20 +5,27 @@
 private class AgentGovDmlTest {
     @IsTest
     static void insertsUpdatesAndDeletesInSystemMode() {
+        // The user holds no access to AgentGov objects, as an Agent User normally does not, so
+        // each write succeeds only in system mode. The rows are checked outside runAs.
+        User restricted = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
         AgentGov_Registration__c reg = AgentGovTestDataFactory.createRegistration('DML Agent', 'Agentforce', false);
 
-        AgentGovDml.insertRecord(reg);
-        Assert.isNotNull(reg.Id);
-
-        reg.Agent_Name__c = 'Renamed';
-        AgentGovDml.updateRecord(reg);
+        System.runAs(restricted) {
+            AgentGovDml.insertRecord(reg);
+            reg.Agent_Name__c = 'Renamed';
+            AgentGovDml.updateRecord(reg);
+        }
         Assert.areEqual(
             'Renamed',
-            [SELECT Agent_Name__c FROM AgentGov_Registration__c WHERE Id = :reg.Id].Agent_Name__c
+            [SELECT Agent_Name__c FROM AgentGov_Registration__c WHERE Id = :reg.Id].Agent_Name__c,
+            'The insert and the update succeed without object access'
         );
 
-        List<Database.DeleteResult> deleted = AgentGovDml.deleteRecords(new List<SObject>{ reg }, true);
-        Assert.isTrue(deleted[0].isSuccess());
+        List<Database.DeleteResult> deleted;
+        System.runAs(restricted) {
+            deleted = AgentGovDml.deleteRecords(new List<SObject>{ reg }, true);
+        }
+        Assert.isTrue(deleted[0].isSuccess(), 'The delete succeeds without object access');
         Assert.areEqual(0, [SELECT COUNT() FROM AgentGov_Registration__c]);
 
         Assert.isTrue(AgentGovDml.insertRecords(null, true).isEmpty());
@@ -70,5 +77,22 @@ private class AgentGovDmlTest {
             }
         );
         Assert.isTrue(results[0].isSuccess());
+    }
+
+    @IsTest
+    static void aUserWithoutCreateOnTheEventIsRefusedWithAFailedResult() {
+        // Publishing is the one write here that runs as the user. The fallbacks in
+        // AgentGovTriggerHandler that write the audit rows and deliver alerts directly depend
+        // on this refusal, and on its arriving as a failed result rather than an exception.
+        User restricted = AgentGovTestDataFactory.createRestrictedUser(new List<String>());
+        List<Database.SaveResult> results;
+        System.runAs(restricted) {
+            results = AgentGovDml.publishEvents(
+                new List<SObject>{
+                    new AgentGov_Alert__e(Agent_Name__c = 'x', Alert_Type__c = AgentGovConstants.ALERT_WARNING)
+                }
+            );
+        }
+        Assert.isFalse(results[0].isSuccess(), 'A user without Create on the event is refused the publish');
     }
 }

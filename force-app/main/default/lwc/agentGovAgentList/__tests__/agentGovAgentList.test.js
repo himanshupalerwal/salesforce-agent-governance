@@ -188,6 +188,21 @@ describe('c-agent-gov-agent-list', () => {
         expect(names(element)).toEqual(['Order Sync Agent']);
     });
 
+    it('clears the search on a drill-down that names the filter already selected', async () => {
+        const element = await mount('attention');
+        const search = element.shadowRoot.querySelector('lightning-input.search');
+        search.dispatchEvent(new CustomEvent('change', { detail: { value: 'flow' } }));
+        await flushPromises();
+        expect(names(element)).toEqual(['Renewal Forecast Flow']);
+
+        // The console sends the same filter again with a new focus request.
+        element.filter = 'attention';
+        element.focusRequest = 1;
+        await flushPromises();
+        expect(names(element)).toEqual(['Case Triage Agent', 'Order Sync Agent', 'Renewal Forecast Flow']);
+        expect(element.shadowRoot.querySelector('lightning-input.search').value).toBe('');
+    });
+
     it('sorts each column by its underlying value, with blanks last', async () => {
         const element = await mount();
         const datatable = element.shadowRoot.querySelector('lightning-datatable');

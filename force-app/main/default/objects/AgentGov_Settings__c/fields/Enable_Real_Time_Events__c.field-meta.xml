@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Enable_Real_Time_Events__c</fullName>
     <defaultValue>true</defaultValue>
-    <description>Enable Platform Event publishing for real-time monitoring</description>
+    <description>Publishes AgentGov_Action_Event__e and AgentGov_Alert__e, which drive the console's live refresh and every alert. Unchecked, action logs are written directly instead, but the console no longer refreshes on its own and no alert is recorded or emailed, to the administrator or to agent owners.</description>
     <externalId>false</externalId>
     <label>Enable Real Time Events</label>
     <trackTrending>false</trackTrending>

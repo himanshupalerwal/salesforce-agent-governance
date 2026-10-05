@@ -113,13 +113,11 @@
                                     data-object="AgentGov_Session__c"
                                     onclick={handleRecordLink}
                                     >Open the live session</a
-                                >, {session.actions} actions so far.
+                                >, {session.actions} so far.
                             </p>
                         </template>
                         <template lwc:else>
-                            <p class="ag-meta no-session">
-                                No live session. The agent's next governed action opens one.
-                            </p>
+                            <p class="ag-meta no-session">{noSessionText}</p>
                         </template>
                     </section>
 

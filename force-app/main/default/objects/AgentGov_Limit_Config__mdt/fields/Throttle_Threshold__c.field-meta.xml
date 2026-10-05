@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Throttle_Threshold__c</fullName>
     <defaultValue>90</defaultValue>
-    <description>Percentage threshold for throttling</description>
+    <description>Whole percentage of the daily allocation at which this limit type turns the agent's budget status to Throttled and raises a Throttle alert. Requests are still allowed; they are refused from the Block threshold.</description>
     <externalId>false</externalId>
     <fieldManageability>DeveloperControlled</fieldManageability>
     <label>Throttle Threshold</label>

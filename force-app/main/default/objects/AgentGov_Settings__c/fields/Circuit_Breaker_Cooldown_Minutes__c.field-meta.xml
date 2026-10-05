@@ -2,7 +2,7 @@
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Circuit_Breaker_Cooldown_Minutes__c</fullName>
     <defaultValue>30</defaultValue>
-    <description>Minutes to wait before testing recovery</description>
+    <description>Minutes an Open breaker refuses the agent before it admits a single probe request; outcomes reported meanwhile do not restart the wait. A failed probe reopens the breaker for twice this. Both waits are capped at 1440 minutes. A probe that reports no outcome within this time is treated as abandoned and another is admitted.</description>
     <externalId>false</externalId>
     <label>Circuit Breaker Cooldown Minutes</label>
     <precision>5</precision>

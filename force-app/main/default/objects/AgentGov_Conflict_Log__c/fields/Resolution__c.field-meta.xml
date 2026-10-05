@@ -5,7 +5,7 @@
     <type>Picklist</type>
     <required>true</required>
     <externalId>false</externalId>
-    <description>How the conflict was resolved</description>
+    <description>How the conflict was resolved: Agent 1 Won (the requesting agent took the record), Agent 2 Won (the agent that claimed it first kept it), or Failed (an agent Id matched no registration). The framework no longer writes Queued; the value remains for records from earlier releases.</description>
     <valueSet>
         <restricted>true</restricted>
         <valueSetDefinition>

@@ -4,7 +4,7 @@
     <label>Agent 1</label>
     <type>Lookup</type>
     <externalId>false</externalId>
-    <description>The first agent involved in the conflict</description>
+    <description>The agent whose request found the record already claimed by another agent in the same transaction. Agent 1 Won means its better priority (a lower number) took the record over.</description>
     <referenceTo>AgentGov_Registration__c</referenceTo>
     <relationshipLabel>Conflicts as Agent 1</relationshipLabel>
     <relationshipName>Conflicts_as_Agent_1</relationshipName>

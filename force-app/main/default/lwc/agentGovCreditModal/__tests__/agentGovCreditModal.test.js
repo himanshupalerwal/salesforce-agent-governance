@@ -35,11 +35,18 @@ describe('c-agent-gov-credit-modal', () => {
     }
 
     it('credits the chosen limit and closes with the outcome', async () => {
-        const outcome = { recordId: 'a1', success: true, message: "Credited 50 SOQL queries to today's budget." };
+        const outcome = {
+            recordId: 'a1',
+            success: true,
+            message: "Credited 30 SOQL queries to today's budget, bringing its SOQL query usage to zero."
+        };
         creditBudget.mockResolvedValue(outcome);
         const { element, closed } = mount();
         await flushPromises();
 
+        expect(element.shadowRoot.querySelector('.credit-intro').textContent.replace(/\s+/g, ' ').trim()).toBe(
+            "Give usage back to today's budget for Case Triage Agent, for example after an incident is resolved. Today is the current day in the org's time zone. Usage never goes below zero, and the budget status is worked out again from the corrected usage."
+        );
         const combobox = element.shadowRoot.querySelector('lightning-combobox');
         expect(combobox.options.map((option) => option.value)).toEqual(['API_Calls', 'SOQL_Queries', 'DML_Operations']);
         combobox.dispatchEvent(new CustomEvent('change', { detail: { value: 'SOQL_Queries' } }));
@@ -78,7 +85,7 @@ describe('c-agent-gov-credit-modal', () => {
         creditBudget.mockResolvedValueOnce({
             recordId: 'a1',
             success: false,
-            message: 'The budget could not be credited.'
+            message: 'Nothing was credited: no API calls have been used today.'
         });
         const { element, closed } = mount();
         await flushPromises();
@@ -88,7 +95,7 @@ describe('c-agent-gov-credit-modal', () => {
         element.shadowRoot.querySelector('.submit-button').click();
         await flushPromises();
         expect(element.shadowRoot.querySelector('.error-message').textContent).toBe(
-            'The budget could not be credited.'
+            'Nothing was credited: no API calls have been used today.'
         );
         expect(closed).not.toHaveBeenCalled();
 

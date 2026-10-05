@@ -16,9 +16,10 @@ private class AgentGovDailyResetTest {
         new AgentGovDailyReset().execute(null);
         Test.stopTest();
 
+        Date orgToday = AgentGovBudgetManager.budgetDate();
         Assert.areEqual(
             1,
-            [SELECT COUNT() FROM AgentGov_Budget__c WHERE Budget_Date__c = TODAY],
+            [SELECT COUNT() FROM AgentGov_Budget__c WHERE Budget_Date__c = :orgToday],
             'Running twice does not duplicate rows'
         );
     }
@@ -26,9 +27,13 @@ private class AgentGovDailyResetTest {
     @IsTest
     static void jobCanBeScheduled() {
         Test.startTest();
-        String jobId = System.schedule('AgentGov Daily Reset Test', '0 0 0 * * ?', new AgentGovDailyReset());
+        Id jobId = System.schedule('AgentGov Daily Reset Test', '0 0 0 * * ?', new AgentGovDailyReset());
         Test.stopTest();
 
-        Assert.isNotNull(jobId);
+        Assert.areEqual(
+            '0 0 0 * * ?',
+            [SELECT CronExpression FROM CronTrigger WHERE Id = :jobId].CronExpression,
+            'The documented System.schedule call schedules the midnight run'
+        );
     }
 }

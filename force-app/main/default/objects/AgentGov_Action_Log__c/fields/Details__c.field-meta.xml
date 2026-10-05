@@ -6,6 +6,6 @@
     <length>131072</length>
     <visibleLines>5</visibleLines>
     <externalId>false</externalId>
-    <description>JSON payload of action details</description>
+    <description>What happened, in words: the reason for a refusal, how many records a proxy request returned or wrote, an alert's summary, an administrator's change, a framework event, or the details a Flow passed to Log Agent Action. Report and Apex rows hold their usage counts as JSON.</description>
     <trackTrending>false</trackTrending>
 </CustomField>

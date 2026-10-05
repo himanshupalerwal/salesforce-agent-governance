@@ -272,13 +272,19 @@ public inherited sharing class AgentGovBudgetManager {
     }
 
     /**
-     * @description Credits consumption back to a budget, for reconciliation when an agent
-     *              used less than it pre-authorized. The status is re-evaluated from the
-     *              corrected usage, so a Blocked budget can return to a lower status.
+     * @description Credits consumption of one limit type back to today's budget, for
+     *              reconciliation when an agent used less than it pre-authorized. Usage never
+     *              goes below zero, so a credit larger than today's usage brings it to zero, and
+     *              a null or negative amount credits nothing. The status is re-evaluated from the
+     *              corrected usage, so a Blocked budget can return to a lower status. Today's row
+     *              is created if needed and stays locked for the rest of the transaction, so a
+     *              credit of zero returns the figures as they stand, and comparing them with the
+     *              figures a later credit returns shows how much that credit removed.
      * @param registrationId The agent registration Id
      * @param limitType One of the AgentGovConstants.LIMIT_* values
      * @param amount Units to credit back
      * @return The budget snapshot after the credit
+     * @throws AgentGovException INVALID_INPUT for a null Id or an unknown limit type, AGENT_NOT_FOUND for an unknown agent
      */
     public static BudgetResult creditBudget(Id registrationId, String limitType, Integer amount) {
         requireId(registrationId);

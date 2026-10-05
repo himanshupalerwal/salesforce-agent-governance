@@ -28,6 +28,6 @@
     </values>
     <values>
         <field>Description__c</field>
-        <value xsi:nil="true"/>
+        <value xsi:type="xsd:string">Example allow policy: MCP External agents may query Account records, and a Governed Proxy /query returns at most 200 of them.</value>
     </values>
 </CustomMetadata>

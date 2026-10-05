@@ -28,6 +28,6 @@
     </values>
     <values>
         <field>Description__c</field>
-        <value xsi:nil="true"/>
+        <value xsi:type="xsd:string">Example deny policy: MCP External agents may not delete Account records. A deny wins over any allow policy that also matches.</value>
     </values>
 </CustomMetadata>

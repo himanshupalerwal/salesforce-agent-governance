@@ -1,8 +1,11 @@
 /**
  * @description Invocable action that reports the resources an agent actually consumed, so
  *              Flows can charge real usage instead of estimates. Bulk-safe: usage for the
- *              same agent across a batch is summed and charged once. Each report is audited
- *              as a Report row, and a report with a negative count is refused.
+ *              same agent across a batch is summed and charged once. A report with usage is
+ *              audited as a Report row: Success, or Denied when it took the agent over budget.
+ *              A report from a deactivated agent is refused and audited as a Denied Report row.
+ *              A report with a negative count is refused and, like a report of no usage,
+ *              leaves no row.
  *
  *              Security posture: with sharing. Budget writes run in system mode through
  *              AgentGovBudgetManager.
@@ -20,7 +23,7 @@ public with sharing class AgentGovReportUsage {
         public Integer dmlStatementsUsed;
         @InvocableVariable(
             label='Correlation ID'
-            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Flow runs batched into one transaction share the first id supplied.'
+            description='Optional. Stored on the audit rows so they can be traced, for example {!$Flow.InterviewGuid}. Every AgentGov action in one transaction uses the id of the first one that ran, or a generated id if it had none.'
         )
         public String correlationId;
     }
@@ -54,8 +57,8 @@ public with sharing class AgentGovReportUsage {
     public static List<Result> reportUsage(List<Request> requests) {
         Map<Id, Map<String, Integer>> consumption = new Map<Id, Map<String, Integer>>();
         Set<Id> readOnlyIds = new Set<Id>();
-        // Negative usage is always malformed. Ignoring it silently let a Flow believe a
-        // correction had been applied; it is now refused, as the REST /report endpoint does.
+        // Negative usage is always malformed, so it is refused, as REST /report refuses it,
+        // rather than ignored, which would let a Flow believe a correction had been applied.
         Set<Integer> rejected = new Set<Integer>();
         // A deactivated agent may not change its own ledger, as REST /report refuses it.
         Set<Integer> deactivated = new Set<Integer>();
@@ -120,7 +123,7 @@ public with sharing class AgentGovReportUsage {
         );
         // Agents that reported nothing, agents whose report pushed them over budget, and every
         // reporting agent during an emergency bypass are read back so the Flow still receives
-        // their current status. The bypass case used to answer "agent not found" instead.
+        // their current status.
         Set<Id> toRead = new Set<Id>(readOnlyIds);
         if (bypassed) {
             toRead.addAll(reportingIds);
