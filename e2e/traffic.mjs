@@ -1,7 +1,7 @@
 /**
  * Drives realistic traffic through a deployed AgentGov so its console shows activity the
- * framework produced itself, rather than rows inserted directly. The UI suite runs after this,
- * and the same traffic prepares an org for a hands-on walkthrough.
+ * framework produced itself, rather than rows inserted directly. The UI suite checks the console
+ * against this traffic, and drives it itself when a run leaves this suite out.
  *
  * The demo agents keep fixed names so repeated runs update the same agents. Each run issues them
  * fresh keys and starts them from a clean state for the day.
@@ -11,7 +11,8 @@ import { ensure, Suite } from './lib/checks.mjs';
 import { quote } from './lib/sf.mjs';
 
 // The names differ from the sample data's (AgentGovSampleData), so a run in an org that loaded
-// it never reuses a sample agent, which would replace its documented key and its type.
+// it never reuses a sample agent, which would replace its documented key, reset its state and
+// priority, and delete its recent budget rows.
 export const DEMO_AGENTS = [
     { name: 'Contact Enrichment Agent', type: 'MCP_External', priority: 2 },
     { name: 'Case Triage Agent', type: 'Custom_Apex', priority: 3, dailyApiBudget: 100 },
@@ -105,7 +106,7 @@ export async function runTrafficSuite(context) {
     });
     const post = (name, path, body) => admin.apexRest('POST', path, { headers: as(name), body });
 
-    await suite.check('T1', 'Demo traffic flows through every entry point', async () => {
+    await suite.check('T1', 'Demo traffic flows through the proxy, /authorize and Register Agent Action', async () => {
         const statuses = [];
         const lead = 'Contact Enrichment Agent';
         statuses.push(

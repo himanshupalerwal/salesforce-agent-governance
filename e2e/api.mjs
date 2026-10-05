@@ -1,11 +1,15 @@
 /**
  * API scenarios. Each one drives the deployed framework over real HTTP the way its callers do,
  * then checks the records the framework left behind. Nothing here calls Apex methods directly
- * except where an administrator would (activating an agent, running a scheduled job now).
+ * except where an administrator would (activating an agent, running a scheduled job now) or an
+ * Apex agent would (measuring a unit of work with AgentGovContext).
  */
 import { createHash, randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { ensure, Suite } from './lib/checks.mjs';
-import { quote, sf, sleep, waitFor } from './lib/sf.mjs';
+import { API_VERSION, quote, sf, sleep, waitFor } from './lib/sf.mjs';
 import { localDate } from './setup.mjs';
 
 // The e2e settings make both the breaker cooldown and the session idle window one minute.
@@ -13,6 +17,66 @@ const COOL_DOWN_WAIT_MS = 75 * 1000;
 const ASYNC_TIMEOUT_MS = 45 * 1000;
 
 const JOB_NAMES = ['AgentGov Daily Reset', 'AgentGov Health Check', 'AgentGov Cleanup'];
+
+// A policy record deployed for check E5 and removed after it.
+const PROBE_POLICY = 'AgentGov_Policy.E2E_Label_Probe';
+
+/**
+ * Deploys a package in Metadata API format. Custom metadata records cannot be written with DML,
+ * so the policy check E5 adds and removes its record this way.
+ * @param {string} targetOrg Org alias
+ * @param {Record<string, string>} files Package-relative path to file content
+ */
+function deployMetadata(targetOrg, files) {
+    const dir = mkdtempSync(join(tmpdir(), 'agentgov-e2e-metadata-'));
+    try {
+        for (const [path, content] of Object.entries(files)) {
+            mkdirSync(dirname(join(dir, path)), { recursive: true });
+            writeFileSync(join(dir, path), content);
+        }
+        sf(['project', 'deploy', 'start', '--metadata-dir', dir, '--target-org', targetOrg, '--wait', '10']);
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+}
+
+function packageXml(members) {
+    const types = members.length
+        ? `    <types>\n${members.map((member) => `        <members>${member}</members>\n`).join('')}` +
+          '        <name>CustomMetadata</name>\n    </types>\n'
+        : '';
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        `<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n${types}    <version>${API_VERSION}</version>\n</Package>\n`
+    );
+}
+
+/** Deploys a deny policy for Contact deletes that names its agent type in the given words. */
+function deployProbePolicy(targetOrg, agentType) {
+    const value = (field, type, content) =>
+        `    <values>\n        <field>${field}</field>\n        <value xsi:type="xsd:${type}">${content}</value>\n    </values>\n`;
+    const record =
+        '<?xml version="1.0" encoding="UTF-8"?>\n' +
+        '<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" ' +
+        'xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">\n' +
+        '    <label>E2E Label Probe</label>\n    <protected>false</protected>\n' +
+        value('Agent_Type__c', 'string', agentType) +
+        value('Is_Allowed__c', 'boolean', 'false') +
+        value('Object_Name__c', 'string', 'Contact') +
+        value('Operation__c', 'string', 'Delete') +
+        '</CustomMetadata>\n';
+    deployMetadata(targetOrg, {
+        'package.xml': packageXml([PROBE_POLICY]),
+        [`customMetadata/${PROBE_POLICY}.md`]: record
+    });
+}
+
+function removeProbePolicy(targetOrg) {
+    deployMetadata(targetOrg, {
+        'package.xml': packageXml([]),
+        'destructiveChanges.xml': packageXml([PROBE_POLICY])
+    });
+}
 
 /**
  * Runs every API scenario and returns the check results.
@@ -137,8 +201,14 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
         return row;
     }
 
+    // Units charged to an agent today for one limit type; 0 before its first charge.
+    async function charged(agent, field) {
+        return (await latestBudget(agent))?.[field] ?? 0;
+    }
+
     const describeResponse = (response) => `${response.status} ${JSON.stringify(response.body).slice(0, 300)}`;
     const outputOf = (response, index = 0) => response.body?.[index]?.outputValues ?? {};
+    const isBadInput = (response) => response.status === 400 && response.body?.errorCode === 'INVALID_INPUT';
 
     // --- A. Registration and credentials -----------------------------------------------------
 
@@ -249,6 +319,82 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
         }
     );
 
+    await suite.check('A8', 'A body value of the wrong JSON type is refused with 400, not a 500', async () => {
+        const attempts = [
+            [
+                '/register agentName',
+                await admin.apexRest('POST', '/agentgov/register', {
+                    body: { agentName: 42, agentType: 'Custom_Apex' }
+                }),
+                'agentName'
+            ],
+            ['/authorize objectName', await authorize(writer, { objectName: 42, operation: 'Query' }), 'objectName'],
+            [
+                'proxy /create objectName',
+                await proxy(writer, '/create', { objectName: ['Account'], records: [{ Name: `E2E Typed ${runId}` }] }),
+                'objectName'
+            ]
+        ];
+        for (const [label, response, field] of attempts) {
+            ensure(isBadInput(response), `${label}: ${describeResponse(response)}`);
+            ensure(
+                response.body.message === `${field} must be a JSON string.`,
+                `${label} answered: ${response.body.message}`
+            );
+        }
+    });
+
+    await suite.check(
+        'A9',
+        'An /authorize recordId that is not a Salesforce Id is refused with 400 and charges nothing',
+        async () => {
+            const before = await charged(writer, 'SOQL_Queries_Consumed__c');
+            const response = await authorize(writer, {
+                objectName: 'Account',
+                operation: 'Query',
+                recordId: 'not-a-record-id'
+            });
+            ensure(isBadInput(response), describeResponse(response));
+            ensure(
+                /Invalid record Id/.test(response.body.message ?? ''),
+                `unexpected wording: ${response.body.message}`
+            );
+            const after = await charged(writer, 'SOQL_Queries_Consumed__c');
+            ensure(after === before, `SOQL consumed moved from ${before} to ${after}`);
+        }
+    );
+
+    await suite.check(
+        'A10',
+        "A deactivated agent's refused /rotate-key is audited as Denied and its key stays in place",
+        async () => {
+            ensure((await registrationOf(retired)).Status__c === 'Inactive', 'the agent from A6 is not deactivated');
+            const response = await admin.apexRest('POST', '/agentgov/rotate-key', {
+                headers: headersFor(retired),
+                body: {}
+            });
+            ensure(
+                response.status === 403 && response.body.errorCode === 'AGENT_NOT_ACTIVE',
+                describeResponse(response)
+            );
+            const denied = await waitFor(
+                async () =>
+                    (await auditRows(retired, "Status__c = 'Denied' AND Action_Type__c = 'System'")).find((row) =>
+                        /Key rotation refused/.test(row.Details__c ?? '')
+                    ),
+                { timeoutMs: ASYNC_TIMEOUT_MS }
+            );
+            ensure(denied, 'no Denied audit row recorded the refused key rotation');
+            const [row] = await admin.query(
+                `SELECT API_Key_Hash__c FROM AgentGov_Registration__c WHERE Id = '${retired.id}'`
+            );
+            ensure(
+                row.API_Key_Hash__c === createHash('sha256').update(retired.key).digest('hex'),
+                'the stored key changed'
+            );
+        }
+    );
+
     // --- B. A governed write through the proxy ----------------------------------------------
 
     const createCorrelation = correlation('B1');
@@ -330,6 +476,123 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
         ensure(createLog && writerSession, 'nothing to compare');
         ensure(createLog.Agent_Session__c === writerSession.Id, `linked to ${createLog.Agent_Session__c}`);
     });
+
+    await suite.check(
+        'B11',
+        'A write that names the same record twice is refused with 400, charges nothing and changes nothing',
+        async () => {
+            ensure(accountIds.length, 'no Account from B1 to target');
+            const target = accountIds[0];
+            const before = await charged(writer, 'DML_Operations_Consumed__c');
+            const update = await proxy(writer, '/update', {
+                objectName: 'Account',
+                records: [
+                    { Id: target, Name: `E2E Renamed ${runId} 1` },
+                    { Id: target, Name: `E2E Renamed ${runId} 2` }
+                ]
+            });
+            ensure(isBadInput(update), `update: ${describeResponse(update)}`);
+            ensure(/appears more than once/.test(update.body.message ?? ''), `update answered: ${update.body.message}`);
+            const removal = await proxy(writer, '/delete', { objectName: 'Account', ids: [target, target] });
+            ensure(isBadInput(removal), `delete: ${describeResponse(removal)}`);
+            const after = await charged(writer, 'DML_Operations_Consumed__c');
+            ensure(after === before, `DML consumed moved from ${before} to ${after}`);
+            const [row] = await admin.query(`SELECT Name FROM Account WHERE Id = '${target}'`);
+            ensure(row?.Name === `E2E Account ${runId} 1`, `the Account is now ${row?.Name ?? 'deleted'}`);
+        }
+    );
+
+    await suite.check(
+        'B12',
+        'A /query condition or sort the database cannot run is refused with 400 and charges nothing',
+        async () => {
+            const before = await charged(writer, 'SOQL_Queries_Consumed__c');
+            // Account.Description is a long text area, which can be neither filtered nor sorted.
+            const attempts = [
+                [
+                    'a condition on a field that cannot be filtered',
+                    { where: [{ field: 'Description', op: '=', value: 'x' }] },
+                    /cannot be used in a where condition/
+                ],
+                [
+                    'a sort on a field that cannot be sorted',
+                    { orderBy: { field: 'Description' } },
+                    /cannot be used to order results/
+                ],
+                [
+                    'LIKE on a number field',
+                    { where: [{ field: 'NumberOfEmployees', op: 'LIKE', value: '1%' }] },
+                    /LIKE works only on single-value text fields/
+                ]
+            ];
+            for (const [label, clauses, wording] of attempts) {
+                const response = await proxy(writer, '/query', {
+                    objectName: 'Account',
+                    fields: ['Id'],
+                    limit: 1,
+                    ...clauses
+                });
+                ensure(isBadInput(response), `${label}: ${describeResponse(response)}`);
+                ensure(wording.test(response.body.message ?? ''), `${label} answered: ${response.body.message}`);
+            }
+            const after = await charged(writer, 'SOQL_Queries_Consumed__c');
+            ensure(after === before, `SOQL consumed moved from ${before} to ${after}`);
+        }
+    );
+
+    await suite.check(
+        'B13',
+        "A /query value is converted to its field's type: a number for a text field, a time for a time field",
+        async () => {
+            const byName = await proxy(writer, '/query', {
+                objectName: 'Account',
+                fields: ['Id', 'Name'],
+                where: [{ field: 'Name', op: '=', value: 12345 }],
+                limit: 1
+            });
+            ensure(
+                byName.status === 200 && byName.body.success === true,
+                `a number for Name: ${describeResponse(byName)}`
+            );
+            // BusinessHours.MondayStartTime is a standard Time field every org has.
+            const byTime = await proxy(writer, '/query', {
+                objectName: 'BusinessHours',
+                fields: ['Id', 'Name'],
+                where: [{ field: 'MondayStartTime', op: '>=', value: '00:00:00.000Z' }],
+                limit: 1
+            });
+            ensure(
+                byTime.status === 200 && byTime.body.success === true,
+                `a time for MondayStartTime: ${describeResponse(byTime)}`
+            );
+        }
+    );
+
+    await suite.check(
+        'B14',
+        'A record value of the wrong JSON type, or for a field no request may set, is refused with 400',
+        async () => {
+            const name = `E2E Typed Record ${runId}`;
+            const before = await charged(writer, 'DML_Operations_Consumed__c');
+            const attempts = [
+                ['an object for Name', { Name: { first: name } }, /JSON object or list is not a valid value/],
+                [
+                    'a value for CreatedDate',
+                    { Name: name, CreatedDate: '2026-01-01T00:00:00.000Z' },
+                    /cannot be set to the value supplied/
+                ]
+            ];
+            for (const [label, record, wording] of attempts) {
+                const response = await proxy(writer, '/create', { objectName: 'Account', records: [record] });
+                ensure(isBadInput(response), `${label}: ${describeResponse(response)}`);
+                ensure(wording.test(response.body.message ?? ''), `${label} answered: ${response.body.message}`);
+            }
+            const created = await admin.query(`SELECT Id FROM Account WHERE Name = ${quote(name)}`);
+            ensure(created.length === 0, `${created.length} Account(s) created`);
+            const after = await charged(writer, 'DML_Operations_Consumed__c');
+            ensure(after === before, `DML consumed moved from ${before} to ${after}`);
+        }
+    );
 
     // --- C. Budget escalation ----------------------------------------------------------------
 
@@ -435,6 +698,28 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
             `returned ${response.body.totalSize} rows; the shipped policy caps at 200`
         );
     });
+
+    const labelled = await register('Label Policy');
+    await activate(labelled);
+    await suite.check(
+        'E5',
+        'A deny policy that names the agent type by the label shown on records is enforced',
+        async () => {
+            // "custom apex" is the label of the stored value Custom_Apex, in another letter case.
+            deployProbePolicy(admin.targetOrg, 'custom apex');
+            try {
+                const refused = await authorize(labelled, { objectName: 'Contact', operation: 'Delete' });
+                ensure(
+                    refused.status === 403 && refused.body.errorCode === 'POLICY_VIOLATION',
+                    describeResponse(refused)
+                );
+                const allowed = await authorize(labelled, { objectName: 'Contact', operation: 'Query' });
+                ensure(allowed.status === 200, `an operation the policy does not name: ${describeResponse(allowed)}`);
+            } finally {
+                removeProbePolicy(admin.targetOrg);
+            }
+        }
+    );
 
     // --- F. Conflicts between agents in one transaction --------------------------------------
 
@@ -599,6 +884,43 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
             ])
         );
         ensure(refused.authorized === false, 'the tripped agent was still authorized');
+    });
+
+    // The pattern the Flow guide recommends: authorize, do the work, log how it went.
+    const flowD = await register('Flow D', 'Flow_Based');
+    await activate(flowD);
+    const flowRequest = (actionType) => ({ registrationId: flowD.id, actionType, objectName: 'Account' });
+    const logFlowOutcome = (status, details) =>
+        admin.action('AgentGovLogAction', [{ ...flowRequest('Update'), status, details }]);
+
+    await suite.check(
+        'G11',
+        'Failures logged after each Register Agent Action authorization trip the breaker',
+        async () => {
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                const granted = outputOf(await admin.action('AgentGovRegisterAction', [flowRequest('Update')]));
+                ensure(granted.authorized === true, `attempt ${attempt} was refused: ${JSON.stringify(granted)}`);
+                const logged = outputOf(await logFlowOutcome('Failure', `attempt ${attempt} failed`));
+                ensure(logged.success === true, JSON.stringify(logged));
+            }
+            const state = await registrationOf(flowD);
+            ensure(
+                state.Circuit_Breaker_State__c === 'OPEN' && state.Status__c === 'Blocked',
+                `breaker ${state.Circuit_Breaker_State__c}, status ${state.Status__c}`
+            );
+        }
+    );
+
+    await suite.check('G12', 'A failure logged while the breaker is open does not push back its retry', async () => {
+        const before = await registrationOf(flowD);
+        ensure(before.Circuit_Breaker_State__c === 'OPEN', `the breaker is ${before.Circuit_Breaker_State__c}`);
+        const logged = outputOf(await logFlowOutcome('Failure', 'logged while the breaker was open'));
+        ensure(logged.success === true, JSON.stringify(logged));
+        const after = await registrationOf(flowD);
+        ensure(
+            after.Cooldown_Until__c === before.Cooldown_Until__c,
+            `the retry time moved from ${before.Cooldown_Until__c} to ${after.Cooldown_Until__c}`
+        );
     });
 
     // --- H. Sessions, first half -------------------------------------------------------------
@@ -790,6 +1112,83 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
         }
     });
 
+    // The agent user holds no Account access at all, so the refusals below name the object.
+    await suite.check(
+        'K7',
+        'A /query on data the agent user may not read is refused with 403 before it is charged, and audited',
+        async () => {
+            const before = await charged(bound, 'SOQL_Queries_Consumed__c');
+            const response = await asAgentUser('/agentgov-proxy/query', {
+                objectName: 'Account',
+                fields: ['Id', 'Name'],
+                where: [{ field: 'Name', op: 'LIKE', value: 'E2E%' }],
+                limit: 1
+            });
+            ensure(response.status === 403 && response.body.errorCode === 'ACCESS_DENIED', describeResponse(response));
+            const message = String(response.body.message ?? '');
+            ensure(/not permitted to read Account/.test(message), `unexpected wording: ${message}`);
+            ensure(!/exception|sObject type|not supported/i.test(message), `platform text leaked: ${message}`);
+            const after = await charged(bound, 'SOQL_Queries_Consumed__c');
+            ensure(after === before, `SOQL consumed moved from ${before} to ${after}`);
+            const [denied] = await waitForAudit(bound, "Status__c = 'Denied' AND Action_Type__c = 'Query'");
+            ensure(denied, 'no Denied/Query audit row appeared for the agent user');
+        }
+    );
+
+    await suite.check(
+        'K8',
+        'A /delete the agent user may not make is refused with 403 before it is charged, and nothing is deleted',
+        async () => {
+            ensure(accountIds.length, 'no Account from B1 to target');
+            const before = await charged(bound, 'DML_Operations_Consumed__c');
+            const response = await asAgentUser('/agentgov-proxy/delete', {
+                objectName: 'Account',
+                ids: [accountIds[0]]
+            });
+            ensure(response.status === 403 && response.body.errorCode === 'ACCESS_DENIED', describeResponse(response));
+            ensure(
+                /not permitted to delete Account/.test(response.body.message ?? ''),
+                `unexpected wording: ${response.body.message}`
+            );
+            const after = await charged(bound, 'DML_Operations_Consumed__c');
+            ensure(after === before, `DML consumed moved from ${before} to ${after}`);
+            const rows = await admin.query(`SELECT Id FROM Account WHERE Id = '${accountIds[0]}'`);
+            ensure(rows.length === 1, 'the Account was deleted');
+        }
+    );
+
+    // The agent user holds no access to the platform events, so its alerts are delivered directly.
+    const alarm = await register('Alarm');
+    await activate(alarm);
+    await suite.check(
+        'K9',
+        "A breaker the agent user's own failures trip is still recorded as an alert, though it cannot publish events",
+        async () => {
+            const since = new Date(Date.now() - 10 * 60 * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                const response = await agentUser.org.apexRest('POST', '/agentgov/report', {
+                    headers: { 'X-AgentGov-Key': alarm.key },
+                    body: { actual: { apiCalls: 0 }, success: false }
+                });
+                ensure(response.status === 200, `report ${attempt}: ${describeResponse(response)}`);
+            }
+            const state = await registrationOf(alarm);
+            ensure(state.Circuit_Breaker_State__c === 'OPEN', `the breaker is ${state.Circuit_Breaker_State__c}`);
+            const [alert] = await waitForAudit(alarm, "Action_Type__c = 'Alert'");
+            ensure(
+                alert && /^Breaker open/.test(alert.Details__c ?? ''),
+                `no breaker Alert row: ${JSON.stringify(alert)}`
+            );
+            // Details__c is long text, which a query cannot filter on, so the rows are matched here.
+            const systemRows = await admin.query(
+                "SELECT Details__c FROM AgentGov_Action_Log__c WHERE Action_Type__c = 'System' " +
+                    `AND CreatedDate >= ${since}`
+            );
+            const notes = systemRows.filter((row) => /^Alerts could not be published/.test(row.Details__c ?? ''));
+            ensure(notes.length >= 1, 'no System row notes that the publish was refused');
+        }
+    );
+
     // --- L. The emergency bypass ----------------------------------------------------------------
 
     const setGovernance = (enabled) =>
@@ -926,11 +1325,115 @@ export async function runApiSuite({ admin, agentUser, orgTimeZone, runId }) {
         );
     });
 
+    await suite.check(
+        'G13',
+        'After the cooldown Register Agent Action admits one probe, and the logged outcome resolves it',
+        async () => {
+            const probe = outputOf(await admin.action('AgentGovRegisterAction', [flowRequest('Query')]));
+            ensure(probe.authorized === true, `the probe was refused: ${JSON.stringify(probe)}`);
+            const waiting = await registrationOf(flowD);
+            ensure(
+                waiting.Circuit_Breaker_State__c === 'HALF_OPEN',
+                `once the probe was authorized the breaker was ${waiting.Circuit_Breaker_State__c}, not HALF_OPEN`
+            );
+            const second = outputOf(await admin.action('AgentGovRegisterAction', [flowRequest('Query')]));
+            ensure(second.authorized === false, 'a second request was admitted while the probe was outstanding');
+            await logFlowOutcome('Success', 'the probe succeeded');
+            const closed = await registrationOf(flowD);
+            ensure(
+                closed.Circuit_Breaker_State__c === 'CLOSED' && closed.Status__c === 'Active',
+                `breaker ${closed.Circuit_Breaker_State__c}, status ${closed.Status__c}`
+            );
+        }
+    );
+
+    await suite.check(
+        'G14',
+        'Register Agent Action refuses an unrecognised action type and audits it against the agent',
+        async () => {
+            const output = outputOf(
+                await admin.action('AgentGovRegisterAction', [
+                    { registrationId: flowA.id, actionType: 'Explode', objectName: 'Account' }
+                ])
+            );
+            ensure(
+                output.authorized === false && /Invalid action type: Explode/.test(output.denialReason ?? ''),
+                JSON.stringify(output)
+            );
+            const [row] = await waitForAudit(flowA, "Action_Type__c = 'System' AND Status__c = 'Denied'");
+            ensure(
+                row && /Explode/.test(`${row.Details__c} ${row.Error_Message__c}`),
+                `no System/Denied row linked to the agent: ${JSON.stringify(row)}`
+            );
+        }
+    );
+
+    // A SOQL allocation of one, so the work's single query takes the agent to Exhausted.
+    const failingApex = await register('Failing Apex');
+    await setFields(failingApex, { Daily_SOQL_Budget__c: 1 });
+    await activate(failingApex);
+    await suite.check(
+        'G15',
+        'Apex work that fails and also exhausts the budget keeps its own error on its audit row',
+        async () => {
+            // The caller catches the work's exception, as Apex agents do, so the transaction commits.
+            await admin.apex(
+                'public class FailingWork implements AgentGovContext.AgentGovAction {\n' +
+                    '    public void execute() {\n' +
+                    '        List<Account> accounts = [SELECT Id FROM Account LIMIT 1];\n' +
+                    "        throw new IllegalArgumentException('E2E work failed');\n" +
+                    '    }\n' +
+                    '}\n' +
+                    'try {\n' +
+                    `    AgentGovContext.executeGoverned('${failingApex.id}', new FailingWork());\n` +
+                    '} catch (IllegalArgumentException expected) {\n' +
+                    "    Assert.areEqual('E2E work failed', expected.getMessage(), 'The work\\'s own exception is rethrown');\n" +
+                    '}'
+            );
+            const [row] = await waitForAudit(failingApex, "Action_Type__c = 'Apex'");
+            ensure(row, 'the failed unit of work left no Apex row');
+            ensure(row.Status__c === 'Failure', `the Apex row is ${row.Status__c}, not Failure`);
+            ensure(
+                /E2E work failed/.test(row.Error_Message__c ?? ''),
+                `the work's error is missing: ${row.Error_Message__c}`
+            );
+            ensure(
+                /over budget/.test(row.Error_Message__c ?? ''),
+                `the budget note is missing: ${row.Error_Message__c}`
+            );
+            const system = await auditRows(failingApex, "Action_Type__c = 'System'");
+            ensure(system.length === 0, `${system.length} System row(s) were written for a charge that succeeded`);
+        }
+    );
+
     await admin.apex('new AgentGovHealthCheck().execute(null);');
 
     await suite.check('D6', 'The health check moves a cooled-down breaker to half-open', async () => {
         const row = await registrationOf(breakerB);
         ensure(row.Circuit_Breaker_State__c === 'HALF_OPEN', `breaker is ${row.Circuit_Breaker_State__c}`);
+    });
+
+    await suite.check('D7', "A malformed request leaves a half-open breaker's probe for the next request", async () => {
+        const breakerState = async () => {
+            const [row] = await admin.query(
+                `SELECT Circuit_Breaker_State__c, Half_Open_Probe_At__c FROM AgentGov_Registration__c WHERE Id = '${breakerB.id}'`
+            );
+            return row;
+        };
+        const before = await breakerState();
+        ensure(
+            before.Circuit_Breaker_State__c === 'HALF_OPEN' && before.Half_Open_Probe_At__c == null,
+            `the breaker from D6 is ${before.Circuit_Breaker_State__c} with its probe claimed at ${before.Half_Open_Probe_At__c}`
+        );
+        const malformed = await proxy(breakerB, '/query', { objectName: 'Account', fields: ['No_Such_Field__c'] });
+        ensure(isBadInput(malformed), describeResponse(malformed));
+        const after = await breakerState();
+        ensure(
+            after.Circuit_Breaker_State__c === 'HALF_OPEN' && after.Half_Open_Probe_At__c == null,
+            `the malformed request left the breaker ${after.Circuit_Breaker_State__c} with its probe claimed at ${after.Half_Open_Probe_At__c}`
+        );
+        const probe = await authorize(breakerB, { objectName: 'Account', operation: 'Query' });
+        ensure(probe.status === 200 && probe.body.authorized === true, `the next request: ${describeResponse(probe)}`);
     });
 
     await suite.check('H4', 'The health check closes a session that has gone idle', async () => {

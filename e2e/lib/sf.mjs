@@ -1,9 +1,12 @@
 /**
  * Salesforce CLI helpers for the end-to-end suite.
  *
- * Every authenticated call is made by the CLI itself (`sf api request rest`), so the harness
- * never holds an access token, a refresh token, or a login URL. The CLI's own credential store
- * stays the only place those live.
+ * Every API call is made by the CLI itself, mostly through `sf api request rest`, so access and
+ * refresh tokens stay in the CLI's own credential store. From CLI 2.136.8 the JSON output the
+ * harness reads holds no token (`sf org display` prints a placeholder instead) unless
+ * SF_TEMP_SHOW_SECRETS is set, so the CLI runs here without that variable. The browser checks
+ * are the exception to the CLI making every call: ui.mjs hands Chromium a single-use login URL
+ * from `sf org open --url-only`, and Chromium then calls the org itself.
  */
 import { execFile as execFileCallback, execFileSync } from 'node:child_process';
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
@@ -18,24 +21,43 @@ const MAX_BUFFER = 256 * 1024 * 1024;
 // this long instead of stalling the whole run.
 const REQUEST_TIMEOUT_MS = 3 * 60 * 1000;
 
+// Commands whose JSON output can run to megabytes: a deploy's results and an anonymous Apex
+// run's debug log. Neither returns a credential.
+const LARGE_OUTPUT_COMMANDS = new Set(['project deploy', 'apex run']);
+
+const CLI_ENV = { ...process.env };
+delete CLI_ENV.SF_TEMP_SHOW_SECRETS;
+
 /** Repository root, so commands such as a source deploy behave the same from any directory. */
 export const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 export const API_VERSION = '67.0';
 
 /**
- * Runs an sf command with --json and returns its raw JSON output. The output goes to a file
- * rather than a pipe: when a command fails, the CLI can exit before a large result is fully
- * written to a pipe, which cut deploy errors off at 8,192 characters.
+ * Runs an sf command with --json and returns its raw JSON output. A deploy or an anonymous Apex
+ * run writes to a temporary file, deleted once read: when a command fails, the CLI can exit
+ * before a large result is fully written to a pipe, which cut deploy errors off at 8,192
+ * characters. Every other command is read from a pipe, so what it returns, a login URL or a
+ * generated password included, is never written to disk.
  * @param {string[]} args Command and flags, without --json
  * @param {string} cwd Directory to run in, which decides the SFDX project for source commands
  */
 export function sfJsonText(args, cwd = REPO_ROOT) {
+    const command = [...args, '--json'];
+    const options = { cwd, env: CLI_ENV, maxBuffer: MAX_BUFFER };
+    if (!LARGE_OUTPUT_COMMANDS.has(args.slice(0, 2).join(' '))) {
+        try {
+            return execFileSync('sf', command, { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+        } catch (error) {
+            // A failed command still writes its JSON envelope, which the caller inspects.
+            return error.stdout ?? '';
+        }
+    }
     const dir = mkdtempSync(join(tmpdir(), 'agentgov-sf-'));
     const outPath = join(dir, 'out.json');
     const fd = openSync(outPath, 'w');
     try {
-        execFileSync('sf', [...args, '--json'], { cwd, stdio: ['ignore', fd, 'pipe'], maxBuffer: MAX_BUFFER });
+        execFileSync('sf', command, { ...options, stdio: ['ignore', fd, 'pipe'] });
     } catch {
         // A failed command still writes its JSON envelope, which the caller inspects.
     } finally {
@@ -124,6 +146,7 @@ export class Org {
         try {
             ({ stdout } = await execFile('sf', args, {
                 cwd: REPO_ROOT,
+                env: CLI_ENV,
                 encoding: 'utf8',
                 maxBuffer: MAX_BUFFER,
                 timeout: REQUEST_TIMEOUT_MS
