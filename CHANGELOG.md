@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Makes what v1.2 shipped work for real agents, proves it end to end in a real org, and turns
 the dashboard into a console an administrator can act from. An audit before this release found
 features that never engaged outside of tests: sessions were never opened, execution time was
-never recorded, and conflict detection could not be reached from any entry point. Those are
+never recorded, and conflict detection could never fire. Those are
 fixed here, and the Agentforce-native work planned for this release moves to v1.4.
 
 Read **Breaking and behavior changes** before upgrading, then follow **Upgrading from v1.2**.
@@ -88,10 +88,13 @@ rehearses this path in a scratch org, and `npm run e2e:upgrade` the path from v1
   the agent's name, status, type, priority, and breaker state (the new
   `AgentGov_Agent_Highlights` compact layout). An org that assigned a record page of its own
   assigns it again after the deploy.
-- **Edit is the only action on Agent Registration records.** The Agent Registration Layout now
-  lists Edit as its only Lightning action, so Delete, Clone, and Change Owner leave the record
-  header on every record page, including one of your own. Add them back to the layout if you
-  use them.
+- **Edit is the only action on AgentGov records.** The Agent Registration, Governor Budget, and
+  Agent Session layouts now list Edit as their only Lightning action, and the action log and
+  conflict log layouts none, so Delete, Clone, Change Owner, and the org's global actions such
+  as New Contact leave the record header on every record page, including one of your own. Add
+  them back to the layouts if you use them.
+- **Agent sessions no longer allow activities.** A session record has no activity timeline, and
+  tasks and events can no longer be related to sessions.
 - **Alert emails are written as sentences.** Each line now reads, for example, "Support
   Agent - Blocked: API calls at 95% of today's budget (95 of 100). 2026-09-28 14:05 GMT", where
   v1.2 wrote "<type> alert for agent <name>: <limit> at <percent>% (<used> of <allocated>) at
@@ -109,45 +112,83 @@ rehearses this path in a scratch org, and `npm run e2e:upgrade` the path from v1
   but now shares the page's one subscription and calls back at most every five seconds with
   the latest event. Custom components that need every event subscribe through
   `lightning/empApi` directly.
-- **Log Agent Action outcomes reach the circuit breaker.** A row logged with the status
-  `Failure` now counts as a failure and one with `Success` as a success, one outcome per agent
-  per batch, so a Flow that logs the outcome of its work trips its breaker after the configured
-  threshold and closes a half-open one with its next success, as REST and proxy agents do. v1.2
-  wrote the row and moved nothing, so a Flow-only agent could never trip its breaker. `Denied`
-  and `Throttled` still count for nothing, and nothing is recorded for a deactivated agent or
-  during the emergency bypass. A Flow that logs `Failure` rows for events that are not the
-  agent's own failures should log them as `Denied` instead.
+- **Flow outcomes reach the circuit breaker through Log Agent Action.** A row logged with the
+  status `Failure` now counts as a failure and one with `Success` as a success, one outcome per
+  agent per batch. A Flow that authorizes with Register Agent Action, does the work, and logs how
+  it went therefore trips its breaker after the configured threshold, and the outcome it logs for
+  a probe closes or re-opens a half-open breaker, as `/report` does for REST agents. v1.2 wrote
+  the row and moved nothing, so a Flow-only agent could never trip its breaker. `Denied` and
+  `Throttled` still count for nothing, and nothing is recorded for a deactivated agent or during
+  the emergency bypass. A Flow that logs `Failure` rows for events that are not the agent's own
+  failures should log them as `Denied` instead.
+- **Register Agent Action no longer records a success when it authorizes.** It counted every
+  authorization as a success before the work had run, so the probe it admitted closed a
+  half-open breaker before its work was done. With Log Agent Action outcomes now counted, it
+  would also have cleared the failures a Flow logged before each authorization, and the breaker
+  could never trip. A Flow that authorizes but never logs an outcome now leaves its probe
+  unresolved: it is admitted one request per cooldown period until it logs a success or someone
+  resets the breaker.
+- **An open circuit breaker ignores outcomes.** An outcome reported while the breaker is OPEN is
+  ignored until the cooldown ends and a probe is admitted, or the breaker is reset. In v1.2 a
+  failure sent to `/report` after the cooldown, before a probe was admitted, re-tripped the
+  breaker and raised another alert; counted the same way, the failures a Flow logs while it is
+  refused would have held its breaker open indefinitely. A failed probe now also counts toward
+  `Failure_Count__c` and sets `Last_Failure__c`.
+- **The governed proxy validates the whole request before it consults the circuit breaker or the
+  policy.** An unknown object or field, a value a field cannot hold, the same record Id twice, a
+  filter or sort a field does not support, or more than 10,000 records or Ids is refused with
+  400 `INVALID_INPUT`. Such a refusal is never charged, leaves no audit row, and no longer uses
+  up a half-open breaker's single probe, which a malformed request used to claim, leaving the
+  agent's next requests refused for a whole cooldown.
+- **A `/query` the calling user may not read is refused before it is charged.** The object and
+  every field the query selects, filters on, or sorts by are checked in user mode first, as
+  writes already were; the refusal is 403 `ACCESS_DENIED` with an audit row, and the SOQL unit
+  is no longer charged. A query the database still refuses for another reason answers 400
+  `INVALID_INPUT` instead of `ACCESS_DENIED`.
+- **`/delete` checks the user's delete permission before charging.** A user without it is
+  refused with 403 `ACCESS_DENIED` and an audit row; v1.2 charged the request, reported a
+  failure for every record, and counted it against the circuit breaker.
+- **`/authorize` refuses a `recordId` that is not a Salesforce record Id** with 400
+  `INVALID_INPUT`, before anything is charged. A longer value used to turn the request's audit
+  row into a rejected `System` row.
 - **Removal of both deprecated credentials moves to v1.4.** The body `apiKey` and the
   `API_Key__c` field stay for now; the deprecation notice and the field's description say so.
 
 ### Added
 
 - **The AgentGov Console** (`agentGovConsole`), a single component with Overview, Agents,
-  Activity, and Conflicts tabs, and a Setup tab for holders of `AgentGov_Operate_Agents`. Overview shows what needs attention, including tripped
-  breakers with when they may retry and a **Reset breaker** button, plus live sessions, recent
-  alerts, and 14-day usage. Agents lists every agent with search, filters, sorting, row actions,
-  and bulk reset, activate, and deactivate. Activity is the action log with filters for status,
-  action type, time window, and correlation id, showing each row's reason and duration. Setup is
-  a checklist of governance, alert email, the three jobs, and policy problems, with a **Schedule
-  jobs** button. Actions are shown only to people with the matching custom permission, confirmed
-  before they run, and reported with their outcome. Key figures are tiles that open the matching
-  list, states are labelled pills, lists load behind placeholders so the page does not jump,
-  times read "5 minutes ago" with the exact time on hover, and long tables scroll inside their
-  frame with the header pinned. The shared look is one stylesheet, `c/agentGovStyles`.
+  Activity, and Conflicts tabs, and a Setup tab for holders of `AgentGov_Operate_Agents`.
+  Overview shows what needs attention, including tripped breakers with when they may retry and a
+  **Reset breaker** button, plus live sessions, recent alerts, and 14-day usage. Agents lists
+  every agent with search, filters, sorting, row actions, and bulk reset, activate, and
+  deactivate. Activity is the action log with filters for status, action type, time window, and
+  correlation id, showing each row's reason and duration. Setup is a checklist of governance,
+  real-time events (it warns when they are off, since no alert is then raised or emailed), alert
+  email, the session idle window in force, the three jobs, and policy problems, with a
+  **Schedule jobs** button. Actions are shown only to people with the matching custom
+  permission, confirmed before they run, and reported with their outcome. Key figures are tiles
+  that open the matching list, states are labelled pills, lists load behind placeholders so the
+  page does not jump, times read "5 minutes ago" with the exact time on hover, and long tables
+  scroll inside their frame with the header pinned. The shared look is one stylesheet,
+  `c/agentGovStyles`.
 - **An agent panel** (`agentGovAgentPanel`) for the Agent Registration record page, headed by
   the agent's name and its state: breaker state and retry time, today's usage, the live session,
   credential details, the actions, recent activity, and usage history. A rotated key is shown
   once in a dialog and cleared when it closes.
 - **Standalone building blocks** for App Builder: `agentGovOverview`, `agentGovAgentList`,
-  `agentGovActivityLog`, `agentGovUsageHistory`, and `agentGovSetupStatus`.
+  `agentGovActivityLog`, `agentGovUsageHistory`, and `agentGovSetupStatus`. Placed on a page of
+  its own, `agentGovOverview` leaves out the links that open the console's tabs.
 - **Administrative actions** through `AgentGovAdminController`: reset circuit breakers,
   activate and deactivate agents, end sessions, credit budgets, rotate API keys, and schedule
   the background jobs. Two new custom permissions gate them on the server,
   `AgentGov_Operate_Agents` and `AgentGov_Manage_Keys`, and the new `AgentGov_Responder`
   permission set grants the first without the second. Each action records an `Admin` row in
   the action log in the same transaction, so a change never stands without its audit row. A
-  credit is described in words in the console's message and its row, for example "Credited 50
-  API calls to today's budget."
+  credit says in the console's message and its row how much it actually credited: usage never
+  goes below zero, so crediting 40 API calls to an agent that has used 30 reads "Credited 30 API
+  calls to today's budget, bringing its API call usage to zero.", and a limit type with no usage
+  today is refused. An agent already in the requested state, or a session that had already
+  ended, is left as it is and gets no audit row.
 - **Complete audit rows.** Every row a governed request writes for an agent now carries the
   request's correlation id (the new `Correlation_Id__c`, indexed), how long the request had
   taken, the session the work was recorded in, and, for a refusal or failure, the reason.
@@ -179,7 +220,16 @@ rehearses this path in a scratch org, and `npm run e2e:upgrade` the path from v1
 - **Read methods for the console** on `AgentGovDashboardController`: `getAgentSummaries`,
   `getAgentSummary`, `getActionLogs` (filtered, and paged on the indexed `CreatedDate` and
   `Id`), `getUsageHistory`
-  (daily usage from the budget rows the framework already keeps), and `getRecentAlerts`.
+  (daily usage from the budget rows the framework already keeps), and `getRecentAlerts`. A
+  summary's `hasApiKey` reports a key with no stored prefix, which the agent panel shows as
+  issued, and each summary carries the agent's own live session.
+- **Public Apex added for integrators**: `AgentGovSessionTracker` and `AgentGovRequestContext`;
+  `AgentGovRegistryService.activateAgents`, `deactivateAgents`, and `terminateSessions`;
+  `AgentGovCircuitBreaker.resetBreakers`; `AgentGovBudgetManager.budgetDate` and the
+  `consumeBudget` and `consumeBudgets` overloads that take an action count;
+  `AgentGovPolicyEngine.resolveAgentType` and `appliesToAgentType`;
+  `AgentGovQueryBuilder.applyRecordCap` and `assertReadable`; and
+  `AgentGovRestResponder.readString`. `docs/api-reference.md` describes each.
 - **An end-to-end test suite** in `e2e/` that drives a real scratch org the way its callers do:
   REST and proxy calls over HTTP, Flow actions through the REST actions endpoint, a restricted
   API-only agent user, and the console in a headless browser as an administrator, an on-call
@@ -205,17 +255,26 @@ rehearses this path in a scratch org, and `npm run e2e:upgrade` the path from v1
   outcome, and severity), where v1.2 showed only the record number. The related lists on an
   agent's record page carry those columns too, newest first. The page layouts include every
   v1.3 field: the three new settings, a session's last activity, end reason, and duration, a
-  budget's peak usage, and a log's correlation id. Budget and session records offer **Edit**
-  as their only action, log and conflict records none, where v1.2 showed the org's global
-  actions such as New Contact. Session records open the new `AgentGov_Session_Record_Page`,
-  assigned as the org default: the session's details with its action log beside them, headed
-  by its agent, status, start, and end reason (the new `AgentGov_Session_Highlights` compact
-  layout), and no activity timeline, which sessions no longer support.
+  budget's peak usage, and a log's correlation id. Session records open the new
+  `AgentGov_Session_Record_Page`, assigned as the org default: the session's details with its
+  action log beside them, headed by its agent, status, start, and end reason (the new
+  `AgentGov_Session_Highlights` compact layout).
 - **Picklists read as words on Salesforce's own pages.** Record details, list views, and reports
   now show Custom Apex, MCP External, Flow Based, Closed, Open, Half-Open, API Call, Flow
   Trigger, Agent 1 Won, and Agent 2 Won rather than the stored values or the old "Agent1 Won"
   and "Agent2 Won" labels. The stored values are unchanged, so code, integrations, and reports
   that filter on them are unaffected.
+- **A policy may name its agent type by the label shown on records.** Policies matched only the
+  stored value, such as `MCP_External`, so a deny policy written with the label an agent's
+  record now shows, MCP External, matched no agent and the action it forbade stayed allowed. The
+  `Agent_Type__c` of a policy now matches the stored value or the label, in any letter case, or
+  `All`, and the console's Setup tab lists a policy whose agent type is blank or names no type.
+- **Actions today counts agent activity only.** The overview's figure (`getTodaysActionCount`)
+  leaves out the `Alert` and `Admin` rows this release adds, and `getRecentConflictLogs` returns
+  at most 200 rows.
+- **The session field `DML_Statements_Used__c` is labelled DML Operations Used**, matching the
+  `DML_Operations` budget unit it records. The API name is unchanged, so reports, list views,
+  and integrations keep working.
 - **The sample data reads like real traffic.** Its three live sessions show as live, its
   escalated budgets and tripped breaker come with the alerts the framework would have raised,
   failed actions carry a reason, every row is created in time order, and its budgets are dated
@@ -225,14 +284,64 @@ rehearses this path in a scratch org, and `npm run e2e:upgrade` the path from v1
   commands, the release checklist, and the list of things that are easy to get wrong, so one
   document says how the code is worked on.
 - **The guides were checked line by line against the code** and corrected where they had
-  drifted. Among other things, the Flow examples now refer to outputs by their API names, the
+  drifted. Among other things: the Flow examples refer to outputs by their API names, and the
+  Flow patterns send every request through Register Agent Action instead of skipping an agent
+  Get Agent Status reports as unhealthy, which kept a tripped agent from ever being probed; the
   policy examples achieve the restrictions they describe (policies allow by default and a
-  matching deny always wins), troubleshooting finds an error's detail by its correlation id,
-  and the documented limits of conflict detection, Flow breaker outcomes, and the emergency
-  bypass match what the framework does.
+  matching deny always wins); troubleshooting finds an error's detail by its correlation id and
+  covers an unknown endpoint path, an unreported probe, and agent users that cannot publish
+  events; the architecture's request lifecycles and circuit breaker state machine follow the
+  code, including the reset from any state; the Apex, REST, and MCP references give the order of
+  every request pipeline, every validation message, and what is charged and audited; and the
+  documented limits of conflict detection, Flow breaker outcomes, and the emergency bypass match
+  what the framework does.
 
 ### Fixed
 
+- **Alerts raised by a user who cannot publish platform events reached no one.** That includes
+  agent and integration users and the users Flows run as. The platform refuses such a publish
+  with a failed result rather than an exception, and only an exception triggered the direct
+  delivery added in v1.2. Refused alerts are now recorded as `Alert` rows and emailed directly,
+  and one `System` row notes the refusal.
+- Register Agent Action recorded a request with an unrecognised or blank action type as a
+  `System` failure row with no agent. The row is now linked to the agent, with action type
+  `System`, status `Denied`, and the reason, as REST records one.
+- When work run through `AgentGovContext.executeGoverned` threw and also took the agent over
+  budget, its `Apex` row became `Denied` and lost the work's error, and a `System` row with no
+  agent wrongly said the usage could not be charged. The row is now a `Failure` that keeps the
+  work's error and notes the budget.
+- The health check could move a breaker to HALF_OPEN just after a failed probe re-opened it,
+  skipping the new cooldown. It now re-checks the cooldown under the row lock.
+- A healthy agent's successful proxy request or `/report` no longer locks its registration after
+  its session, which could deadlock with a deactivation or a new session for the same agent.
+- `/query` treats a number or boolean sent for a text field as text, and accepts time values. A
+  filter on a field that cannot be filtered, a sort on one that cannot be sorted, and LIKE on a
+  field that is not text answer 400 before anything is charged, instead of 403 or 500.
+- A body value of the wrong JSON type, a record value a field cannot hold, a read-only field
+  such as `CreatedDate`, or the same record Id twice in one write answered 500; each now answers
+  400 naming the problem.
+- An unexpected REST or proxy error wrote two `System` rows, one of them empty; it now writes
+  one.
+- `validatePolicies()`, and so the console's Setup tab, reported an operation written in another
+  letter case, such as `delete`, as invalid, although evaluation accepted it.
+- `deleteSampleData()` removed the sample agents even when log rows remained beyond its per-run
+  cap, leaving those rows with no agent. It now removes the agents only once none of their rows
+  remain; run it until it returns 0.
+- `scripts/migrate/dedupe-budgets.apex` held every row of its agent-and-date search in memory,
+  which could exceed the heap limit when duplicates span many agents and dates, and it reported
+  that no duplicates remained when its capped search had stopped short. It now keeps only
+  duplicate rows, merges at most 5,000 per run, and asks to be run again whenever a run reaches
+  a limit.
+- The descriptions shown in Setup match what the framework does: the `AgentGov_Admin` set and
+  the `AgentGov_Operators` group name the console permissions they grant, including key
+  rotation; a policy's record cap and field restrictions apply only through the governed proxy;
+  settings are read at org level only; and the fields for event publishing, thresholds,
+  retention, the circuit breaker, the conflict log's agents, and the action log say what they
+  hold. Fields and the example policies that had no description now have one.
+- The v1.2 dashboard (`agentGovDashboard`) said "Live updates off" while it was still
+  connecting.
+- `scripts/setup/create-scratch-org.sh` opens the AgentGov console; it opened an address
+  Lightning cannot show.
 - **Deactivating an agent refuses it on every governed entry point.** The Flow actions Register
   Agent Action and Report Agent Usage, and `AgentGovContext` in Apex, still accepted a
   deactivated agent whose circuit breaker was closed; only REST and the proxy refused it.
@@ -271,14 +380,16 @@ rehearses this path in a scratch org, and `npm run e2e:upgrade` the path from v1
   throttled refreshes; the budget totals row broke at phone width; one failing data load could
   hide another's error; timestamps ignored the user's Salesforce locale and time zone; statuses
   other than Normal and Warning showed the error icon; the Active Sessions panel disappeared when
-  empty; and refreshing gave no feedback. The dashboard's budget tile is now **Avg Peak Budget
-  Used**, open breakers show when the agent may retry, and agent names link to their records.
+  empty; and refreshing gave no feedback. The dashboard's budget tile is now **Avg peak budget
+  used**, open breakers show when the agent may retry, and agent names link to their records.
 - Tests no longer depend on the Dev Hub's time zone. The restricted test user no longer falls
   back silently to the more privileged Standard User profile, the proxy record-cap test now
   proves the cap, and scheduling tests assert the scheduled expression instead of a non-null Id.
 
 ### Security
 
+- A refused `/rotate-key`, for example from a deactivated agent whose key has leaked, now leaves
+  a `Denied` audit row, as refusals of the other POST endpoints do.
 - Console actions are checked against a custom permission on the server before anything is
   read, act only on agents the user can see in user mode, and are audited in the same
   transaction. `AgentGov_Admin_Access`, which grants read access over REST, grants no action.

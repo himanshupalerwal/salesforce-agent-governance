@@ -65,7 +65,8 @@ Feature requests are welcome! Please use the [Feature Request template](https://
    ./scripts/setup/create-scratch-org.sh
    ```
 
-   This will create a scratch org, deploy the source, assign permission sets, and load sample data.
+   This creates a scratch org with the alias `AgentGov`, deploys the source, assigns the
+   `AgentGov_Admin` permission set, loads the sample data, and opens the AgentGov console.
 
 4. **Install Node dependencies (lint, formatting, LWC tests):**
 
@@ -130,9 +131,9 @@ administrator can observe.
 sf code-analyzer run --workspace force-app --config-file code-analyzer.yml --view detail --severity-threshold 2
 ```
 
-CI runs lint, the Prettier check, Jest and Salesforce Code Analyzer on every push, and the
-Apex tests with the 85% coverage gate when its secret is set. It does not run the end-to-end
-suite. Three notes on the analyzer job:
+CI runs lint, the Prettier check, Jest and Salesforce Code Analyzer on pushes to `main` and on
+pull requests into it, and the Apex tests with the 85% coverage gate when its secret is set. It
+does not run the end-to-end suite. Three notes on the analyzer job:
 
 - The **PMD and CPD engines need a JDK 11 or later**. CI installs Temurin 21; without a
   local JDK those engines report themselves as uninstantiable, which the analyzer counts as
@@ -241,7 +242,8 @@ Follow standard Apex conventions to keep the codebase consistent and readable.
 1. Update `CHANGELOG.md` (Keep a Changelog format; breaking and behaviour changes get
    their own subsection) and `docs/ROADMAP.md`. Replace `Unreleased` in the version heading
    with the release date.
-2. Run `npm run e2e` against a new scratch org and `npm run e2e:upgrade`; both must pass.
+2. Run `npm run e2e` against a new scratch org, and the upgrade rehearsals from both earlier
+   releases, `npm run e2e:upgrade` and `npm run e2e:upgrade -- --from v1.2`; all three must pass.
 3. Bump `version` in `package.json` to match the tag.
 4. Tag `vX.Y.Z`; the release workflow verifies the version, attaches the deployable
    archive, and publishes the CHANGELOG section as the release notes.
@@ -270,7 +272,7 @@ Follow standard Apex conventions to keep the codebase consistent and readable.
 
 ## Questions?
 
-If you have questions about contributing, feel free to open a discussion or reach out by opening an issue with the `question` label.
+If you have questions about contributing, open an issue with the `question` label.
 
 Thank you for helping make AgentGov better!
 

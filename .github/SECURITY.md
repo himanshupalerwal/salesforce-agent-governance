@@ -40,7 +40,8 @@ Support for 1.1.x ended with the release of v1.3.
   stack trace. Everything the request wrote is rolled back, and the response carries a
   correlation id that finds the logged detail in the action log. Every other error is worded by the
   framework: a proxy `ACCESS_DENIED` names the object, or the fields, the calling user may
-  not reach.
+  not reach. The exception is a write's per-record result: each record the database rejects
+  carries the database's own message in `results[].errors`, so the caller can correct it.
 
 ## Recommendations for production
 

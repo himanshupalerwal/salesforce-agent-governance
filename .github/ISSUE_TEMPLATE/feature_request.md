@@ -25,3 +25,7 @@ Describe how this feature would be used in practice.
 ## Additional Context
 
 Any other context, screenshots, or examples.
+
+## Contributing
+
+Would you like to work on this yourself? Say so here, so it can be discussed before you start.

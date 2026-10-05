@@ -51,7 +51,7 @@ Platform modernization and security hardening. See `CHANGELOG.md` for the full l
 
 v1.3 was planned as the Agentforce-native release. An audit before starting found features
 that had shipped but never engaged for real agents: no session was ever opened, execution
-time was never recorded, and conflict detection could not be reached from any entry point.
+time was never recorded, and conflict detection could never fire.
 Building Agentforce integration on top of that would have compounded it, so this release
 repairs the foundation first and proves it in a real org. The Agentforce-native items move
 unchanged to v1.4. The Apex test job in CI still runs only once the repository's
@@ -80,10 +80,10 @@ what proves each change.
 
 ## Engineering debt
 
-- **Reduce Code Analyzer Moderate findings.** 154 remain, chiefly method complexity and long
+- **Reduce Code Analyzer Moderate findings.** 180 remain, chiefly method complexity and long
   parameter lists across the core services (the query builder, budget manager, session
-  tracker, trigger handler, circuit breaker, policy engine and proxy), and hardcoded Ids in
-  test classes. CI gates at High today; the goal is to clear these and raise the gate to
+  tracker, trigger handler, circuit breaker, policy engine, admin controller and proxy), and
+  hardcoded Ids in test classes. CI gates at High today; the goal is to clear these and raise the gate to
   Moderate.
 
 ---

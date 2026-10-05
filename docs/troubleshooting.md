@@ -31,9 +31,9 @@ AgentGov_Registration__c agent = [
 System.debug('Key prefix: ' + agent.API_Key_Prefix__c + ', bound user: ' + agent.Agent_User__c);
 ```
 
-If the key is lost, issue a new one with `AgentGovRegistryService.issueApiKey(agentId)` or **Rotate key** on the agent's record page, which needs the AgentGov Manage Keys permission. `POST /rotate-key` works only for an agent that can still authenticate, by its current key or its bound user.
+If the key is lost, issue a new one with `AgentGovRegistryService.issueApiKey(agentId)` or **Rotate key** on the agent's record page, which needs the AgentGov Manage Keys permission. `POST /rotate-key` works only for an agent that can still authenticate, by its current key or its bound user, and whose status is `Active` or `Throttled`: a deactivated agent cannot rotate its own key, and neither can one its circuit breaker left `Blocked` until the breaker moves to half-open.
 
-**Cause 3: The OAuth user cannot reach the endpoint.** The user the token belongs to needs the **AgentGov_Agent** permission set (class access to the REST resources). It does not need access to AgentGov objects; the framework records its bookkeeping in system mode.
+**Cause 3: The endpoint path is wrong.** A request under `/agentgov/` or `/agentgov-proxy/` for a path AgentGov does not serve is answered with the same `404` and `AGENT_NOT_FOUND` code, with the message `Endpoint not found: ` followed by the path. Check the spelling and the method: `/agentgov/register`, `/authorize`, `/report` and `/rotate-key` take POST, `/agentgov/budget/{id}` and `/health/{id}` take GET, and the `/agentgov-proxy/` endpoints take POST, all under `/services/apexrest`.
 
 ---
 
@@ -59,7 +59,7 @@ System.debug('Status: ' + agent.Status__c);
 // Possible values: Active, Inactive, Throttled, Blocked
 ```
 
-If the agent is `Blocked`, its circuit breaker tripped, and REST and the proxy refuse it until the cooldown ends. `Throttled` means the breaker is half-open. Only the circuit breaker sets these two statuses; budget limits never change an agent's status. See the "Circuit Breaker Stuck in OPEN" section below.
+If the agent is `Blocked`, its circuit breaker tripped; while governance is on, REST and the proxy refuse it until the cooldown ends. `Throttled` means the breaker is half-open. Only the circuit breaker sets these two statuses; budget limits never change an agent's status. See the "Circuit Breaker Stuck in OPEN" section below.
 
 ---
 
@@ -71,7 +71,7 @@ Agent runs out of budget and does not recover the next day.
 
 ### How a new day starts
 
-Each day's budget row is created by the agent's first governed call that day, with or without the `AgentGovDailyReset` job. The job only creates the rows at midnight so that they show on the console before agents start work. Days follow the org's default time zone (Setup → Company Information), not the calling user's.
+Each day's budget row is created by the agent's first governed call that day, with or without the `AgentGovDailyReset` job. The job only creates the rows for active agents ahead of time, so that they show on the console before agents start work. It runs at midnight in the time zone of the user who scheduled it, so schedule it as a user in the org's time zone. Days follow the org's default time zone (Setup → Company Information), not the calling user's.
 
 ### Causes and Solutions
 
@@ -95,8 +95,8 @@ Agent is blocked and the circuit breaker is not transitioning to HALF_OPEN even 
 
 ### Causes and Solutions
 
-**Cause 1: Health check job not scheduled, and the agent has not called since the cooldown.**
-The `AgentGovHealthCheck` job moves OPEN breakers to HALF_OPEN once their cooldown expires. Without it, a breaker moves only when the agent next calls. Schedule the jobs with `sf apex run --file scripts/setup/schedule-jobs.apex`, or **Schedule jobs** on the console's Setup tab.
+**Cause 1: Health check job not scheduled, and the agent has not asked to act since the cooldown.**
+The `AgentGovHealthCheck` job moves OPEN breakers to HALF_OPEN once their cooldown expires. Without it, a breaker moves only when the agent next asks to act, through `/authorize`, the proxy or Register Agent Action. Reporting an outcome does not move it: outcomes from Log Agent Action or `/report` are ignored while the breaker is OPEN, so logging a `Success` does not close it. Schedule the jobs with `sf apex run --file scripts/setup/schedule-jobs.apex`, or **Schedule jobs** on the console's Setup tab.
 
 **Cause 2: Cooldown has not actually elapsed.** Check the cooldown timestamp:
 
@@ -107,9 +107,11 @@ System.debug('Current time:   ' + DateTime.now());
 System.debug('CB State:       ' + agent.Circuit_Breaker_State__c);
 ```
 
-Remember: a failed probe reopens the breaker for twice the configured cooldown, at most one day. The longer cooldown does not compound over repeated failed probes.
+Remember: a failed probe reopens the breaker for twice the configured cooldown, at most one day. The longer cooldown does not compound over repeated failed probes, and failures reported while the breaker is OPEN do not extend it.
 
-**Cause 3: The breaker is HALF_OPEN and the probe is outstanding.** Only one request is admitted while HALF_OPEN; others are denied until that probe reports an outcome or one cooldown period passes (`Half_Open_Probe_At__c` shows when it was admitted). If no requests reach the agent at all, the OPEN → HALF_OPEN transition happens through the health check job.
+**Cause 3: The breaker is HALF_OPEN and the probe is outstanding.** Only one request is admitted while HALF_OPEN; others are denied until that probe's outcome is reported or one configured cooldown passes (`Half_Open_Probe_At__c` shows when it was admitted). If no requests reach the agent at all, the OPEN → HALF_OPEN transition happens through the health check job.
+
+**Cause 4: Nobody reports the probe's outcome.** Admitting the probe does not resolve it. The proxy reports its own calls, but an agent that authorizes must report how the work went: a REST agent with `/report` and `"success"`, a Flow with Log Agent Action and `Success` or `Failure`. A Flow that calls Register Agent Action and never logs leaves every probe unresolved, so the agent is admitted once per cooldown period until a success is reported or the breaker is reset. Add a Log Agent Action step after the work.
 
 **Manual Reset:** use **Reset breaker** on the console, which records who reset it, or from Apex:
 
@@ -138,6 +140,7 @@ System.debug('Events enabled: ' + settings.Enable_Real_Time_Events__c);
 Set to `true` if disabled:
 
 ```apex
+AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
 settings.Enable_Real_Time_Events__c = true;
 upsert settings;
 ```
@@ -151,19 +154,21 @@ upsert settings;
 
 **Cause 4: Transaction rollback.** Both AgentGov events are declared `PublishAfterCommit`, so they are delivered only once the publishing transaction commits. If that transaction rolls back, for example because of a later DML exception, the event is never delivered and no log row is written for it. Check the calling code for an exception after the publish.
 
+**Cause 5: The calling user cannot publish.** Events are published as the user who made the call, and publishing needs Create on the event. The user an agent runs as holds only **AgentGov_Agent**, which deliberately grants no access to the events, because on a platform event Create cannot be granted without Read and Read would let one agent watch every other agent's activity. When a publish is refused, the action-log rows are written directly. Alerts are recorded as `Alert` rows and emailed directly to the configured recipients, and a `System` row notes that they could not be published. None of it reaches the event bus, so the action log, not the event stream, is the complete record.
+
 ---
 
 ## Permission Errors
 
 ### Symptom
 
-`INSUFFICIENT_ACCESS` or `FIELD_NOT_ACCESSIBLE` errors when calling AgentGov methods.
+`INSUFFICIENT_ACCESS` or `FIELD_NOT_ACCESSIBLE` errors when calling AgentGov methods, or a REST call refused by the platform before AgentGov answers.
 
 ### Solution
 
 Which access is needed depends on who is calling:
 
-- **The user an agent runs as** needs only the **AgentGov_Agent** permission set. Framework bookkeeping runs in system mode, so no access to AgentGov objects is required. Access to the _customer data_ the agent works with is separate and is enforced in user mode by the proxy: an `ACCESS_DENIED` response names the object or fields the user cannot reach.
+- **The user an agent runs as** needs only the **AgentGov_Agent** permission set, which grants access to the REST resources. Without it the platform refuses the call before any AgentGov code runs, so the response is the platform's own error, with no AgentGov `errorCode` or `correlationId`. Framework bookkeeping runs in system mode, so no access to AgentGov objects is required. Access to the _customer data_ the agent works with is separate and is enforced in user mode by the proxy: an `ACCESS_DENIED` response names the object or fields the user cannot reach.
 - **People using the dashboards** need **AgentGov_User** (read-only) or **AgentGov_Admin**. The dashboard controller runs in user mode and reports the missing permission set in its error message.
 - **On-call staff** who reset breakers, pause agents, end sessions, and credit budgets from the console need **AgentGov_User** plus **AgentGov_Responder**. Responder grants the AgentGov Operate Agents permission but not AgentGov Manage Keys, so key rotation stays with administrators. A console action attempted without the permission fails with `You need the AgentGov Operate Agents permission to do this.` or `You need the AgentGov Manage Keys permission to rotate API keys.`
 - **Administrators** need **AgentGov_Admin**, or the **AgentGov_Operators** group.
@@ -234,7 +239,7 @@ AgentGov_Settings__c settings = AgentGov_Settings__c.getOrgDefaults();
 System.debug('Is_Enabled__c: ' + settings.Is_Enabled__c);
 ```
 
-When no settings record exists the framework defaults to enabled. When `Is_Enabled__c` is explicitly `false`, the circuit breaker, policy engine, budget consumption and conflict detection are bypassed and actions are allowed, with two exceptions: a deactivated agent is still refused everywhere, and over REST and the proxy an agent that its circuit breaker left `Blocked` is refused until the cooldown ends. Auditing continues throughout, so the action log still shows what ran during the bypass.
+When no settings record exists the framework defaults to enabled. When `Is_Enabled__c` is explicitly `false`, the circuit breaker, policy engine, budget consumption and conflict detection are bypassed, and no circuit-breaker outcome is recorded. Every governed action is allowed, including one from an agent its breaker left `Blocked`. Only a deactivated agent is refused: by REST, the proxy, Register Agent Action, Report Agent Usage and `AgentGovContext`. Log Agent Action still records rows for it. Auditing continues throughout, so the action log still shows what ran during the bypass.
 
 Also verify Custom Settings exist:
 
@@ -254,7 +259,7 @@ A REST call returns HTTP 500 with `errorCode` `INTERNAL_ERROR` and a `correlatio
 
 ### Solution
 
-The request's writes and budget charges were undone, so retrying it cannot create anything twice. The exception details are never returned to the caller. They are written to the action log as a `System` entry. Look it up by the correlation id:
+For a POST, the request's writes and budget charges were undone, so retrying it cannot create anything twice. The exception details are never returned to the caller. They are written to the action log as `System` entries. Look them up by the correlation id:
 
 ```apex
 List<AgentGov_Action_Log__c> entries = [
@@ -266,7 +271,7 @@ List<AgentGov_Action_Log__c> entries = [
 
 The console's Activity tab finds the same rows: paste the id into **Correlation id**.
 
-`Error_Message__c` holds the exception type, message, and stack trace. `System` entries also record alert delivery failures, session counter failures, and purge summaries, so reviewing them periodically is worthwhile.
+An unexpected exception leaves one row under the id, whose `Error_Message__c` holds the exception type, message, and stack trace. A failure the framework detected itself, such as a rejected ledger write, leaves one row whose `Error_Message__c` holds its message. `System` entries also record alert delivery failures, session counter failures, and purge summaries, so reviewing them periodically is worthwhile.
 
 ---
 
@@ -286,9 +291,9 @@ fail until you clear them.
 
 ### Solution
 
-Either tick **Allow deployments of components when corresponding Apex jobs are pending or
-in progress** in Setup → Deployment Settings, or remove the jobs, deploy, and schedule them
-again:
+Remove the jobs, deploy, and schedule them again, as the upgrade steps in the guides do. (The
+alternative is to tick **Allow deployments of components when corresponding Apex jobs are
+pending or in progress** in Setup → Deployment Settings.)
 
 ```bash
 sf apex run --file scripts/setup/unschedule-jobs.apex --target-org <alias>
@@ -301,5 +306,5 @@ It also removes copies scheduled under other names, which block the deploy just 
 its log lists every job it removed so that you can recreate your own copies afterwards.
 
 The framework keeps working while the jobs are cancelled. Budgets are created on first use
-and circuit breakers recover when an agent next calls; only the daily reset, the hourly
-health check, and the weekly purge pause.
+and a cooled-down circuit breaker admits its probe when the agent next asks to act; only the
+daily reset, the hourly health check, and the weekly purge pause.
